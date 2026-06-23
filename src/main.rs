@@ -35,6 +35,7 @@ fn main() -> Result<()> {
             password,
             bssid,
             hidden,
+            wep_key_type,
         } => connect::connect_target_with_password(
             &nm,
             &WifiConnectTarget {
@@ -44,6 +45,7 @@ fn main() -> Result<()> {
                 hidden,
             },
             password.as_deref(),
+            wep_key_type,
         )?,
         Command::Rofi {
             timeout,

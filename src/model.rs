@@ -18,6 +18,28 @@ pub(crate) struct ScanStreamOptions {
     pub(crate) cache: bool,
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum WepKeyType {
+    Key,
+    Phrase,
+}
+
+impl WepKeyType {
+    pub(crate) fn nm_value(self) -> u32 {
+        match self {
+            Self::Key => 1,
+            Self::Phrase => 2,
+        }
+    }
+
+    pub(crate) fn nmcli_value(self) -> &'static str {
+        match self {
+            Self::Key => "key",
+            Self::Phrase => "phrase",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WifiDevice {
     pub(crate) path: OwnedObjectPath,
@@ -98,6 +120,10 @@ pub(crate) fn ap_supports_psk(wpa_flags: u32, rsn_flags: u32) -> bool {
     flags & (NM_AP_SEC_KEY_MGMT_PSK | NM_AP_SEC_KEY_MGMT_SAE) != 0
 }
 
+pub(crate) fn ap_uses_wep(flags: u32, wpa_flags: u32, rsn_flags: u32) -> bool {
+    flags & NM_AP_FLAGS_PRIVACY != 0 && wpa_flags == 0 && rsn_flags == 0
+}
+
 fn flags_are_passwordless(flags: u32) -> bool {
     let secret_key_mgmt = NM_AP_SEC_KEY_MGMT_PSK
         | NM_AP_SEC_KEY_MGMT_802_1X
@@ -120,7 +146,8 @@ mod tests {
 
     use super::{
         NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_OWE, NM_AP_SEC_KEY_MGMT_PSK,
-        NM_AP_SEC_KEY_MGMT_SAE, ap_is_passwordless, ap_supports_psk, retry_delay, security_label,
+        NM_AP_SEC_KEY_MGMT_SAE, ap_is_passwordless, ap_supports_psk, ap_uses_wep, retry_delay,
+        security_label,
     };
 
     #[test]
@@ -156,5 +183,12 @@ mod tests {
         assert!(ap_supports_psk(NM_AP_SEC_KEY_MGMT_PSK, 0));
         assert!(ap_supports_psk(0, NM_AP_SEC_KEY_MGMT_SAE));
         assert!(!ap_supports_psk(0, NM_AP_SEC_KEY_MGMT_OWE));
+    }
+
+    #[test]
+    fn wep_detection_requires_privacy_without_wpa_or_rsn() {
+        assert!(ap_uses_wep(NM_AP_FLAGS_PRIVACY, 0, 0));
+        assert!(!ap_uses_wep(0, 0, 0));
+        assert!(!ap_uses_wep(NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_PSK, 0));
     }
 }

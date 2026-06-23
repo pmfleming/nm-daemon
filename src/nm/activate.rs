@@ -5,8 +5,8 @@ use zvariant::{DynamicType, OwnedObjectPath, OwnedValue, Value};
 
 use super::{ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_IFACE, NM_PATH, Nm};
 use crate::model::{
-    AccessPoint, NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, WifiConnectTarget,
-    ap_is_passwordless, ap_supports_psk,
+    AccessPoint, NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, WepKeyType, WifiConnectTarget,
+    ap_is_passwordless, ap_supports_psk, ap_uses_wep,
 };
 
 impl Nm {
@@ -35,9 +35,10 @@ impl Nm {
         &self,
         target: &WifiConnectTarget,
         password: Option<&str>,
+        wep_key_type: Option<WepKeyType>,
     ) -> Result<Option<OwnedObjectPath>> {
         if target.hidden {
-            return self.add_and_activate_hidden_wifi_connection(target, password);
+            return self.add_and_activate_hidden_wifi_connection(target, password, wep_key_type);
         }
 
         let Some((device, ap_path, ap)) = self.visible_access_point_for(
@@ -55,6 +56,11 @@ impl Nm {
                 return Ok(None);
             };
             psk_wifi_connection_settings(&ap, password)?
+        } else if ap_uses_wep(ap.flags, ap.wpa_flags, ap.rsn_flags) {
+            let Some(password) = password else {
+                return Ok(None);
+            };
+            wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key))?
         } else {
             return Ok(None);
         };
@@ -67,12 +73,13 @@ impl Nm {
         &self,
         target: &WifiConnectTarget,
         password: Option<&str>,
+        wep_key_type: Option<WepKeyType>,
     ) -> Result<Option<OwnedObjectPath>> {
         let Some(device) = self.wifi_devices()?.into_iter().next() else {
             return Ok(None);
         };
         self.request_hidden_scan(&device, &target.ssid)?;
-        let settings = hidden_wifi_connection_settings(&target.ssid, password)?;
+        let settings = hidden_wifi_connection_settings(&target.ssid, password, wep_key_type)?;
         self.add_and_activate(&target.ssid, settings, device.path, root_object_path()?)
             .map(Some)
     }
@@ -110,7 +117,8 @@ impl Nm {
             return Ok(false);
         };
         Ok(!ap_is_passwordless(ap.flags, ap.wpa_flags, ap.rsn_flags)
-            && ap_supports_psk(ap.wpa_flags, ap.rsn_flags))
+            && (ap_supports_psk(ap.wpa_flags, ap.rsn_flags)
+                || ap_uses_wep(ap.flags, ap.wpa_flags, ap.rsn_flags)))
     }
 
     pub(crate) fn wifi_activation_status_for(
@@ -180,14 +188,17 @@ fn psk_wifi_connection_settings(ap: &AccessPoint, password: &str) -> Result<Conn
 fn hidden_wifi_connection_settings(
     ssid: &str,
     password: Option<&str>,
+    wep_key_type: Option<WepKeyType>,
 ) -> Result<ConnectionSettings> {
     let mut settings = base_wifi_connection_settings(ssid, true)?;
     if let Some(password) = password {
-        validate_wpa_psk(password)?;
-        settings.insert(
-            "802-11-wireless-security".to_string(),
-            wireless_security_section("wpa-psk", password)?,
-        );
+        let security = if let Some(wep_key_type) = wep_key_type {
+            wep_security_section(password, wep_key_type)?
+        } else {
+            validate_wpa_psk(password)?;
+            wireless_security_section("wpa-psk", password)?
+        };
+        settings.insert("802-11-wireless-security".to_string(), security);
     }
     Ok(settings)
 }
@@ -235,6 +246,18 @@ fn wireless_security_settings(key_mgmt: &str, password: &str) -> Result<Connecti
     Ok(settings)
 }
 
+fn wep_wifi_connection_settings(
+    password: &str,
+    wep_key_type: WepKeyType,
+) -> Result<ConnectionSettings> {
+    let mut settings = ConnectionSettings::new();
+    settings.insert(
+        "802-11-wireless-security".to_string(),
+        wep_security_section(password, wep_key_type)?,
+    );
+    Ok(settings)
+}
+
 fn wireless_security_section(
     key_mgmt: &str,
     password: &str,
@@ -242,6 +265,21 @@ fn wireless_security_section(
     Ok(HashMap::from([
         ("key-mgmt".to_string(), owned_value(key_mgmt.to_string())?),
         ("psk".to_string(), owned_value(password.to_string())?),
+    ]))
+}
+
+fn wep_security_section(
+    password: &str,
+    wep_key_type: WepKeyType,
+) -> Result<HashMap<String, OwnedValue>> {
+    validate_wep_key(password, wep_key_type)?;
+    Ok(HashMap::from([
+        ("key-mgmt".to_string(), owned_value("none".to_string())?),
+        ("wep-key0".to_string(), owned_value(password.to_string())?),
+        (
+            "wep-key-type".to_string(),
+            owned_value(wep_key_type.nm_value())?,
+        ),
     ]))
 }
 
@@ -262,6 +300,22 @@ fn validate_wpa_psk(password: &str) -> Result<()> {
     bail!("WPA-PSK password must be 8-63 characters, or 64 hexadecimal characters")
 }
 
+fn validate_wep_key(password: &str, wep_key_type: WepKeyType) -> Result<()> {
+    match wep_key_type {
+        WepKeyType::Key if wep_key_is_valid(password) => Ok(()),
+        WepKeyType::Key => {
+            bail!("WEP key must be 5 or 13 ASCII characters, or 10 or 26 hexadecimal characters")
+        }
+        WepKeyType::Phrase if (8..=64).contains(&password.len()) => Ok(()),
+        WepKeyType::Phrase => bail!("WEP passphrase must be 8-64 characters"),
+    }
+}
+
+fn wep_key_is_valid(password: &str) -> bool {
+    matches!(password.len(), 5 | 13)
+        || (matches!(password.len(), 10 | 26) && password.chars().all(|ch| ch.is_ascii_hexdigit()))
+}
+
 fn owned_value<T>(value: T) -> Result<OwnedValue>
 where
     T: Into<Value<'static>> + DynamicType,
@@ -275,8 +329,8 @@ fn root_object_path() -> Result<OwnedObjectPath> {
 
 #[cfg(test)]
 mod tests {
-    use super::{psk_key_mgmt, psk_wifi_connection_settings, validate_wpa_psk};
-    use crate::model::{AccessPoint, NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE};
+    use super::{psk_key_mgmt, psk_wifi_connection_settings, validate_wep_key, validate_wpa_psk};
+    use crate::model::{AccessPoint, NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, WepKeyType};
 
     #[test]
     fn psk_wifi_settings_include_password_and_key_mgmt() {
@@ -316,6 +370,16 @@ mod tests {
         assert!(validate_wpa_psk("short").is_err());
         assert!(validate_wpa_psk(&"g".repeat(64)).is_err());
         assert!(validate_wpa_psk(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn wep_validation_matches_nmcli_shape() {
+        assert!(validate_wep_key("abcde", WepKeyType::Key).is_ok());
+        assert!(validate_wep_key("0011223344", WepKeyType::Key).is_ok());
+        assert!(validate_wep_key("abc", WepKeyType::Key).is_err());
+        assert!(validate_wep_key("not-hex-10", WepKeyType::Key).is_err());
+        assert!(validate_wep_key("passphrase", WepKeyType::Phrase).is_ok());
+        assert!(validate_wep_key("short", WepKeyType::Phrase).is_err());
     }
 
     fn test_ap(rsn_flags: u32) -> AccessPoint {

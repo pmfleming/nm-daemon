@@ -149,7 +149,7 @@ Initial rofi behavior:
 2. Render a rescan row.
 3. When rescan is selected, spawn `nm-wifi-rofi scan --stream --cache` in the background.
 4. Keep the UI responsive by reading cached snapshots instead of waiting for scan completion.
-5. Network selection carries selected AP identity, activates saved Wi-Fi profiles, passwordless visible networks, hidden SSIDs, and WPA/WPA2/WPA3-Personal networks over NetworkManager D-Bus first, falls back to `nmcli` for unsupported WEP/enterprise edge cases, and writes connection status into the cache.
+5. Network selection carries selected AP identity, activates saved Wi-Fi profiles, passwordless visible networks, hidden SSIDs, WEP networks, and WPA/WPA2/WPA3-Personal networks over NetworkManager D-Bus first, falls back to `nmcli` for unsupported enterprise edge cases, and writes connection status into the cache.
 6. Progressive scan refresh is exposed while a background scan is running: rescan creates a fresh `scan-session.json`, keeps `latest.json` only for menu startup/fallback, clears the visible list, polls the active NetworkManager AP table while waiting for scan signals, the disabled rescan row shows the same count as the visible network rows, rows are revealed from the active scan session at a 10ms display cadence, `Alt+R` starts/refreshes scanning, and the wrapper uses a rofi timeout custom callback to refresh from cache while the list repopulates.
 7. Later, replace the fallback with staged D-Bus activation.
 
@@ -220,7 +220,7 @@ Actions:
 - default: emit menu
 - `rescan`: request scan, wait for `LastScan`, emit menu
 - `portal`: launch captive portal browser
-- `connect:<ssid>`: use D-Bus activation for saved/passwordless/hidden/PSK networks, with `nmcli` fallback for unsupported edge cases
+- `connect:<ssid>`: use D-Bus activation for saved/passwordless/hidden/WEP/PSK networks, with `nmcli` fallback for unsupported edge cases
 
 ## 11. Optional full D-Bus connection activation
 
@@ -234,7 +234,7 @@ Needed pieces:
 - create new Wi-Fi connection for unknown SSIDs
 - handle secrets/passwords correctly
 
-Current progress: saved Wi-Fi profiles are matched through device `AvailableConnections` when possible and activated with `NetworkManager.ActivateConnection`; rofi row actions carry AP object path/BSSID and activation uses that selected AP; visible passwordless networks use empty/partial `AddAndActivateConnection` settings so NetworkManager infers AP details; hidden SSIDs use targeted `RequestScan({ssids: ...})` plus D-Bus connection creation; OWE is treated as passwordless; WPA/WPA2/WPA3-Personal networks use a rofi/CLI password and `802-11-wireless-security.psk` over `AddAndActivateConnection`; WPA-PSK shape is validated before D-Bus activation; failed newly-created profiles are deleted after activation failure; unsupported WEP/enterprise edge cases still use the `nmcli` fallback until richer D-Bus handling or a secret agent is implemented.
+Current progress: saved Wi-Fi profiles are matched through device `AvailableConnections` when possible and activated with `NetworkManager.ActivateConnection`; rofi row actions carry AP object path/BSSID and activation uses that selected AP; visible passwordless networks use empty/partial `AddAndActivateConnection` settings so NetworkManager infers AP details; hidden SSIDs use targeted `RequestScan({ssids: ...})` plus D-Bus connection creation; OWE is treated as passwordless; WEP key/passphrase settings and WPA/WPA2/WPA3-Personal `802-11-wireless-security.psk` settings are created over `AddAndActivateConnection`; WPA-PSK/WEP key shape is validated before D-Bus activation; failed newly-created profiles are deleted after activation failure; unsupported enterprise edge cases still use the `nmcli` fallback until richer D-Bus handling or a secret agent is implemented.
 
 This is more complex than listing/scanning and should not block the first version.
 

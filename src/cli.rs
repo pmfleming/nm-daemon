@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+use crate::model::WepKeyType;
+
 #[derive(Parser)]
 #[command(name = "nm-wifi-rofi")]
 #[command(about = "NetworkManager D-Bus Wi-Fi helper for rofi")]
@@ -50,6 +52,9 @@ pub(crate) enum Command {
         /// Treat the SSID as hidden and request a targeted scan before connecting.
         #[arg(long)]
         hidden: bool,
+        /// Interpret password as a WEP key or WEP passphrase.
+        #[arg(long, value_enum)]
+        wep_key_type: Option<WepKeyType>,
     },
     /// Emit a rofi script-mode menu backed by cached live-scan snapshots.
     Rofi {

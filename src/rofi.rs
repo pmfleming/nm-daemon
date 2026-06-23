@@ -74,7 +74,8 @@ fn handle_network_action(nm: &Nm, action: &str) -> Result<()> {
     } else {
         None
     };
-    if let Err(err) = crate::connect::connect_target_with_password(nm, &target, password.as_deref())
+    if let Err(err) =
+        crate::connect::connect_target_with_password(nm, &target, password.as_deref(), None)
     {
         eprintln!("warning: {err:#}");
     }
