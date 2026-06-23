@@ -21,10 +21,35 @@ const SETTINGS_PATH: &str = "/org/freedesktop/NetworkManager/Settings";
 const SETTINGS_IFACE: &str = "org.freedesktop.NetworkManager.Settings";
 const SETTINGS_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.Settings.Connection";
 const DEVICE_IFACE: &str = "org.freedesktop.NetworkManager.Device";
+const ACTIVE_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.Connection.Active";
 const AP_IFACE: &str = "org.freedesktop.NetworkManager.AccessPoint";
 const NM_DEVICE_TYPE_WIFI: u32 = 2;
+const NM_DEVICE_STATE_DISCONNECTED: u32 = 30;
+const NM_DEVICE_STATE_ACTIVATED: u32 = 100;
+const NM_DEVICE_STATE_DEACTIVATING: u32 = 110;
+const NM_ACTIVE_CONNECTION_STATE_ACTIVATED: u32 = 2;
 
 type ConnectionSettings = HashMap<String, HashMap<String, OwnedValue>>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct WifiActivationStatus {
+    pub(crate) iface: String,
+    pub(crate) device_state: u32,
+    pub(crate) device_state_reason: (u32, u32),
+    pub(crate) active_connection_state: Option<u32>,
+}
+
+impl WifiActivationStatus {
+    pub(crate) fn activated(&self) -> bool {
+        self.device_state == NM_DEVICE_STATE_ACTIVATED
+            && self.active_connection_state == Some(NM_ACTIVE_CONNECTION_STATE_ACTIVATED)
+    }
+
+    pub(crate) fn terminal_failure_after_progress(&self) -> bool {
+        self.device_state <= NM_DEVICE_STATE_DISCONNECTED
+            || self.device_state >= NM_DEVICE_STATE_DEACTIVATING
+    }
+}
 
 pub(crate) struct Nm {
     conn: Connection,
@@ -139,6 +164,54 @@ impl Nm {
         };
         Ok(!ap_is_passwordless(ap.flags, ap.wpa_flags, ap.rsn_flags)
             && ap_supports_psk(ap.wpa_flags, ap.rsn_flags))
+    }
+
+    pub(crate) fn wifi_activation_status(
+        &self,
+        ssid: &str,
+    ) -> Result<Option<WifiActivationStatus>> {
+        let device = if let Some((device, _ap_path, _ap)) = self.visible_access_point(ssid)? {
+            device
+        } else {
+            let Some(device) = self.wifi_devices()?.into_iter().next() else {
+                return Ok(None);
+            };
+            device
+        };
+        self.device_activation_status(&device).map(Some)
+    }
+
+    fn device_activation_status(&self, device: &WifiDevice) -> Result<WifiActivationStatus> {
+        let device_proxy = self.proxy_path(&device.path, DEVICE_IFACE)?;
+        let device_state = device_proxy
+            .get_property("State")
+            .with_context(|| format!("read State for {}", device.iface))?;
+        let device_state_reason = device_proxy
+            .get_property("StateReason")
+            .with_context(|| format!("read StateReason for {}", device.iface))?;
+        let active_connection_path: OwnedObjectPath = device_proxy
+            .get_property("ActiveConnection")
+            .with_context(|| format!("read ActiveConnection for {}", device.iface))?;
+        let active_connection_state = self.active_connection_state(&active_connection_path);
+        Ok(WifiActivationStatus {
+            iface: device.iface.clone(),
+            device_state,
+            device_state_reason,
+            active_connection_state,
+        })
+    }
+
+    fn active_connection_state(&self, path: &OwnedObjectPath) -> Option<u32> {
+        if path.as_str() == "/" {
+            return None;
+        }
+        self.proxy_path(path, ACTIVE_CONNECTION_IFACE)
+            .and_then(|proxy| {
+                proxy
+                    .get_property("State")
+                    .context("read ActiveConnection State")
+            })
+            .ok()
     }
 
     fn saved_wifi_activation_target(

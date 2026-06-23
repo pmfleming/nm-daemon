@@ -83,11 +83,38 @@ fn activate_with_nmcli_fallback(ssid: &str, password: Option<&str>) -> Result<St
 
 fn wait_for_active_ssid(nm: &Nm, ssid: &str) -> Result<()> {
     let deadline = Instant::now() + ACTIVATION_TIMEOUT;
+    let mut saw_progress = false;
+    let mut last_status = None;
     while Instant::now() < deadline {
         if nm.active_ssid()?.as_deref() == Some(ssid) {
             return Ok(());
         }
+        if let Some(status) = nm.wifi_activation_status(ssid)? {
+            saw_progress |= status.device_state > 30;
+            if status.activated() {
+                return Ok(());
+            }
+            if saw_progress && status.terminal_failure_after_progress() {
+                bail!(
+                    "connection activation failed on {}: device state {}, reason {:?}, active connection state {:?}",
+                    status.iface,
+                    status.device_state,
+                    status.device_state_reason,
+                    status.active_connection_state
+                );
+            }
+            last_status = Some(status);
+        }
         sleep(ACTIVATION_POLL_INTERVAL);
+    }
+    if let Some(status) = last_status {
+        bail!(
+            "timed out waiting for {ssid} to become active on {}: device state {}, reason {:?}, active connection state {:?}",
+            status.iface,
+            status.device_state,
+            status.device_state_reason,
+            status.active_connection_state
+        );
     }
     bail!("timed out waiting for {ssid} to become active")
 }
