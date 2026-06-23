@@ -31,7 +31,11 @@ fn main() -> Result<()> {
             cache,
         } => run_scan(&nm, timeout, stream, strict, retries, cache)?,
         Command::Connect { ssid } => connect::connect_ssid(&nm, &ssid)?,
-        Command::Rofi { timeout, retries } => rofi::run(&nm, timeout, retries)?,
+        Command::Rofi {
+            timeout,
+            retries,
+            rofi_args: _,
+        } => rofi::run(&nm, timeout, retries)?,
         Command::Active => print_active_ssid(&nm)?,
     }
 

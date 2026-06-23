@@ -50,6 +50,9 @@ pub(crate) enum Command {
         /// Background scan request retries when selecting rescan.
         #[arg(long, default_value_t = 2)]
         retries: u32,
+        /// Rofi passes the selected row text as a positional argument on callbacks.
+        #[arg(hide = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        rofi_args: Vec<String>,
     },
     /// Print the active SSID, if any.
     Active,
