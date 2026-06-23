@@ -148,7 +148,8 @@ Initial rofi behavior:
 2. Render a rescan row.
 3. When rescan is selected, spawn `nm-wifi-rofi scan --stream --cache` in the background.
 4. Keep the UI responsive by reading cached snapshots instead of waiting for scan completion.
-5. Later, add connection actions and controlled rofi refresh behavior.
+5. Network selection now calls the initial `nmcli` activation fallback and writes connection status into the cache.
+6. Later, add controlled rofi refresh behavior and replace the fallback with staged D-Bus activation.
 
 ## 7. Parallel integration strategy
 

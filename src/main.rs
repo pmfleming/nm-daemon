@@ -10,6 +10,7 @@ use crate::output::{print_access_points, print_access_points_json};
 
 mod cache;
 mod cli;
+mod connect;
 mod model;
 mod nm;
 mod output;
@@ -29,6 +30,7 @@ fn main() -> Result<()> {
             retries,
             cache,
         } => run_scan(&nm, timeout, stream, strict, retries, cache)?,
+        Command::Connect { ssid } => connect::connect_ssid(&nm, &ssid)?,
         Command::Rofi { timeout, retries } => rofi::run(&nm, timeout, retries)?,
         Command::Active => print_active_ssid(&nm)?,
     }

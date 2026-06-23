@@ -37,6 +37,11 @@ pub(crate) enum Command {
         #[arg(long)]
         cache: bool,
     },
+    /// Connect to an SSID using the current nmcli activation fallback.
+    Connect {
+        /// SSID to connect to.
+        ssid: String,
+    },
     /// Emit a rofi script-mode menu backed by cached live-scan snapshots.
     Rofi {
         /// Background scan timeout in seconds when selecting rescan.

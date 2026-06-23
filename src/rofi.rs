@@ -8,18 +8,39 @@ use crate::model::AccessPoint;
 use crate::nm::Nm;
 
 const ACTION_RESCAN: &str = "rescan";
+const ACTION_STATUS: &str = "status";
+const ACTION_SSID_PREFIX: &str = "ssid:";
 
 pub(crate) fn run(nm: &Nm, timeout: u64, retries: u32) -> Result<()> {
-    if selected_action().as_deref() == Some(ACTION_RESCAN) {
-        start_background_scan(timeout, retries)?;
-        cache::write_status("status", "scan requested in background")?;
-    }
-
+    handle_action(nm, timeout, retries)?;
     emit_menu(nm)
+}
+
+fn handle_action(nm: &Nm, timeout: u64, retries: u32) -> Result<()> {
+    match selected_action().as_deref() {
+        Some(ACTION_RESCAN) => request_background_scan(timeout, retries),
+        Some(ACTION_STATUS) | None => Ok(()),
+        Some(action) => handle_network_action(nm, action),
+    }
 }
 
 fn selected_action() -> Option<String> {
     env::var("ROFI_INFO").ok().filter(|value| !value.is_empty())
+}
+
+fn request_background_scan(timeout: u64, retries: u32) -> Result<()> {
+    start_background_scan(timeout, retries)?;
+    cache::write_status("status", "scan requested in background")
+}
+
+fn handle_network_action(nm: &Nm, action: &str) -> Result<()> {
+    let Some(ssid) = action.strip_prefix(ACTION_SSID_PREFIX) else {
+        return Ok(());
+    };
+    if let Err(err) = crate::connect::connect_ssid(nm, ssid) {
+        eprintln!("warning: {err:#}");
+    }
+    Ok(())
 }
 
 fn start_background_scan(timeout: u64, retries: u32) -> Result<()> {
