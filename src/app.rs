@@ -114,6 +114,7 @@ pub fn run() -> Result<()> {
             with_nm(|nm| actions::print_connectivity_state(nm, json))?
         }
         Command::Active => with_nm(actions::print_active_ssid)?,
+        Command::ContractFixture => crate::contract::print_shelllist_contract_fixture()?,
     }
 
     Ok(())

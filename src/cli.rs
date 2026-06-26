@@ -145,6 +145,9 @@ pub(crate) enum Command {
     },
     /// Print the active SSID, if any.
     Active,
+    /// Print a stable JSON fixture for Shelllist contract tests.
+    #[command(hide = true)]
+    ContractFixture,
 }
 
 #[derive(Subcommand)]
@@ -159,6 +162,20 @@ pub(crate) enum ProfileCommand {
         /// NetworkManager settings object path, from `nm-wifi saved --json`.
         path: String,
         /// true to enable autoconnect, false to disable it.
+        enabled: bool,
+    },
+    /// Set per-profile Wi-Fi MAC privacy.
+    MacRandomization {
+        /// NetworkManager settings object path, from `nm-wifi saved --json`.
+        path: String,
+        /// true uses a stable randomized MAC, false uses the device's permanent MAC.
+        randomized: bool,
+    },
+    /// Enable or disable sending this device's hostname through DHCP for a saved profile.
+    SendHostname {
+        /// NetworkManager settings object path, from `nm-wifi saved --json`.
+        path: String,
+        /// true to send hostname, false to keep device name private.
         enabled: bool,
     },
 }

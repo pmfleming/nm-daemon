@@ -318,16 +318,20 @@ fn unsupported_security_label(security: Option<&str>) -> bool {
 
 fn wait_for_active_target(nm: &Nm, target: &WifiConnectTarget) -> Result<()> {
     tracing::info!(ssid = %target.ssid, "waiting for target Wi-Fi network to become active");
+    let activation_device = nm.wifi_activation_device_for_target(target)?;
+    if let Some(device) = activation_device.as_ref() {
+        tracing::debug!(ssid = %target.ssid, iface = %device.iface, device = %device.path, "cached activation device for wait loop");
+    }
     let deadline = Instant::now() + ACTIVATION_TIMEOUT;
     let mut saw_progress = false;
     let mut possible_failure_since = None;
     let mut last_status = None;
     while Instant::now() < deadline {
-        if nm.active_ssid_matches(target)? {
+        if active_target_matches(nm, activation_device.as_ref(), target)? {
             tracing::info!(ssid = %target.ssid, "target Wi-Fi network is active");
             return Ok(());
         }
-        if let Some(status) = nm.wifi_activation_status_for(target)? {
+        if let Some(status) = activation_status(nm, activation_device.as_ref(), target)? {
             saw_progress |= status.device_state > 30;
             if status.activated() {
                 tracing::debug!(
@@ -382,6 +386,30 @@ fn wait_for_active_target(nm: &Nm, target: &WifiConnectTarget) -> Result<()> {
         ConnectFailureReason::Timeout,
         format!("timed out waiting for {} to become active", target.ssid),
     ))
+}
+
+fn active_target_matches(
+    nm: &Nm,
+    activation_device: Option<&crate::model::WifiDevice>,
+    target: &WifiConnectTarget,
+) -> Result<bool> {
+    if let Some(device) = activation_device {
+        nm.active_ssid_matches_on_device(device, target)
+    } else {
+        nm.active_ssid_matches(target)
+    }
+}
+
+fn activation_status(
+    nm: &Nm,
+    activation_device: Option<&crate::model::WifiDevice>,
+    target: &WifiConnectTarget,
+) -> Result<Option<crate::nm::WifiActivationStatus>> {
+    if let Some(device) = activation_device {
+        nm.wifi_activation_status_for_device(device).map(Some)
+    } else {
+        nm.wifi_activation_status_for(target)
+    }
 }
 
 fn nmcli(args: &[&str]) -> Result<String> {
@@ -486,6 +514,7 @@ mod tests {
             private: false,
             hidden: false,
             security: None,
+            enterprise: None,
         }
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 
 use anyhow::{Context, Result};
 use zvariant::OwnedObjectPath;
@@ -43,30 +44,41 @@ impl Nm {
                 continue;
             };
             return self
-                .access_point(&device.path, &active_path, true)
+                .access_point(&device, &active_path, true)
                 .map(|ap| Some(ap.ssid));
         }
         Ok(None)
     }
 
     pub(crate) fn active_ssid_matches(&self, target: &WifiConnectTarget) -> Result<bool> {
-        let target_ssid = target.ssid_bytes();
         for device in self.wifi_devices_for_target(target)? {
-            let Some(active_path) = self.active_access_point(&device)? else {
-                continue;
-            };
-            let ap = self.access_point(&device.path, &active_path, true)?;
-            if access_point_matches(
-                &ap,
-                target_ssid.as_ref(),
-                target.ap_path.as_deref(),
-                target.bssid.as_deref(),
-            ) {
-                tracing::debug!(ssid = %target.ssid, bssid = %ap.bssid, ap_path = %ap.path, "target access point is active");
+            if self.active_ssid_matches_on_device(&device, target)? {
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    pub(crate) fn active_ssid_matches_on_device(
+        &self,
+        device: &WifiDevice,
+        target: &WifiConnectTarget,
+    ) -> Result<bool> {
+        let Some(active_path) = self.active_access_point(device)? else {
+            return Ok(false);
+        };
+        let ap = self.access_point(device, &active_path, true)?;
+        let target_ssid = target.ssid_bytes();
+        let matches = access_point_matches(
+            &ap,
+            target_ssid.as_ref(),
+            target.ap_path.as_deref(),
+            target.bssid.as_deref(),
+        );
+        if matches {
+            tracing::debug!(ssid = %target.ssid, iface = %device.iface, bssid = %ap.bssid, ap_path = %ap.path, "target access point is active");
+        }
+        Ok(matches)
     }
 
     pub(super) fn visible_access_point_for(
@@ -76,7 +88,7 @@ impl Nm {
         let target_ssid = target.ssid_bytes();
         for device in self.wifi_devices_for_target(target)? {
             for path in self.device_access_points(&device)? {
-                let Ok(ap) = self.access_point(&device.path, &path, false) else {
+                let Ok(ap) = self.access_point(&device, &path, false) else {
                     continue;
                 };
                 if access_point_matches(
@@ -130,7 +142,7 @@ impl Nm {
             let active_path = self.active_access_point(&device)?;
             for path in self.device_access_points(&device)? {
                 let active = active_path.as_ref().is_some_and(|active| *active == path);
-                if let Some(ap) = self.read_visible_access_point(&device.path, &path, active) {
+                if let Some(ap) = self.read_visible_access_point(&device, &path, active) {
                     aps.push(ap);
                 }
             }
@@ -151,7 +163,7 @@ impl Nm {
         let active_path = self.active_access_point(device)?;
         for path in self.device_access_points(device)? {
             let active = active_path.as_ref().is_some_and(|active| *active == path);
-            if let Some(ap) = self.read_visible_access_point(&device.path, &path, active) {
+            if let Some(ap) = self.read_visible_access_point(device, &path, active) {
                 merge_access_point(by_ssid, ap);
             }
         }
@@ -177,11 +189,11 @@ impl Nm {
 
     fn read_visible_access_point(
         &self,
-        device_path: &OwnedObjectPath,
+        device: &WifiDevice,
         path: &OwnedObjectPath,
         active: bool,
     ) -> Option<AccessPoint> {
-        match self.access_point(device_path, path, active) {
+        match self.access_point(device, path, active) {
             Ok(ap) if !ap.ssid.is_empty() => Some(ap),
             Ok(_) => None,
             Err(err) => {
@@ -191,15 +203,9 @@ impl Nm {
         }
     }
 
-    fn device_iface(&self, device_path: &OwnedObjectPath) -> Option<String> {
-        self.proxy_path(device_path, DEVICE_IFACE)
-            .and_then(|device| device.get_property("Interface").context("read Interface"))
-            .ok()
-    }
-
     pub(super) fn access_point(
         &self,
-        device_path: &OwnedObjectPath,
+        device: &WifiDevice,
         path: &OwnedObjectPath,
         active: bool,
     ) -> Result<AccessPoint> {
@@ -213,6 +219,7 @@ impl Nm {
 
         let frequency = ap.get_property("Frequency").unwrap_or(0);
         let mode = ap.get_property("Mode").unwrap_or(0);
+        let last_seen = ap.get_property("LastSeen").unwrap_or(-1);
         Ok(AccessPoint {
             ssid: display_ssid(&ssid_bytes),
             ssid_hex: ssid_hex(&ssid_bytes),
@@ -229,10 +236,11 @@ impl Nm {
             wpa_flags_label: security_flags_label(wpa_flags),
             rsn_flags_label: security_flags_label(rsn_flags),
             bssid: ap.get_property("HwAddress").unwrap_or_default(),
-            last_seen: ap.get_property("LastSeen").unwrap_or(-1),
+            last_seen,
+            last_seen_age_ms: access_point_last_seen_age_ms(last_seen),
             path: path.to_string(),
-            device_path: device_path.to_string(),
-            device_iface: self.device_iface(device_path).unwrap_or_default(),
+            device_path: device.path.to_string(),
+            device_iface: device.iface.clone(),
             flags,
             wpa_flags,
             rsn_flags,
@@ -309,6 +317,20 @@ fn sort_access_points_nmcli_like(aps: &mut [AccessPoint]) {
     });
 }
 
+fn access_point_last_seen_age_ms(last_seen_seconds: i32) -> Option<u64> {
+    if last_seen_seconds < 0 {
+        return None;
+    }
+    let uptime_seconds = system_uptime_seconds()?;
+    let age_seconds = (uptime_seconds - f64::from(last_seen_seconds)).max(0.0);
+    Some((age_seconds * 1000.0).round() as u64)
+}
+
+fn system_uptime_seconds() -> Option<f64> {
+    let uptime = fs::read_to_string("/proc/uptime").ok()?;
+    uptime.split_whitespace().next()?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::access_point_matches;
@@ -356,6 +378,7 @@ mod tests {
             rsn_flags_label: "(none)".to_string(),
             bssid: "00:11:22:33:44:55".to_string(),
             last_seen: 0,
+            last_seen_age_ms: None,
             path: "/ap/1".to_string(),
             device_path: "/device/1".to_string(),
             device_iface: "wlan0".to_string(),

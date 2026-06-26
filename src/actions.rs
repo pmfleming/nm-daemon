@@ -37,6 +37,7 @@ pub(crate) fn connect_ssid(nm: &Nm, options: ConnectSsidOptions) -> Result<()> {
         private: false,
         hidden: options.hidden,
         security: None,
+        enterprise: None,
     };
     let password = resolve_password(options.password, options.password_stdin)?;
     print_connect_attempt(
@@ -191,6 +192,18 @@ pub(crate) fn run_profile_command(nm: &Nm, command: ProfileCommand) -> Result<()
         ProfileCommand::Autoconnect { path, enabled } => {
             tracing::info!(path, enabled, "setting saved Wi-Fi profile autoconnect");
             nm.set_connection_autoconnect_by_path(&path, enabled)?;
+        }
+        ProfileCommand::MacRandomization { path, randomized } => {
+            tracing::info!(path, randomized, "setting saved Wi-Fi profile MAC privacy");
+            nm.set_connection_mac_randomization_by_path(&path, randomized)?;
+        }
+        ProfileCommand::SendHostname { path, enabled } => {
+            tracing::info!(
+                path,
+                enabled,
+                "setting saved Wi-Fi profile DHCP hostname privacy"
+            );
+            nm.set_connection_send_hostname_by_path(&path, enabled)?;
         }
     }
     Ok(())

@@ -15,7 +15,10 @@
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          nativeBuildInputs = with pkgs; [ pkg-config ];
+          nativeBuildInputs = with pkgs; [ makeWrapper pkg-config ];
+          postInstall = ''
+            wrapProgram $out/bin/nm-wifi --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iw ]}
+          '';
           meta = {
             description = "NetworkManager D-Bus Wi-Fi helper";
             mainProgram = "nm-wifi";
@@ -38,6 +41,7 @@
             cargo
             clippy
             gcc
+            iw
             just
             pkg-config
             rust-analyzer

@@ -3,6 +3,7 @@ mod app;
 mod cache;
 mod cli;
 mod connect;
+mod contract;
 mod list;
 mod logging;
 mod model;

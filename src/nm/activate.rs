@@ -2,14 +2,15 @@ use anyhow::{Context, Result};
 use zvariant::OwnedObjectPath;
 
 use super::wifi_settings::{
-    hidden_wifi_connection_settings, psk_key_mgmt, psk_wifi_connection_settings,
-    wep_wifi_connection_settings,
+    enterprise_wifi_connection_settings, hidden_wifi_connection_settings, psk_key_mgmt,
+    psk_wifi_connection_settings, wep_wifi_connection_settings,
 };
 use super::{
     ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_IFACE, NM_PATH, Nm, owned_value,
 };
 use crate::model::{
-    WepKeyType, WifiConnectTarget, ap_is_passwordless, ap_supports_psk, ap_uses_wep,
+    WepKeyType, WifiConnectTarget, ap_is_passwordless, ap_supports_enterprise, ap_supports_psk,
+    ap_uses_wep,
 };
 
 impl Nm {
@@ -88,6 +89,13 @@ impl Nm {
             };
             tracing::debug!(ssid = %target.ssid, wep_key_type = ?wep_key_type, "network appears to use WEP authentication");
             wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key))?
+        } else if ap_supports_enterprise(ap.wpa_flags, ap.rsn_flags) {
+            let Some(enterprise) = &target.enterprise else {
+                tracing::info!(ssid = %target.ssid, "enterprise network needs structured 802.1X credentials; none supplied to D-Bus add-and-activate");
+                return Ok(None);
+            };
+            tracing::debug!(ssid = %target.ssid, eap = ?enterprise.eap, "network supports WPA-Enterprise authentication");
+            enterprise_wifi_connection_settings(&ap, enterprise, password)?
         } else {
             tracing::info!(ssid = %target.ssid, security = %ap.security, "unsupported visible network security for D-Bus add-and-activate");
             return Ok(None);
@@ -136,15 +144,28 @@ impl Nm {
         &self,
         target: &WifiConnectTarget,
     ) -> Result<Option<super::WifiActivationStatus>> {
-        let device = if let Some((device, _ap_path, _ap)) = self.visible_access_point_for(target)? {
-            device
-        } else {
-            let Some(device) = self.wifi_devices_for_target(target)?.into_iter().next() else {
-                return Ok(None);
-            };
-            device
+        let Some(device) = self.wifi_activation_device_for_target(target)? else {
+            return Ok(None);
         };
-        self.device_activation_status(&device).map(Some)
+        self.wifi_activation_status_for_device(&device).map(Some)
+    }
+
+    pub(crate) fn wifi_activation_device_for_target(
+        &self,
+        target: &WifiConnectTarget,
+    ) -> Result<Option<crate::model::WifiDevice>> {
+        if let Some((device, _ap_path, _ap)) = self.visible_access_point_for(target)? {
+            Ok(Some(device))
+        } else {
+            Ok(self.wifi_devices_for_target(target)?.into_iter().next())
+        }
+    }
+
+    pub(crate) fn wifi_activation_status_for_device(
+        &self,
+        device: &crate::model::WifiDevice,
+    ) -> Result<super::WifiActivationStatus> {
+        self.device_activation_status(device)
     }
 
     fn device_activation_status(

@@ -2,7 +2,7 @@
 
 Goal: provide a stable, UI-agnostic NetworkManager Wi-Fi backend API for Shelllist and similar frontends.
 
-`nm-wifi` is not trying to become an nmcli replacement. The CLI remains only the process boundary that Shelllist invokes. New work should favor stable JSON contracts and exact connect targets over a broad human-facing command surface.
+`nm-wifi` is trying to reach nmcli-equivalent Wi-Fi behavior for Shelllist/frontends, while keeping a stable JSON/backend API instead of copying nmcli's human-facing command UX. The nmcli/NetworkManager sources are a behavior reference; new work should favor structured JSON contracts, exact connect targets, and D-Bus implementation paths over broad text CLI compatibility.
 
 ## Scope
 
@@ -13,7 +13,7 @@ Goal: provide a stable, UI-agnostic NetworkManager Wi-Fi backend API for Shellli
 - cached snapshots and scan status under `$XDG_RUNTIME_DIR/nm-wifi`.
 - JSON and JSON Lines machine-readable output.
 - saved-profile listing, delete, and autoconnect changes.
-- connection activation over D-Bus with `nmcli` fallback for unsupported edge cases.
+- connection activation over D-Bus, growing toward nmcli Wi-Fi/auth parity, with `nmcli` fallback for remaining edge cases.
 - SSID byte preservation for non-UTF-8/hidden networks.
 - logging and structured backend status.
 
@@ -38,9 +38,10 @@ The nmcli codebase is a reference for correct NetworkManager behavior, not a req
    - Prefer password-aware update/add-and-activate behavior.
    - Avoid persistent broken profiles or clean them up on failure.
 
-4. **Structured secret-required / unsupported results**
+4. **Structured secret-required / credential-required / unsupported results**
    - Do not prompt in `nm-wifi`.
-   - Return machine-readable states so Shelllist can ask the user or show unsupported auth.
+   - Return machine-readable states and auth descriptors so Shelllist can render the right password or enterprise credential UI.
+   - Treat `unsupported-auth` as a temporary gap to shrink toward nmcli Wi-Fi/auth parity.
 
 5. **Validation at the backend boundary**
    - Validate SSID byte length (`1..=32`).
@@ -96,12 +97,16 @@ Completed current phase:
 6. Use NetworkManager `AvailableConnections` plus AP/device/BSSID checks for live `networks --json` saved-profile enrichment.
 7. Stop mutating existing saved-profile secrets before activation when a caller supplies a password; prefer add-and-activate/new-profile flows that can be cleaned up on failure.
 8. Skip stale saved-profile activation in the `nmcli` fallback when a caller supplied a password.
+9. Added `auth` descriptors and `can_connect_with_credentials`/`needs_credentials` capability fields so enterprise networks are represented as credential-form work instead of permanent unsupported auth.
+10. Added an initial D-Bus WPA-Enterprise/802.1X creation path through `connect-target` `enterprise` credentials, including common EAP fields and `--password-stdin` password transport.
 
 Next:
 
-1. Improve saved-profile compatibility checks beyond `AvailableConnections` for cached/offline records where possible.
-2. Add tests around connection metadata serialization and grouped AP output shape.
-3. Re-run `cargo fmt`, `cargo clippy`, `cargo test`, and `rust-quality-lens` after each phase.
+1. Teach Shelllist to render enterprise credential prompts/forms from `auth.required_fields`/`auth.optional_fields` and submit `enterprise` target metadata.
+2. Expand 802.1X coverage against nmcli behavior: EAP-TLS certificate fields, FAST/PAC options, Suite-B details, CA handling, and secret flags.
+3. Improve saved-profile compatibility checks beyond `AvailableConnections` for cached/offline records where possible.
+4. Add tests around connection metadata serialization, enterprise settings shape, and grouped AP output shape.
+5. Re-run `cargo fmt`, `cargo clippy`, `cargo test`, and `rust-quality-lens` after each phase.
 
 ## Current transport CLI
 
@@ -114,6 +119,8 @@ nm-wifi connect-target <target-json> [--password <secret>|--password-stdin] [--w
 nm-wifi saved [--json]
 nm-wifi profile delete <path>
 nm-wifi profile autoconnect <path> true|false
+nm-wifi profile mac-randomization <path> true|false
+nm-wifi profile send-hostname <path> true|false
 nm-wifi status [--json]
 nm-wifi disconnect [--json]
 nm-wifi connectivity [--json]
