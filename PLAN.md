@@ -157,8 +157,10 @@ Started:
 14. Re-ran rust-quality-lens `measure all` successfully.
 15. Reshaped stable commands into grouped namespaces: `wifi ...`, `network ...`, and `debug ...`.
 16. Added `nm-api-connect-parity-probe`, a simple command-line probe that compares `nm-api wifi connect-target` against `nmcli device wifi connect` across visible networks and writes progress plus JSONL/summary logs for review.
+17. Reviewed NetworkManager `nmcli device wifi connect` behavior: nmcli resolves an AP at activation time by SSID/BSSID on the selected Wi-Fi device, then uses AvailableConnections or AddAndActivateConnection with the AP object path. nm-api now re-resolves stale exact AP object paths by SSID+BSSID before falling back, classifies nmcli "not found" failures as `not-found`, and trims post-connect status waiting to reduce command latency.
 
 Next:
 
-1. Use connect parity probe runs to identify concrete nm-api-vs-nmcli activation gaps.
-2. Expand request schemas beyond `connect-target` as new NetworkManager surfaces are added.
+1. Re-run connect parity probe to verify the JOE & THE JUICE stale-AP gap is closed and compare latency again.
+2. Investigate saved-profile secret availability so networks like `oldNote` are not advertised as `can_connect_now` when NetworkManager will still require a secret.
+3. Expand request schemas beyond `connect-target` as new NetworkManager surfaces are added.

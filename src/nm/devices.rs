@@ -74,15 +74,49 @@ impl Nm {
         target: &WifiConnectTarget,
     ) -> Result<Option<(WifiDevice, OwnedObjectPath, AccessPoint)>> {
         let target_ssid = target.ssid_bytes();
-        for device in self.wifi_devices_for_target(target)? {
-            for path in self.device_access_points(&device)? {
-                let Ok(ap) = self.access_point(&device, &path, false) else {
+        let devices = self.wifi_devices_for_target(target)?;
+        if let Some(match_) =
+            self.visible_access_point_matching(&devices, target, target_ssid.as_ref(), false)?
+        {
+            return Ok(Some(match_));
+        }
+        if target
+            .ap_path
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && let Some(match_) =
+                self.visible_access_point_matching(&devices, target, target_ssid.as_ref(), true)?
+        {
+            tracing::info!(
+                ssid = %target.ssid,
+                requested_ap_path = ?target.ap_path,
+                bssid = ?target.bssid,
+                "matched visible access point after ignoring stale AP object path"
+            );
+            return Ok(Some(match_));
+        }
+        tracing::debug!(ssid = %target.ssid, "no matching visible access point found");
+        Ok(None)
+    }
+
+    fn visible_access_point_matching(
+        &self,
+        devices: &[WifiDevice],
+        target: &WifiConnectTarget,
+        target_ssid: &[u8],
+        ignore_ap_path: bool,
+    ) -> Result<Option<(WifiDevice, OwnedObjectPath, AccessPoint)>> {
+        for device in devices {
+            for path in self.device_access_points(device)? {
+                let Ok(ap) = self.access_point(device, &path, false) else {
                     continue;
                 };
                 if access_point_matches(
                     &ap,
-                    target_ssid.as_ref(),
-                    target.ap_path.as_deref(),
+                    target_ssid,
+                    (!ignore_ap_path)
+                        .then_some(target.ap_path.as_deref())
+                        .flatten(),
                     target.bssid.as_deref(),
                 ) {
                     tracing::debug!(
@@ -90,13 +124,13 @@ impl Nm {
                         iface = %device.iface,
                         ap_path = %path,
                         bssid = %ap.bssid,
+                        ignore_ap_path,
                         "matched visible access point"
                     );
-                    return Ok(Some((device, path, ap)));
+                    return Ok(Some((device.clone(), path, ap)));
                 }
             }
         }
-        tracing::debug!(ssid = %target.ssid, "no matching visible access point found");
         Ok(None)
     }
 

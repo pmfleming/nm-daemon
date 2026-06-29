@@ -16,6 +16,7 @@ const NMCLI_CONNECT_TIMEOUT_SECS: &str = "90";
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(90);
 const ACTIVATION_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ACTIVATION_FAILURE_GRACE: Duration = Duration::from_secs(3);
+const POST_CONNECT_STATUS_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 struct ConnectAttemptError {
@@ -283,7 +284,7 @@ fn nmcli_wifi_connect(
         .map(|_| format!("Connected to {} via nmcli fallback", target.ssid))
         .map_err(|connect_err| {
             connect_failure(
-                fallback_failure_reason(target, password),
+                fallback_failure_reason(target, password, &connect_err),
                 format!(
                     "saved profile activation failed: {saved_err:#}; wifi connect failed: {connect_err:#}"
                 ),
@@ -367,14 +368,22 @@ fn dbus_error_name_is_authorization(name: &str) -> bool {
 fn fallback_failure_reason(
     target: &WifiConnectTarget,
     password: Option<&str>,
+    err: &anyhow::Error,
 ) -> ConnectFailureReason {
-    if unsupported_security_label(target.security.as_deref()) {
+    if nmcli_error_says_not_found(err) {
+        ConnectFailureReason::NotFound
+    } else if unsupported_security_label(target.security.as_deref()) {
         ConnectFailureReason::UnsupportedAuth
     } else if password.is_none() && target_appears_to_need_secret(target) {
         ConnectFailureReason::SecretRequired
     } else {
         ConnectFailureReason::Unknown
     }
+}
+
+fn nmcli_error_says_not_found(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}").to_lowercase();
+    message.contains("no network with ssid") || message.contains("no access point with bssid")
 }
 
 fn target_appears_to_need_secret(target: &WifiConnectTarget) -> bool {
@@ -545,7 +554,7 @@ fn cache_active_status_best_effort(nm: &Nm) -> Option<WifiStatus> {
 }
 
 fn read_active_status_after_connect(nm: &Nm) -> Result<WifiStatus> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + POST_CONNECT_STATUS_WAIT;
     loop {
         let status = nm.wifi_status()?;
         if status_has_network_details(&status) || Instant::now() >= deadline {
@@ -596,15 +605,25 @@ mod tests {
     fn fallback_reason_uses_target_metadata_not_error_text() {
         let mut target = example_connect_target(false);
         target.security = Some("WPA2/3".to_string());
+        let generic_err = connect_failure(ConnectFailureReason::Unknown, "generic failure");
         assert_eq!(
-            fallback_failure_reason(&target, None),
+            fallback_failure_reason(&target, None, &generic_err),
             ConnectFailureReason::SecretRequired
         );
 
         target.security = Some("802.1X".to_string());
         assert_eq!(
-            fallback_failure_reason(&target, Some("secret")),
+            fallback_failure_reason(&target, Some("secret"), &generic_err),
             ConnectFailureReason::UnsupportedAuth
+        );
+
+        let not_found_err = connect_failure(
+            ConnectFailureReason::Unknown,
+            "nmcli exited with exit status: 10: Error: No network with SSID 'Cafe' found.",
+        );
+        assert_eq!(
+            fallback_failure_reason(&target, Some("secret"), &not_found_err),
+            ConnectFailureReason::NotFound
         );
     }
 }

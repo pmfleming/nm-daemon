@@ -44,6 +44,7 @@ pub(crate) enum ConnectFailureReason {
     AuthorizationRequired,
     UnsupportedAuth,
     ValidationError,
+    NotFound,
     Timeout,
     ActivationFailed,
     Unknown,
