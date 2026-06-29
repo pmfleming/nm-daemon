@@ -60,22 +60,22 @@ Shelllist must check `protocol == "nm-api"` and `version == 1` before relying on
 
 ## Stable v1 commands during migration
 
-Current transport remains command-oriented while the boundary hardens:
+Current transport remains command-oriented while the boundary hardens. Stable operations are grouped by API surface:
 
 ```bash
-nm-api networks [--cached] [--refresh-cache]
-nm-api scan [--stream] [--cache] [--strict] [--timeout <seconds>] [--retries <count>] [--ifname <iface>] [--ssid <ssid>...]
-nm-api connect <ssid> [--password-stdin] [--bssid <bssid>] [--hidden] [--key-mgmt <hint>] [--wep-key-type key|phrase]
-nm-api connect-target [--wep-key-type key|phrase] < request.json
-nm-api saved
-nm-api profile delete <path>
-nm-api profile autoconnect <path> true|false
-nm-api profile mac-randomization <path> true|false
-nm-api profile share <path>
-nm-api profile send-hostname <path> true|false
-nm-api status
-nm-api disconnect
-nm-api connectivity
+nm-api wifi networks [--cached] [--refresh-cache]
+nm-api wifi scan [--stream] [--cache] [--strict] [--timeout <seconds>] [--retries <count>] [--ifname <iface>] [--ssid <ssid>...]
+nm-api wifi connect <ssid> [--password-stdin] [--bssid <bssid>] [--hidden] [--key-mgmt <hint>] [--wep-key-type key|phrase]
+nm-api wifi connect-target [--wep-key-type key|phrase] < request.json
+nm-api wifi saved
+nm-api wifi profile delete <path>
+nm-api wifi profile autoconnect <path> true|false
+nm-api wifi profile mac-randomization <path> true|false
+nm-api wifi profile share <path>
+nm-api wifi profile send-hostname <path> true|false
+nm-api wifi status
+nm-api wifi disconnect
+nm-api network connectivity
 ```
 
 Debug and unstable surfaces:
@@ -155,8 +155,8 @@ Started:
 12. Added per-method v1 fixture output and Shelllist schema checks for network/status/connect/scan/profile shapes.
 13. Added top-level typed JSON error envelopes for unhandled command failures while avoiding duplicate connect-error reports.
 14. Re-ran rust-quality-lens `measure all` successfully.
+15. Reshaped stable commands into grouped namespaces: `wifi ...`, `network ...`, and `debug ...`.
 
 Next:
 
-1. Consider reshaping flat commands into grouped namespaces such as `wifi networks` and `debug ...` if/when the API grows beyond Wi-Fi.
-2. Expand request schemas beyond `connect-target` as new NetworkManager surfaces are added.
+1. Expand request schemas beyond `connect-target` as new NetworkManager surfaces are added.

@@ -20,6 +20,25 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Wi-Fi NetworkManager API operations.
+    Wifi {
+        #[command(subcommand)]
+        command: WifiCommand,
+    },
+    /// NetworkManager-wide API operations.
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommand,
+    },
+    /// Debug and unstable development probes.
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum WifiCommand {
     /// List visible Wi-Fi networks enriched with saved-profile matches and capabilities.
     Networks(ListOptions),
     /// Request a scan, wait for completion, then emit an nm-api JSON response.
@@ -39,13 +58,12 @@ pub(crate) enum Command {
     Status,
     /// Disconnect the active Wi-Fi connection, if any.
     Disconnect,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum NetworkCommand {
     /// Check NetworkManager connectivity state.
     Connectivity,
-    /// Debug and unstable development probes.
-    Debug {
-        #[command(subcommand)]
-        command: DebugCommand,
-    },
 }
 
 #[derive(Subcommand)]
@@ -132,31 +150,31 @@ pub(crate) struct ConnectTargetOptions {
 pub(crate) enum ProfileCommand {
     /// Delete/forget a saved Wi-Fi profile.
     Delete {
-        /// NetworkManager settings object path, from `nm-api saved`.
+        /// NetworkManager settings object path, from `nm-api wifi saved`.
         path: String,
     },
     /// Enable or disable autoconnect for a saved Wi-Fi profile.
     Autoconnect {
-        /// NetworkManager settings object path, from `nm-api saved`.
+        /// NetworkManager settings object path, from `nm-api wifi saved`.
         path: String,
         /// true to enable autoconnect, false to disable it.
         enabled: bool,
     },
     /// Set per-profile Wi-Fi MAC privacy.
     MacRandomization {
-        /// NetworkManager settings object path, from `nm-api saved`.
+        /// NetworkManager settings object path, from `nm-api wifi saved`.
         path: String,
         /// true uses a stable randomized MAC, false uses the device's permanent MAC.
         randomized: bool,
     },
     /// Build a standard Wi-Fi QR payload for a shareable saved profile.
     Share {
-        /// NetworkManager settings object path, from `nm-api saved`.
+        /// NetworkManager settings object path, from `nm-api wifi saved`.
         path: String,
     },
     /// Enable or disable sending this device's hostname through DHCP for a saved profile.
     SendHostname {
-        /// NetworkManager settings object path, from `nm-api saved`.
+        /// NetworkManager settings object path, from `nm-api wifi saved`.
         path: String,
         /// true to send hostname, false to keep device name private.
         enabled: bool,

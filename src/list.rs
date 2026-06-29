@@ -94,7 +94,7 @@ fn spawn_cache_refresh(timeout: u64, verbose: u8, log_file: Option<&Path>) {
     }
 
     match command
-        .args(["scan", "--cache", "--timeout", timeout_arg.as_str()])
+        .args(["wifi", "scan", "--cache", "--timeout", timeout_arg.as_str()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
