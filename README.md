@@ -2,7 +2,15 @@
 
 Local NetworkManager JSON/JSONL adapter and user D-Bus service for Shelllist and similar frontends.
 
-`nm-daemon` is not a human Wi-Fi menu. It exposes a frontend-facing protocol while Shelllist owns UI, prompts, forms, and presentation. During the D-Bus migration, the JSON protocol name remains `nm-api` version 1 for compatibility.
+`nm-daemon` is the current project, Rust package, binary, Nix package, and repository name. It is not a human Wi-Fi menu: it exposes a frontend-facing protocol while Shelllist owns UI, prompts, forms, and presentation. The JSON protocol name intentionally remains `nm-api` version 1 for compatibility with existing Shelllist contract checks.
+
+## Current state
+
+- Long-lived user D-Bus service is implemented at `org.laufan.NmDaemon` and packaged as `nm-daemon.service`.
+- The host NixOS/Home Manager setup enables the user service at login; D-Bus activation is still a future fallback path.
+- Read-only CLI calls can forward through the daemon; mutating/profile/debug commands still run directly.
+- Event-driven scan, connect, status/connectivity subscriptions, connect cancellation, and NetworkManager SecretAgent bridging are implemented.
+- Shelllist still needs to migrate from CLI calls to the D-Bus API/events.
 
 Stable responses use protocol envelope v1:
 
@@ -56,6 +64,16 @@ Implemented method keys:
 - `wifi.secret.capabilities` / `wifi.secret.provide` for NetworkManager SecretAgent prompt bridging and optional Secret Service keyring persistence
 
 `response_json` is the same `nm-api` v1 envelope the CLI prints today. See [`docs/dbus-daemon.md`](./docs/dbus-daemon.md) for Shelllist integration notes and migration progress.
+
+## Startup and packaging
+
+The Nix package installs `share/systemd/user/nm-daemon.service`, running:
+
+```text
+ExecStart=<package>/bin/nm-daemon daemon
+```
+
+The current host configuration enables this user service at `default.target`, so the daemon starts at login. A D-Bus activation file is not present yet; add one later only as a fallback startup path.
 
 ## CLI compatibility
 
@@ -114,4 +132,4 @@ nix develop path:.
 just check
 ```
 
-See [PLAN.md](./PLAN.md) for the migration plan.
+See [PLAN.md](./PLAN.md) for current status and the remaining Shelllist migration plan.

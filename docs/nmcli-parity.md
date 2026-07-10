@@ -8,6 +8,8 @@ For connection behavior, `tools/connect-parity-probe.sh` / `just connect-parity-
 inventories visible candidates and can run destructive alternating `nm-daemon` vs
 `nmcli device wifi connect` attempts for review.
 
+Current status: the first high-impact parity gaps are closed. `debug diagnose` is a non-destructive status/cache comparison, while the connect parity probe only attempts connections when run with `--execute`.
+
 ## Current high-impact matrix
 
 | Area | nmcli reference | nm-daemon surface | Why it matters |

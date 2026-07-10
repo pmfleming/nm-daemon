@@ -2,6 +2,10 @@
 
 This document describes the current `nm-daemon` user D-Bus API for Shelllist and similar frontends.
 
+## Current status
+
+`nm-daemon daemon` is implemented and packaged as a systemd user service. The host NixOS/Home Manager configuration now starts that service at login. D-Bus activation is intentionally not present yet and remains a fallback startup enhancement. Shelllist has not fully migrated to this API yet, so the CLI keeps daemon-forwarding read-only commands as a bridge.
+
 ## Service identity
 
 - Binary: `nm-daemon`
@@ -161,7 +165,7 @@ The unit runs:
 ExecStart=<package>/bin/nm-daemon daemon
 ```
 
-NixOS/Home Manager integration still needs to enable this user unit in the host configuration. D-Bus activation is not implemented yet.
+The host NixOS/Home Manager configuration enables this user service at `default.target`, so it starts at login once the package is installed in the user environment. D-Bus activation is not implemented yet; keep it as a later fallback startup path rather than the primary startup mechanism.
 
 ## Implementation status
 
@@ -181,11 +185,10 @@ Implemented here:
 
 Still open:
 
-- Shelllist migration to the D-Bus API/events.
-- Host/Home Manager enablement of the user service.
+- Shelllist migration to the D-Bus API/events outside this repository.
 - Prompt handling for Secret Service create/delete/unlock prompts that need desktop interaction.
 - More specialized Shelllist UI copy/forms using `secret_keys` and `primary_secret_key`.
-- D-Bus activation file.
+- D-Bus activation file as a fallback startup path.
 
 ## Recommended Shelllist update sequence
 

@@ -1,6 +1,6 @@
-# nm-daemon migration plan
+# nm-daemon current state and migration plan
 
-Goal: `nm-daemon` is a local JSON/JSONL NetworkManager adapter and user D-Bus service for Shelllist and any future GUI/TUI clients. Shelllist owns UI, prompting, presentation, and user flows. `nm-daemon` owns NetworkManager behavior and the stable machine protocol. During migration, the JSON envelope protocol remains `nm-api` version 1 for compatibility.
+Goal: `nm-daemon` is a local JSON/JSONL NetworkManager adapter and user D-Bus service for Shelllist and any future GUI/TUI clients. `nm-daemon` is the current project, Rust package, binary, Nix package, and repository name; the JSON envelope protocol remains `nm-api` version 1 for compatibility. Shelllist owns UI, prompting, presentation, and user flows. `nm-daemon` owns NetworkManager behavior and the stable machine protocol.
 
 This is scratch-your-own-itch software: the API may grow from Wi-Fi into broader NetworkManager surfaces as needed.
 
@@ -152,7 +152,7 @@ The fixture map currently covers:
 
 Shelllist checks should validate envelopes and contract fields before runtime.
 
-## Migration status
+## Current repository status
 
 Implemented in this repository:
 
@@ -172,14 +172,14 @@ Implemented in this repository:
 14. Added Secret Service keyring lookup/store/delete support for `wifi.secret.provide save:true`, NetworkManager `SaveSecrets`, and `DeleteSecrets`. Secret lookup prefers stable NetworkManager UUIDs and falls back to connection paths.
 15. Expanded SecretAgent key mapping for `802-11-wireless-security`, `802-1x`, `vpn`, `gsm`, and `cdma` settings. Prompt events include `secret_keys` and `primary_secret_key` for Shelllist forms.
 16. Added deep best-effort connect cancellation: `Cancel(connect-*)` kills in-flight `nmcli`, interrupts activation waits, and asks NetworkManager to disconnect/abort active Wi-Fi activation through a parallel cancellation watcher. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call.
-17. Added packaged systemd user service metadata for `nm-daemon daemon`.
+17. Added packaged systemd user service metadata for `nm-daemon daemon`; host/Home Manager configuration now enables the user service at login.
 18. Re-ran `cargo fmt`, `cargo clippy -D warnings`, `cargo test`, `cargo build`, and rust-quality-lens after the daemon/cancellation/keyring work.
 
 ## Remaining open items
 
-1. Update Shelllist to call `org.laufan.NmDaemon1.Call` for `wifi.status`, `network.connectivity`, and `wifi.networks`.
+1. Update Shelllist (outside this repository) to call `org.laufan.NmDaemon1.Call` for `wifi.status`, `network.connectivity`, and `wifi.networks`.
 2. Update Shelllist scan refresh to `Subscribe(["wifi.scan"])` plus `Call("wifi.scan", params_json)` and filter events by `request_id`.
-3. Enable the installed `nm-daemon.service` user unit in the host/Home Manager configuration; add a D-Bus activation file later as a startup fallback.
+3. Add a D-Bus activation file later as a fallback startup path; the host/Home Manager configuration now enables `nm-daemon.service` at login.
 4. Update Shelllist connect forms to `Call("wifi.connectTarget", ...)` and consume `wifi.connect` events by `request_id`.
 5. Wire Shelllist secret prompts to `wifi.secret` requested/cancelled events and answer with `Call("wifi.secret.provide", ...)`. Use `secret_keys` and `primary_secret_key` to label fields and choose the primary password/PIN entry.
 6. Add handling for Secret Service prompt objects returned by locked collections or create/delete operations that require desktop interaction.
