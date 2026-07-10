@@ -301,7 +301,7 @@ fn compare_optional(
             status: "fail",
             nm_api,
             nmcli,
-            detail: "nm-api and nmcli disagree".to_string(),
+            detail: "nm-daemon and nmcli disagree".to_string(),
         },
         (None, None) => ParityCheck {
             area,
@@ -413,7 +413,7 @@ fn print_text_report(report: &ParityReport) {
     );
     for check in &report.checks {
         println!(
-            "{}\t{}\t{}\tnm-api={}\tnmcli={}\t{}",
+            "{}\t{}\t{}\tnm-daemon={}\tnmcli={}\t{}",
             check.status,
             check.area,
             check.check,

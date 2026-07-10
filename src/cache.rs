@@ -8,10 +8,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{AccessPoint, ConnectionDetails, NetworkEntry, WifiStatus};
+use crate::model::{
+    AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectionDetails, NetworkEntry,
+    WifiConnectTarget, WifiStatus,
+};
 
 const CACHE_VERSION: u32 = 1;
-const CACHE_DIR_NAME: &str = "nm-api";
+const CACHE_DIR_NAME: &str = "nm-daemon";
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -53,6 +56,50 @@ struct CachedKnownConnections {
     version: u32,
     updated_at_ms: u128,
     connections: BTreeMap<String, ConnectionDetails>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ConnectAttemptRecord<'a> {
+    version: u32,
+    timestamp_ms: u128,
+    duration_ms: u128,
+    status: &'a str,
+    reason: Option<ConnectFailureReason>,
+    path: Option<ConnectEnginePath>,
+    ssid: &'a str,
+    ssid_bytes: Vec<u8>,
+    bssid: Option<&'a str>,
+    ap_path: Option<&'a str>,
+    device_iface: Option<&'a str>,
+    device_path: Option<&'a str>,
+    message: &'a str,
+}
+
+impl<'a> ConnectAttemptRecord<'a> {
+    pub(crate) fn new(
+        target: &'a WifiConnectTarget,
+        status: &'a str,
+        reason: Option<ConnectFailureReason>,
+        path: Option<ConnectEnginePath>,
+        message: &'a str,
+        duration_ms: u128,
+    ) -> Self {
+        Self {
+            version: CACHE_VERSION,
+            timestamp_ms: now_ms(),
+            duration_ms,
+            status,
+            reason,
+            path,
+            ssid: &target.ssid,
+            ssid_bytes: target.ssid_bytes().into_owned(),
+            bssid: non_empty(target.bssid.as_deref()),
+            ap_path: non_empty(target.ap_path.as_deref()),
+            device_iface: non_empty(target.ifname.as_deref()),
+            device_path: non_empty(target.device_path.as_deref()),
+            message,
+        }
+    }
 }
 
 pub(crate) fn write_live_scan_snapshot(scanning: bool, networks: &[AccessPoint]) -> Result<()> {
@@ -145,6 +192,10 @@ pub(crate) fn attach_connection_details(networks: &mut [NetworkEntry]) {
 pub(crate) fn clear_active_connection_cache() -> Result<()> {
     remove_file_if_exists(active_status_path())?;
     mark_snapshot_inactive()
+}
+
+pub(crate) fn append_connect_attempt(record: &ConnectAttemptRecord<'_>) -> Result<()> {
+    append_json_line(connect_history_path(), record)
 }
 
 fn write_session_snapshot(scanning: bool, networks: &[AccessPoint]) -> Result<()> {
@@ -330,6 +381,35 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     }
 }
 
+fn append_json_line<T>(path: PathBuf, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let parent = path.parent().context("state path has no parent")?;
+    create_private_dir_all(parent)?;
+    reject_symlink(&path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    serde_json::to_writer(&mut file, value).context("serialize JSONL record")?;
+    file.write_all(b"\n")
+        .with_context(|| format!("write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 0600 {}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -399,12 +479,19 @@ fn create_private_dir_all_unix(path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn current_euid() -> u32 {
-    unsafe { geteuid() }
+    rustix::process::geteuid().as_raw()
 }
 
-#[cfg(unix)]
-unsafe extern "C" {
-    fn geteuid() -> u32;
+fn reject_symlink(path: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("lstat {}", path.display())),
+    };
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("refusing to use symlinked file {}", path.display());
+    }
+    Ok(())
 }
 
 fn remove_file_if_exists(path: PathBuf) -> Result<()> {
@@ -436,12 +523,16 @@ fn known_connections_path() -> PathBuf {
     cache_dir().join("known-connections.json")
 }
 
+fn connect_history_path() -> PathBuf {
+    state_dir().join("connects.jsonl")
+}
+
 fn session_path() -> PathBuf {
     cache_dir().join("scan-session.json")
 }
 
 pub(crate) fn log_path() -> PathBuf {
-    cache_dir().join("nm-api.log")
+    cache_dir().join("nm-daemon.log")
 }
 
 fn cache_dir() -> PathBuf {
@@ -449,6 +540,23 @@ fn cache_dir() -> PathBuf {
         Some(runtime_dir) => PathBuf::from(runtime_dir).join(CACHE_DIR_NAME),
         None => std::env::temp_dir().join(format!("{CACHE_DIR_NAME}-{}", current_user_id())),
     }
+}
+
+fn state_dir() -> PathBuf {
+    if let Some(state_home) = std::env::var_os("XDG_STATE_HOME") {
+        return PathBuf::from(state_home).join(CACHE_DIR_NAME);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join(CACHE_DIR_NAME);
+    }
+    cache_dir()
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.is_empty())
 }
 
 fn current_user_id() -> u32 {
@@ -478,7 +586,7 @@ mod tests {
 
     #[test]
     fn temp_paths_are_unique_for_same_cache_path() {
-        let path = PathBuf::from("/tmp/nm-api/status.json");
+        let path = PathBuf::from("/tmp/nm-daemon/status.json");
 
         let first = temp_path_for(&path).expect("first temp path");
         let second = temp_path_for(&path).expect("second temp path");

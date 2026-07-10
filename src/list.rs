@@ -6,7 +6,10 @@ use anyhow::Result;
 
 use crate::nm::Nm;
 use crate::output::print_network_entries_json;
-use crate::{cache, model::AccessPoint};
+use crate::{
+    cache,
+    model::{AccessPoint, NetworkEntry},
+};
 
 pub(crate) fn print_enriched_network_list(
     nm: &Nm,
@@ -16,6 +19,25 @@ pub(crate) fn print_enriched_network_list(
     verbose: u8,
     log_file: &Option<std::path::PathBuf>,
 ) -> Result<()> {
+    let networks = enriched_network_list(
+        nm,
+        cached,
+        refresh_cache,
+        refresh_timeout,
+        verbose,
+        log_file,
+    )?;
+    print_network_entries_json(&networks)
+}
+
+pub(crate) fn enriched_network_list(
+    nm: &Nm,
+    cached: bool,
+    refresh_cache: bool,
+    refresh_timeout: u64,
+    verbose: u8,
+    log_file: &Option<std::path::PathBuf>,
+) -> Result<Vec<NetworkEntry>> {
     let access_points = load_networks(
         nm,
         cached,
@@ -27,7 +49,7 @@ pub(crate) fn print_enriched_network_list(
     )?;
     let mut networks = nm.network_entries_for_access_points(access_points)?;
     cache::attach_connection_details(&mut networks);
-    print_network_entries_json(&networks)
+    Ok(networks)
 }
 
 fn load_networks(

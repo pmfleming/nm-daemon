@@ -31,6 +31,13 @@ impl Nm {
         else {
             return Ok(false);
         };
+        if self.saved_wifi_connection_needs_secret_agent(&connection_path, None)? {
+            tracing::info!(ssid = %target.ssid, connection = %connection_path, "saved Wi-Fi profile needs a secret agent before activation");
+            anyhow::bail!(
+                "saved Wi-Fi profile for {} requires a secret agent or a newly supplied password",
+                target.ssid
+            );
+        }
         tracing::info!(
             ssid = %target.ssid,
             connection = %connection_path,

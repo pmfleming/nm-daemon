@@ -69,6 +69,10 @@ impl Nm {
         Ok(matches)
     }
 
+    pub(crate) fn target_access_point_visible(&self, target: &WifiConnectTarget) -> Result<bool> {
+        Ok(self.visible_access_point_for(target)?.is_some())
+    }
+
     pub(super) fn visible_access_point_for(
         &self,
         target: &WifiConnectTarget,

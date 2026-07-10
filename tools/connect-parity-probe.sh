@@ -6,42 +6,42 @@ usage() {
   cat >&2 <<'EOF'
 usage: connect-parity-probe.sh --execute [options]
 
-Compare nm-api and nmcli connection behavior for visible Wi-Fi networks.
+Compare nm-daemon and nmcli connection behavior for visible Wi-Fi networks.
 
 This is intentionally disruptive: it may connect to and disconnect from many
 visible networks. Without --execute it only writes an inventory/dry-run log.
 
 Options:
   --execute                 actually attempt connections
-  --log-dir DIR             write logs under DIR (default: $XDG_STATE_HOME/nm-api/connect-parity/<timestamp>)
-  --nm-api-bin PATH         nm-api binary (default: nm-api)
+  --log-dir DIR             write logs under DIR (default: $XDG_STATE_HOME/nm-daemon/connect-parity/<timestamp>)
+  --nm-daemon-bin PATH      nm-daemon binary (default: nm-daemon)
   --nmcli-bin PATH          nmcli binary (default: nmcli)
   --timeout SECONDS         per-attempt timeout (default: 90)
   --cooldown SECONDS        pause after disconnect/failure (default: 2)
   --limit N                 test at most N visible networks
-  --order ORDER             nm-api-first, nmcli-first, alternate (default: nm-api-first)
+  --order ORDER             nm-daemon-first, nmcli-first, alternate (default: nm-daemon-first)
   --skip-needs-secret       skip networks advertised as needing password/credentials
   --no-restore              do not try to restore the initially active profile at the end
   -h, --help                show this help
 
 Outputs:
-  networks.json             nm-api visible-network snapshot
+  networks.json             nm-daemon visible-network snapshot
   attempts.jsonl            machine-readable per-attempt records
   summary.json              aggregate counts and log location
   stdout/<id>-<engine>.out  raw command stdout per attempt
   stderr/<id>-<engine>.err  raw command stderr per attempt
-  requests/<id>.json        nm-api connect-target request per network
+  requests/<id>.json        nm-daemon connect-target request per network
 EOF
 }
 
 execute=false
 log_dir=
-nm_api_bin=${NM_API_BIN:-nm-api}
+nm_daemon_bin=${NM_DAEMON_BIN:-${NM_API_BIN:-nm-daemon}}
 nmcli_bin=${NMCLI_BIN:-nmcli}
 attempt_timeout=90
 cooldown=2
 limit=0
-order=nm-api-first
+order=nm-daemon-first
 skip_needs_secret=false
 restore_initial=true
 
@@ -49,7 +49,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --execute) execute=true ;;
     --log-dir) log_dir=${2:?--log-dir requires a value}; shift ;;
-    --nm-api-bin) nm_api_bin=${2:?--nm-api-bin requires a value}; shift ;;
+    --nm-daemon-bin|--nm-api-bin) nm_daemon_bin=${2:?--nm-daemon-bin requires a value}; shift ;;
     --nmcli-bin) nmcli_bin=${2:?--nmcli-bin requires a value}; shift ;;
     --timeout) attempt_timeout=${2:?--timeout requires a value}; shift ;;
     --cooldown) cooldown=${2:?--cooldown requires a value}; shift ;;
@@ -64,7 +64,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$order" in
-  nm-api-first|nmcli-first|alternate) ;;
+  nm-daemon-first|nmcli-first|alternate) ;;
   *) echo "invalid --order: $order" >&2; exit 2 ;;
 esac
 
@@ -83,14 +83,14 @@ progress "Checking required commands"
 require_command jq
 require_command date
 require_command timeout
-require_command "$nm_api_bin"
+require_command "$nm_daemon_bin"
 require_command "$nmcli_bin"
 
 now_ms() { date +%s%3N; }
 
 if [ -z "$log_dir" ]; then
   state_home=${XDG_STATE_HOME:-$HOME/.local/state}
-  log_dir="$state_home/nm-api/connect-parity/$(date -u +%Y%m%dT%H%M%SZ)"
+  log_dir="$state_home/nm-daemon/connect-parity/$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 mkdir -p "$log_dir/stdout" "$log_dir/stderr" "$log_dir/requests"
 progress "Writing probe logs to $log_dir"
@@ -100,14 +100,14 @@ attempts_log="$log_dir/attempts.jsonl"
 
 initial_status_file="$log_dir/initial-status.json"
 progress "Capturing initial Wi-Fi status"
-if ! "$nm_api_bin" wifi status > "$initial_status_file" 2>"$log_dir/initial-status.err"; then
-  echo "warning: could not read initial nm-api status; continuing" >&2
+if ! "$nm_daemon_bin" wifi status > "$initial_status_file" 2>"$log_dir/initial-status.err"; then
+  echo "warning: could not read initial nm-daemon status; continuing" >&2
 fi
 initial_profile_id=$(jq -r '.data.status.profile.id // empty' "$initial_status_file" 2>/dev/null || true)
 
 networks_file="$log_dir/networks.json"
-progress "Capturing visible Wi-Fi network snapshot with nm-api"
-"$nm_api_bin" wifi networks > "$networks_file"
+progress "Capturing visible Wi-Fi network snapshot with nm-daemon"
+"$nm_daemon_bin" wifi networks > "$networks_file"
 
 jq_filter='[.data.networks[] | select((.ssid_bytes | length) > 0)]'
 if [ "$skip_needs_secret" = true ]; then
@@ -120,7 +120,9 @@ candidate_count=$(jq "$jq_filter | length" "$networks_file")
 progress "Selected $candidate_count candidate network(s) for parity probing"
 
 write_event() {
-  jq -cn "$@" >> "$attempts_log"
+  local filter=${!#}
+  local args=("${@:1:$#-1}")
+  jq -cn --argjson timestamp_ms "$(now_ms)" "${args[@]}" "($filter) + {timestamp_ms:\$timestamp_ms}" >> "$attempts_log"
 }
 
 write_event \
@@ -157,34 +159,34 @@ make_request() {
 engine_order_for_index() {
   local index=$1
   case "$order" in
-    nm-api-first) echo "nm-api nmcli" ;;
-    nmcli-first) echo "nmcli nm-api" ;;
+    nm-daemon-first) echo "nm-daemon nmcli" ;;
+    nmcli-first) echo "nmcli nm-daemon" ;;
     alternate)
       if [ $((index % 2)) -eq 0 ]; then
-        echo "nm-api nmcli"
+        echo "nm-daemon nmcli"
       else
-        echo "nmcli nm-api"
+        echo "nmcli nm-daemon"
       fi
       ;;
   esac
 }
 
-run_nm_api_attempt() {
+run_nm_daemon_attempt() {
   local id=$1
   local request_file=$2
-  progress "[$id] nm-api: attempting connect-target"
-  local out_file="$log_dir/stdout/$id-nm-api.out"
-  local err_file="$log_dir/stderr/$id-nm-api.err"
+  progress "[$id] nm-daemon: attempting connect-target"
+  local out_file="$log_dir/stdout/$id-nm-daemon.out"
+  local err_file="$log_dir/stderr/$id-nm-daemon.err"
   local start end status
   start=$(now_ms)
   set +e
-  timeout "${attempt_timeout}s" "$nm_api_bin" wifi connect-target < "$request_file" > "$out_file" 2> "$err_file"
+  timeout "${attempt_timeout}s" "$nm_daemon_bin" wifi connect-target < "$request_file" > "$out_file" 2> "$err_file"
   status=$?
   set -e
   end=$(now_ms)
-  record_attempt "$id" "nm-api" "$status" "$start" "$end" "$out_file" "$err_file"
-  progress "[$id] nm-api: exit=$status duration=$((end - start))ms"
-  disconnect_if_success "$status" "nm-api" "$id"
+  record_attempt "$id" "nm-daemon" "$status" "$start" "$end" "$out_file" "$err_file"
+  progress "[$id] nm-daemon: exit=$status duration=$((end - start))ms"
+  disconnect_if_success "$status" "nm-daemon" "$id"
 }
 
 run_nmcli_attempt() {
@@ -238,7 +240,7 @@ disconnect_if_success() {
   if [ "$status" -eq 0 ]; then
     progress "[$id] $engine: connected; disconnecting before next attempt"
     set +e
-    "$nm_api_bin" wifi disconnect > "$log_dir/stdout/$id-$engine-disconnect.out" 2> "$log_dir/stderr/$id-$engine-disconnect.err"
+    "$nm_daemon_bin" wifi disconnect > "$log_dir/stdout/$id-$engine-disconnect.out" 2> "$log_dir/stderr/$id-$engine-disconnect.err"
     local disconnect_status=$?
     set -e
     write_event \
@@ -265,8 +267,10 @@ for index in $(seq 0 $((candidate_count - 1))); do
   ifname=$(jq -r '.target.device_iface // .target.ifname // empty' "$request_file")
   needs_password=$(jq -r '.target.capabilities.needs_password // false' "$request_file")
   needs_credentials=$(jq -r '.target.capabilities.needs_credentials // false' "$request_file")
+  strength=$(jq -r '.target.strength // 0' "$request_file")
+  last_seen_age_ms=$(jq -r '.target.last_seen_age_ms // null' "$request_file")
 
-  progress "[$id] Network $((index + 1))/$candidate_count: SSID='$ssid' BSSID='${bssid:-unknown}' IFACE='${ifname:-unknown}' needs_password=$needs_password needs_credentials=$needs_credentials"
+  progress "[$id] Network $((index + 1))/$candidate_count: SSID='$ssid' BSSID='${bssid:-unknown}' IFACE='${ifname:-unknown}' strength=$strength last_seen_age_ms=$last_seen_age_ms needs_password=$needs_password needs_credentials=$needs_credentials"
 
   write_event \
     --arg event "network" \
@@ -276,12 +280,14 @@ for index in $(seq 0 $((candidate_count - 1))); do
     --arg ifname "$ifname" \
     --argjson needs_password "$needs_password" \
     --argjson needs_credentials "$needs_credentials" \
+    --argjson strength "$strength" \
+    --argjson last_seen_age_ms "$last_seen_age_ms" \
     --arg request_file "$request_file" \
-    '{event:$event, id:$id, ssid:$ssid, bssid:$bssid, ifname:$ifname, needs_password:$needs_password, needs_credentials:$needs_credentials, request_file:$request_file}'
+    '{event:$event, id:$id, ssid:$ssid, bssid:$bssid, ifname:$ifname, strength:$strength, last_seen_age_ms:$last_seen_age_ms, needs_password:$needs_password, needs_credentials:$needs_credentials, request_file:$request_file}'
 
   for engine in $(engine_order_for_index "$index"); do
     case "$engine" in
-      nm-api) run_nm_api_attempt "$id" "$request_file" ;;
+      nm-daemon) run_nm_daemon_attempt "$id" "$request_file" ;;
       nmcli)
         if [ -z "$ssid" ]; then
           progress "[$id] nmcli: skipping because display SSID is empty"
@@ -325,14 +331,14 @@ jq -s --arg log_dir "$log_dir" --argjson candidate_count "$candidate_count" '
         })
     ),
     gaps: {
-      nm_api_failed_nmcli_succeeded: ([
+      nm_daemon_failed_nmcli_succeeded: ([
         attempt_groups[]
-        | select((map(select(.engine == "nm-api" and .exit_code != 0)) | length) > 0 and (map(select(.engine == "nmcli" and .exit_code == 0)) | length) > 0)
+        | select((map(select(.engine == "nm-daemon" and .exit_code != 0)) | length) > 0 and (map(select(.engine == "nmcli" and .exit_code == 0)) | length) > 0)
         | .[0].id
       ]),
-      nm_api_succeeded_nmcli_failed: ([
+      nm_daemon_succeeded_nmcli_failed: ([
         attempt_groups[]
-        | select((map(select(.engine == "nm-api" and .exit_code == 0)) | length) > 0 and (map(select(.engine == "nmcli" and .exit_code != 0)) | length) > 0)
+        | select((map(select(.engine == "nm-daemon" and .exit_code == 0)) | length) > 0 and (map(select(.engine == "nmcli" and .exit_code != 0)) | length) > 0)
         | .[0].id
       ])
     }

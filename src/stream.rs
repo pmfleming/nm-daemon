@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::deadline::Deadline;
 use crate::model::{ScanEvent, ScanStreamOptions, WifiDevice, retry_delay};
 use crate::nm::{Nm, POLL_INTERVAL};
 use crate::stream_emit::{
@@ -17,16 +18,8 @@ impl Nm {
             cache = options.cache,
             "starting streaming Wi-Fi scan"
         );
-        let devices = self
-            .wifi_devices()?
-            .into_iter()
-            .filter(|device| {
-                options
-                    .ifname
-                    .as_deref()
-                    .is_none_or(|ifname| device.iface == ifname)
-            })
-            .collect::<Vec<_>>();
+        let deadline = Deadline::from_now(options.timeout);
+        let devices = wait_for_stream_devices(self, &options, deadline)?;
         if devices.is_empty() {
             return emit_empty_device_stream(self, options.cache);
         }
@@ -38,9 +31,34 @@ impl Nm {
             &rx,
             devices.len() * crate::stream_watch::watcher_count_per_device(),
             options.cache,
+            deadline,
         )?;
 
-        ScanSession::new(self, rx, devices, options).run()
+        ScanSession::new(self, rx, devices, options, deadline).run()
+    }
+}
+
+fn wait_for_stream_devices(
+    nm: &Nm,
+    options: &ScanStreamOptions,
+    deadline: Deadline,
+) -> Result<Vec<WifiDevice>> {
+    loop {
+        let devices = nm
+            .wifi_devices()?
+            .into_iter()
+            .filter(|device| {
+                options
+                    .ifname
+                    .as_deref()
+                    .is_none_or(|ifname| device.iface == ifname)
+            })
+            .collect::<Vec<_>>();
+        if !devices.is_empty() || deadline.expired() {
+            return Ok(devices);
+        }
+        emit_status("waiting for NetworkManager Wi-Fi device", options.cache)?;
+        deadline.sleep(POLL_INTERVAL);
     }
 }
 
@@ -59,7 +77,7 @@ struct ScanSession<'a> {
     rx: Receiver<ScanEvent>,
     states: Vec<DeviceScanState>,
     options: ScanStreamOptions,
-    deadline: Instant,
+    deadline: Deadline,
     last_status: Instant,
     networks_found: usize,
     timed_out: bool,
@@ -71,8 +89,8 @@ impl<'a> ScanSession<'a> {
         rx: Receiver<ScanEvent>,
         devices: Vec<WifiDevice>,
         options: ScanStreamOptions,
+        deadline: Deadline,
     ) -> Self {
-        let deadline = Instant::now() + options.timeout;
         Self {
             nm,
             rx,
@@ -111,7 +129,7 @@ impl<'a> ScanSession<'a> {
     }
 
     fn stop_on_deadline(&mut self) -> Result<bool> {
-        if Instant::now() < self.deadline {
+        if !self.deadline.expired() {
             return Ok(false);
         }
         self.timed_out = true;
@@ -209,7 +227,7 @@ impl<'a> ScanSession<'a> {
     }
 
     fn remaining_wait(&self) -> Duration {
-        POLL_INTERVAL.min(self.deadline.saturating_duration_since(Instant::now()))
+        self.deadline.wait(POLL_INTERVAL)
     }
 
     fn handle_event(&mut self, event: ScanEvent) -> Result<()> {
@@ -304,10 +322,11 @@ fn drain_watcher_startup(
     rx: &Receiver<ScanEvent>,
     expected_ready: usize,
     cache: bool,
+    scan_deadline: Deadline,
 ) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Deadline::from_now(Duration::from_secs(1)).min(scan_deadline);
     let mut ready = 0;
-    while ready < expected_ready && Instant::now() < deadline {
+    while ready < expected_ready && !deadline.expired() {
         ready += drain_one_startup_event(rx, deadline, cache)?;
     }
     warn_if_watchers_missing(ready, expected_ready, cache)
@@ -315,11 +334,10 @@ fn drain_watcher_startup(
 
 fn drain_one_startup_event(
     rx: &Receiver<ScanEvent>,
-    deadline: Instant,
+    deadline: Deadline,
     cache: bool,
 ) -> Result<usize> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    match rx.recv_timeout(POLL_INTERVAL.min(remaining)) {
+    match rx.recv_timeout(deadline.wait(POLL_INTERVAL)) {
         Ok(ScanEvent::WatcherReady) => Ok(1),
         Ok(ScanEvent::WatcherWarning(message)) => {
             emit_warning(message, cache)?;

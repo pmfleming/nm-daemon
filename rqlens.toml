@@ -1,4 +1,4 @@
-project_name = "nm-api"
+project_name = "nm-daemon"
 project_root = "."
 source_roots = ["src"]
 output_dir = "target/analysis"

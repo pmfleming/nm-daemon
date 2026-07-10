@@ -1,5 +1,5 @@
 {
-  description = "NetworkManager JSON/JSONL API adapter";
+  description = "NetworkManager JSON/JSONL adapter and user D-Bus daemon";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -11,31 +11,33 @@
     {
       packages = forAllSystems (system: pkgs:
         let
-          nmApi = pkgs.rustPlatform.buildRustPackage {
-            pname = "nm-api";
+          nmDaemon = pkgs.rustPlatform.buildRustPackage {
+            pname = "nm-daemon";
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = with pkgs; [ makeWrapper pkg-config ];
             postInstall = ''
-              wrapProgram $out/bin/nm-api --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iw ]}
+              wrapProgram $out/bin/nm-daemon --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iw ]}
+              install -Dm644 ${./packaging/systemd/nm-daemon.service} $out/share/systemd/user/nm-daemon.service
+              substituteInPlace $out/share/systemd/user/nm-daemon.service --replace-fail @out@ $out
             '';
             meta = {
-              description = "NetworkManager JSON/JSONL API adapter";
-              mainProgram = "nm-api";
+              description = "NetworkManager JSON/JSONL adapter and user D-Bus daemon";
+              mainProgram = "nm-daemon";
               platforms = pkgs.lib.platforms.linux;
             };
           };
         in
         {
-          default = nmApi;
+          default = nmDaemon;
           connectParityProbe = pkgs.writeShellApplication {
-            name = "nm-api-connect-parity-probe";
+            name = "nm-daemon-connect-parity-probe";
             runtimeInputs = [
               pkgs.coreutils
               pkgs.jq
               pkgs.networkmanager
-              nmApi
+              nmDaemon
             ];
             checkPhase = ''
               runHook preCheck
@@ -45,8 +47,8 @@
             '';
             text = builtins.readFile ./tools/connect-parity-probe.sh;
             meta = {
-              description = "Compare nm-api and nmcli Wi-Fi connection behavior for visible networks";
-              mainProgram = "nm-api-connect-parity-probe";
+              description = "Compare nm-daemon and nmcli Wi-Fi connection behavior for visible networks";
+              mainProgram = "nm-daemon-connect-parity-probe";
               platforms = pkgs.lib.platforms.linux;
             };
           };
@@ -55,13 +57,13 @@
       apps = forAllSystems (system: pkgs: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/nm-api";
-          meta.description = "Run the nm-api NetworkManager adapter";
+          program = "${self.packages.${system}.default}/bin/nm-daemon";
+          meta.description = "Run the nm-daemon NetworkManager adapter/service";
         };
         connectParityProbe = {
           type = "app";
-          program = "${self.packages.${system}.connectParityProbe}/bin/nm-api-connect-parity-probe";
-          meta.description = "Compare nm-api and nmcli Wi-Fi connection behavior";
+          program = "${self.packages.${system}.connectParityProbe}/bin/nm-daemon-connect-parity-probe";
+          meta.description = "Compare nm-daemon and nmcli Wi-Fi connection behavior";
         };
       });
 

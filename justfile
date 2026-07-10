@@ -12,7 +12,13 @@ run *args:
     cargo run -- {{args}}
 
 list:
-    cargo run -- list
+    cargo run -- wifi networks
 
 scan:
-    cargo run -- scan --timeout 20
+    cargo run -- wifi scan --timeout 20
+
+daemon:
+    cargo run -- daemon
+
+connect-parity-probe *args:
+    nix run .#connectParityProbe -- {{args}}

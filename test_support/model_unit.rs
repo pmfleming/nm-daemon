@@ -63,7 +63,7 @@ fn network_capabilities_distinguish_promptable_from_ready_connections() {
 #[test]
 fn network_capabilities_advertise_unsaved_enterprise_credentials() {
     let capabilities = capabilities_for(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_802_1X);
-    assert!(!capabilities.can_connect);
+    assert!(capabilities.can_connect);
     assert!(!capabilities.can_connect_now);
     assert!(!capabilities.can_connect_with_password);
     assert!(capabilities.can_connect_with_credentials);
@@ -202,6 +202,9 @@ fn expected_capabilities(
             needs_credentials: false,
             can_forget: false,
             can_toggle_autoconnect: false,
+            can_set_mac_randomization: false,
+            can_set_send_hostname: false,
+            can_share_qr: false,
             supported_auth,
             unsupported_reason: has_unsupported_reason.then(|| {
                 "unsupported authentication; open/OWE, WEP, WPA/SAE-Personal, WPA-Enterprise, and saved profiles are supported".to_string()

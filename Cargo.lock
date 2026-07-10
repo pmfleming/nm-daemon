@@ -532,11 +532,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "nm-api"
+name = "nm-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rustix",
  "serde",
  "serde_json",
  "tracing",

@@ -3,9 +3,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::model::{
-    AccessPoint, ConnectFailureReason, ConnectResult, ConnectivityStatus, Ip4Status, MeteredStatus,
-    NetworkAuth, NetworkCapabilities, NetworkEntry, ProfilePrivacy, SavedWifiConnection,
-    WifiSharePayload, WifiStatus, WirelessStatus, security_flags_label, security_label,
+    AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectResult, ConnectivityStatus,
+    EnterpriseAuth, Ip4Status, MeteredStatus, NetworkAuth, NetworkCapabilities,
+    NetworkConnectPrompt, NetworkEntry, NetworkPortalHint, NetworkShareHint, ProfilePrivacy,
+    SavedWifiConnection, WifiSharePayload, WifiStatus, WirelessStatus, security_flags_label,
+    security_label,
 };
 
 #[derive(Serialize)]
@@ -74,6 +76,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
     let profile = contract_profile();
     let network = NetworkEntry {
         access_point: access_point.clone(),
+        key: access_point.path.clone(),
         access_points: vec![access_point.clone()],
         primary_profile: Some(profile.clone()),
         profiles: vec![profile.clone()],
@@ -86,6 +89,9 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
             needs_credentials: false,
             can_forget: true,
             can_toggle_autoconnect: true,
+            can_set_mac_randomization: true,
+            can_set_send_hostname: true,
+            can_share_qr: true,
             supported_auth: true,
             unsupported_reason: None,
         },
@@ -96,6 +102,24 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
             required_fields: Vec::new(),
             optional_fields: Vec::new(),
             note: Some("A compatible saved NetworkManager profile can be activated without collecting new credentials".to_string()),
+        },
+        connect_prompt: NetworkConnectPrompt {
+            kind: "none".to_string(),
+            required_fields: Vec::new(),
+            optional_fields: Vec::new(),
+            message: Some("A compatible saved NetworkManager profile can be activated without collecting new credentials".to_string()),
+            enterprise_defaults: None,
+        },
+        share: NetworkShareHint {
+            shareable: false,
+            reason: Some("Saved profile password availability must be checked before sharing".to_string()),
+            requires_profile_secret_check: true,
+            profile_path: Some(profile.path.clone()),
+            qr_payload: None,
+        },
+        portal_hint: NetworkPortalHint {
+            auto_open_on_connect: false,
+            reason: None,
         },
         last_connection: None,
     };
@@ -129,6 +153,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
         connect_success: ConnectResult {
             status: "connected",
             reason: None,
+            path: Some(ConnectEnginePath::Dbus),
             ssid: "Example".to_string(),
             message: "Connected to Example via D-Bus".to_string(),
             connectivity: Some(ConnectivityStatus::from_nm_code(4)),
@@ -137,6 +162,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
         connect_error: ConnectResult {
             status: "error",
             reason: Some(ConnectFailureReason::SecretRequired),
+            path: None,
             ssid: "Example".to_string(),
             message: "password required for Example".to_string(),
             connectivity: None,
@@ -179,6 +205,7 @@ fn password_required_network() -> NetworkEntry {
     access_point.active = false;
     NetworkEntry {
         access_point: access_point.clone(),
+        key: access_point.path.clone(),
         access_points: vec![access_point],
         primary_profile: None,
         profiles: Vec::new(),
@@ -191,6 +218,9 @@ fn password_required_network() -> NetworkEntry {
             needs_credentials: false,
             can_forget: false,
             can_toggle_autoconnect: false,
+            can_set_mac_randomization: false,
+            can_set_send_hostname: false,
+            can_share_qr: false,
             supported_auth: true,
             unsupported_reason: None,
         },
@@ -201,6 +231,24 @@ fn password_required_network() -> NetworkEntry {
             required_fields: vec!["password".to_string()],
             optional_fields: Vec::new(),
             note: Some("Provide a Wi-Fi password to connect".to_string()),
+        },
+        connect_prompt: NetworkConnectPrompt {
+            kind: "password".to_string(),
+            required_fields: vec!["password".to_string()],
+            optional_fields: Vec::new(),
+            message: Some("Provide a Wi-Fi password to connect".to_string()),
+            enterprise_defaults: None,
+        },
+        share: NetworkShareHint {
+            shareable: false,
+            reason: Some("Wi-Fi QR sharing requires an open network or a saved profile with a readable password.".to_string()),
+            requires_profile_secret_check: false,
+            profile_path: None,
+            qr_payload: None,
+        },
+        portal_hint: NetworkPortalHint {
+            auto_open_on_connect: false,
+            reason: None,
         },
         last_connection: None,
     }
@@ -214,6 +262,7 @@ fn enterprise_required_network() -> NetworkEntry {
     access_point.rsn_flags_label = security_flags_label(access_point.rsn_flags);
     NetworkEntry {
         access_point: access_point.clone(),
+        key: access_point.path.clone(),
         access_points: vec![access_point],
         primary_profile: None,
         profiles: Vec::new(),
@@ -226,6 +275,9 @@ fn enterprise_required_network() -> NetworkEntry {
             needs_credentials: true,
             can_forget: false,
             can_toggle_autoconnect: false,
+            can_set_mac_randomization: false,
+            can_set_send_hostname: false,
+            can_share_qr: false,
             supported_auth: true,
             unsupported_reason: None,
         },
@@ -236,6 +288,29 @@ fn enterprise_required_network() -> NetworkEntry {
             required_fields: vec!["enterprise.identity".to_string(), "password".to_string()],
             optional_fields: vec!["enterprise.anonymous_identity".to_string()],
             note: Some("Provide enterprise credentials to connect".to_string()),
+        },
+        connect_prompt: NetworkConnectPrompt {
+            kind: "enterprise".to_string(),
+            required_fields: vec!["enterprise.identity".to_string(), "password".to_string()],
+            optional_fields: vec!["enterprise.anonymous_identity".to_string()],
+            message: Some("Provide enterprise credentials to connect".to_string()),
+            enterprise_defaults: Some(EnterpriseAuth {
+                eap: vec!["peap".to_string()],
+                phase2_auth: Some("mschapv2".to_string()),
+                key_mgmt: Some("wpa-eap".to_string()),
+                ..Default::default()
+            }),
+        },
+        share: NetworkShareHint {
+            shareable: false,
+            reason: Some("Wi-Fi QR sharing requires an open network or a saved profile with a readable password.".to_string()),
+            requires_profile_secret_check: false,
+            profile_path: None,
+            qr_payload: None,
+        },
+        portal_hint: NetworkPortalHint {
+            auto_open_on_connect: false,
+            reason: None,
         },
         last_connection: None,
     }
@@ -329,10 +404,20 @@ mod tests {
         assert_eq!(value["network"]["capabilities"]["needs_password"], false);
         assert_eq!(value["network"]["capabilities"]["needs_credentials"], false);
         assert!(value["network"]["auth"]["note"].is_string());
+        assert_eq!(value["network"]["connect_prompt"]["kind"], "none");
+        assert_eq!(
+            value["network"]["share"]["requires_profile_secret_check"],
+            true
+        );
+        assert_eq!(
+            value["network"]["portal_hint"]["auto_open_on_connect"],
+            false
+        );
         assert_eq!(value["status"]["connectivity"]["state"], "portal");
         assert_eq!(value["status"]["metered"]["state"], "guess-no");
         assert_eq!(value["status"]["wireless"]["tx_bitrate_mbps"], 130.0);
         assert_eq!(value["connect_success"]["suggest_open_portal"], false);
+        assert_eq!(value["connect_success"]["path"], "dbus");
         assert_eq!(value["connect_error"]["reason"], "secret-required");
     }
 
@@ -348,6 +433,10 @@ mod tests {
         assert_eq!(
             value["wifi-networks.enterprise-required"]["networks"][0]["capabilities"]["needs_credentials"],
             true
+        );
+        assert_eq!(
+            value["wifi-networks.enterprise-required"]["networks"][0]["connect_prompt"]["kind"],
+            "enterprise"
         );
         assert_eq!(value["wifi-status.inactive"]["status"]["active"], false);
         assert_eq!(

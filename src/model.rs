@@ -41,13 +41,24 @@ pub(crate) struct ScanRequestOptions {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ConnectFailureReason {
     SecretRequired,
+    WrongPassword,
+    PasswordUnavailable,
     AuthorizationRequired,
     UnsupportedAuth,
     ValidationError,
     NotFound,
     Timeout,
+    DhcpFailed,
     ActivationFailed,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ConnectEnginePath {
+    AlreadyActive,
+    Dbus,
+    NmcliFallback,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +66,8 @@ pub(crate) struct ConnectResult {
     pub(crate) status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<ConnectFailureReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<ConnectEnginePath>,
     pub(crate) ssid: String,
     pub(crate) message: String,
     pub(crate) connectivity: Option<ConnectivityStatus>,
@@ -337,6 +350,12 @@ pub(crate) struct NetworkCapabilities {
     pub(crate) needs_credentials: bool,
     pub(crate) can_forget: bool,
     pub(crate) can_toggle_autoconnect: bool,
+    #[serde(default)]
+    pub(crate) can_set_mac_randomization: bool,
+    #[serde(default)]
+    pub(crate) can_set_send_hostname: bool,
+    #[serde(default)]
+    pub(crate) can_share_qr: bool,
     pub(crate) supported_auth: bool,
     pub(crate) unsupported_reason: Option<String>,
 }
@@ -425,9 +444,40 @@ pub(crate) struct NetworkAuth {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct NetworkConnectPrompt {
+    /// One of: none, password, enterprise, unsupported.
+    pub(crate) kind: String,
+    pub(crate) required_fields: Vec<String>,
+    pub(crate) optional_fields: Vec<String>,
+    pub(crate) message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) enterprise_defaults: Option<EnterpriseAuth>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct NetworkShareHint {
+    pub(crate) shareable: bool,
+    pub(crate) reason: Option<String>,
+    #[serde(default)]
+    pub(crate) requires_profile_secret_check: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) profile_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) qr_payload: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct NetworkPortalHint {
+    pub(crate) auto_open_on_connect: bool,
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct NetworkEntry {
     #[serde(flatten)]
     pub(crate) access_point: AccessPoint,
+    /// Stable frontend key for preserving selection without reimplementing AP matching.
+    pub(crate) key: String,
     /// Exact APs for this displayed network group. The flattened access_point is
     /// the preferred/default AP; frontends can use this list for exact BSSID,
     /// band, and device selection.
@@ -437,11 +487,14 @@ pub(crate) struct NetworkEntry {
     pub(crate) profiles: Vec<SavedWifiConnection>,
     pub(crate) capabilities: NetworkCapabilities,
     pub(crate) auth: NetworkAuth,
+    pub(crate) connect_prompt: NetworkConnectPrompt,
+    pub(crate) share: NetworkShareHint,
+    pub(crate) portal_hint: NetworkPortalHint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_connection: Option<ConnectionDetails>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(crate) struct AccessPoint {
     /// Human-readable display form of the SSID. This may be lossy for non-UTF-8 SSIDs.
     pub(crate) ssid: String,
@@ -555,6 +608,7 @@ fn network_entry_with_profiles(
     profiles: Vec<SavedWifiConnection>,
 ) -> NetworkEntry {
     let access_point = preferred_access_point(&access_points);
+    let key = network_key_for(&access_point);
     let primary_profile = profiles.first().cloned();
     let has_identity = !access_point.ssid_bytes().is_empty();
     let has_profile = primary_profile.is_some();
@@ -580,12 +634,16 @@ fn network_entry_with_profiles(
     let can_connect_with_credentials = has_identity && !has_profile && supports_enterprise_auth;
     let unsupported_reason = (!supported_auth).then(|| unsupported_auth_reason(&access_point));
     let auth = auth_capability_for(&access_point, has_profile);
+    let connect_prompt = connect_prompt_for(&access_point, &auth, has_profile);
+    let share = network_share_hint_for(&access_point, primary_profile.as_ref());
+    let portal_hint = portal_hint_for(&access_point);
     NetworkEntry {
         access_point,
+        key,
         access_points,
         primary_profile,
         capabilities: NetworkCapabilities {
-            can_connect: has_identity && (supported_auth && !needs_credentials),
+            can_connect: has_identity && supported_auth,
             can_connect_now,
             can_connect_with_password,
             needs_password,
@@ -593,11 +651,17 @@ fn network_entry_with_profiles(
             needs_credentials,
             can_forget: has_profile,
             can_toggle_autoconnect: has_profile,
+            can_set_mac_randomization: has_profile,
+            can_set_send_hostname: has_profile,
+            can_share_qr: share.shareable || share.requires_profile_secret_check,
             supported_auth,
             unsupported_reason,
         },
         profiles,
         auth,
+        connect_prompt,
+        share,
+        portal_hint,
         last_connection: None,
     }
 }
@@ -765,6 +829,16 @@ fn unsupported_auth_reason(access_point: &AccessPoint) -> String {
     )
 }
 
+fn network_key_for(access_point: &AccessPoint) -> String {
+    if !access_point.path.is_empty() {
+        return access_point.path.clone();
+    }
+    if !access_point.ssid_hex.is_empty() {
+        return format!("ssid-hex:{}", access_point.ssid_hex);
+    }
+    format!("ssid:{}", access_point.ssid)
+}
+
 fn auth_capability_for(access_point: &AccessPoint, has_profile: bool) -> NetworkAuth {
     if has_profile {
         return NetworkAuth {
@@ -860,8 +934,166 @@ fn auth_capability_for(access_point: &AccessPoint, has_profile: bool) -> Network
         supported: false,
         required_fields: Vec::new(),
         optional_fields: Vec::new(),
-        note: Some("No nm-api creation path is known for this visible network yet".to_string()),
+        note: Some("No nm-daemon creation path is known for this visible network yet".to_string()),
     }
+}
+
+fn connect_prompt_for(
+    access_point: &AccessPoint,
+    auth: &NetworkAuth,
+    has_profile: bool,
+) -> NetworkConnectPrompt {
+    if has_profile || auth.required_fields.is_empty() {
+        return NetworkConnectPrompt {
+            kind: if auth.supported {
+                "none"
+            } else {
+                "unsupported"
+            }
+            .to_string(),
+            required_fields: Vec::new(),
+            optional_fields: auth.optional_fields.clone(),
+            message: auth.note.clone(),
+            enterprise_defaults: None,
+        };
+    }
+
+    if auth
+        .required_fields
+        .iter()
+        .any(|field| field.starts_with("enterprise."))
+    {
+        return NetworkConnectPrompt {
+            kind: "enterprise".to_string(),
+            required_fields: auth.required_fields.clone(),
+            optional_fields: auth.optional_fields.clone(),
+            message: auth
+                .note
+                .clone()
+                .or_else(|| Some("Enter enterprise Wi-Fi credentials.".to_string())),
+            enterprise_defaults: Some(EnterpriseAuth {
+                eap: vec!["peap".to_string()],
+                phase2_auth: Some("mschapv2".to_string()),
+                key_mgmt: Some(
+                    enterprise_key_mgmt(access_point.wpa_flags, access_point.rsn_flags).to_string(),
+                ),
+                ..Default::default()
+            }),
+        };
+    }
+
+    if auth.required_fields.iter().any(|field| field == "password") {
+        return NetworkConnectPrompt {
+            kind: "password".to_string(),
+            required_fields: auth.required_fields.clone(),
+            optional_fields: auth.optional_fields.clone(),
+            message: auth
+                .note
+                .clone()
+                .or_else(|| Some("Enter the Wi-Fi password, then press Enter.".to_string())),
+            enterprise_defaults: None,
+        };
+    }
+
+    NetworkConnectPrompt {
+        kind: "unsupported".to_string(),
+        required_fields: auth.required_fields.clone(),
+        optional_fields: auth.optional_fields.clone(),
+        message: auth.note.clone(),
+        enterprise_defaults: None,
+    }
+}
+
+fn network_share_hint_for(
+    access_point: &AccessPoint,
+    primary_profile: Option<&SavedWifiConnection>,
+) -> NetworkShareHint {
+    if !access_point.ssid_bytes().is_empty()
+        && ap_is_passwordless(
+            access_point.flags,
+            access_point.wpa_flags,
+            access_point.rsn_flags,
+        )
+        && !ap_uses_owe(access_point.wpa_flags, access_point.rsn_flags)
+    {
+        return NetworkShareHint {
+            shareable: true,
+            reason: None,
+            requires_profile_secret_check: false,
+            profile_path: None,
+            qr_payload: Some(wifi_qr_payload("nopass", &access_point.ssid, None, false)),
+        };
+    }
+
+    if ap_uses_owe(access_point.wpa_flags, access_point.rsn_flags) {
+        return NetworkShareHint {
+            shareable: false,
+            reason: Some(
+                "OWE/enhanced-open QR sharing is not supported by the standard Wi-Fi QR format"
+                    .to_string(),
+            ),
+            requires_profile_secret_check: false,
+            profile_path: None,
+            qr_payload: None,
+        };
+    }
+
+    if let Some(profile) = primary_profile {
+        return NetworkShareHint {
+            shareable: false,
+            reason: Some(
+                "Saved profile password availability must be checked before sharing".to_string(),
+            ),
+            requires_profile_secret_check: true,
+            profile_path: Some(profile.path.clone()),
+            qr_payload: None,
+        };
+    }
+
+    NetworkShareHint {
+        shareable: false,
+        reason: Some("Wi-Fi QR sharing requires an open network or a saved profile with a readable password.".to_string()),
+        requires_profile_secret_check: false,
+        profile_path: None,
+        qr_payload: None,
+    }
+}
+
+fn portal_hint_for(access_point: &AccessPoint) -> NetworkPortalHint {
+    let auto_open_on_connect = ap_is_passwordless(
+        access_point.flags,
+        access_point.wpa_flags,
+        access_point.rsn_flags,
+    ) && !ap_uses_owe(access_point.wpa_flags, access_point.rsn_flags);
+    NetworkPortalHint {
+        auto_open_on_connect,
+        reason: auto_open_on_connect
+            .then(|| "open network may require captive-portal sign-in".to_string()),
+    }
+}
+
+fn wifi_qr_payload(auth_type: &str, ssid: &str, password: Option<&str>, hidden: bool) -> String {
+    let password = password
+        .map(|password| format!(";P:{}", wifi_qr_escape(password)))
+        .unwrap_or_default();
+    let hidden = if hidden { ";H:true" } else { "" };
+    format!(
+        "WIFI:T:{};S:{}{}{};;",
+        auth_type,
+        wifi_qr_escape(ssid),
+        password,
+        hidden
+    )
+}
+
+fn wifi_qr_escape(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '\\' | ';' | ',' | ':' | '"' => vec!['\\', ch],
+            ch => vec![ch],
+        })
+        .collect()
 }
 
 pub(crate) fn ap_uses_wep(flags: u32, wpa_flags: u32, rsn_flags: u32) -> bool {

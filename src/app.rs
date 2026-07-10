@@ -11,12 +11,22 @@ pub fn run() -> Result<()> {
     let Cli {
         verbose,
         log_file,
+        direct,
         command,
     } = Cli::parse();
     let log_path = logging::init(verbose, log_file.clone())?;
     tracing::debug!(path = %log_path.display(), "using log file");
 
+    if !direct && std::env::var_os("NM_DAEMON_DIRECT").is_none() {
+        match crate::daemon::try_forward_command(&command)? {
+            crate::daemon::ForwardOutcome::Handled => return Ok(()),
+            crate::daemon::ForwardOutcome::NotForwardable
+            | crate::daemon::ForwardOutcome::Unavailable => {}
+        }
+    }
+
     match command {
+        Command::Daemon => crate::daemon::run_daemon()?,
         Command::Wifi { command } => run_wifi_command(command, verbose, &log_file)?,
         Command::Network { command } => run_network_command(command)?,
         Command::Debug { command } => run_debug_command(command)?,
@@ -78,43 +88,11 @@ pub fn report_error(err: &anyhow::Error) {
     }
 
     let message = format!("{err:#}");
-    let code = classify_error(&message);
+    let code = crate::error::classify_error(&message);
     if let Err(report_err) = crate::output::print_api_error(code, &message) {
         eprintln!("Error: {err:#}");
-        eprintln!("Also failed to serialize nm-api error response: {report_err:#}");
+        eprintln!("Also failed to serialize API error response: {report_err:#}");
     }
-}
-
-fn classify_error(message: &str) -> &'static str {
-    let lower = message.to_lowercase();
-    if lower.contains("networkmanager")
-        || lower.contains("network manager")
-        || lower.contains("d-bus")
-        || lower.contains("dbus")
-    {
-        return "networkmanager-unavailable";
-    }
-    if lower.contains("parse")
-        || lower.contains("invalid")
-        || lower.contains("requires")
-        || lower.contains("validation")
-        || lower.contains("bad")
-    {
-        return "validation-error";
-    }
-    if lower.contains("permission")
-        || lower.contains("authorization")
-        || lower.contains("not authorized")
-    {
-        return "authorization-required";
-    }
-    if lower.contains("not found") || lower.contains("no such") {
-        return "not-found";
-    }
-    if lower.contains("timeout") || lower.contains("timed out") {
-        return "timeout";
-    }
-    "internal-error"
 }
 
 fn with_nm<T>(f: impl FnOnce(&Nm) -> Result<T>) -> Result<T> {

@@ -1,6 +1,6 @@
 use super::{
     ConnectionSettings, saved_wifi_profile_candidate_from_settings, settings_match_access_point,
-    settings_match_wifi_ssid, ssid_bytes_match,
+    settings_match_wifi_ssid, ssid_bytes_match, wifi_settings_need_secret_agent,
 };
 use crate::model::AccessPoint;
 use std::collections::HashMap;
@@ -26,6 +26,51 @@ fn settings_reject_non_wireless_profiles() {
     let settings = wifi_settings("Example", "ethernet");
 
     assert!(!settings_match_wifi_ssid(&settings, b"Example"));
+}
+
+#[test]
+fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets() {
+    let mut settings = wifi_settings("Example", "802-11-wireless");
+    settings.insert(
+        "802-11-wireless-security".to_string(),
+        HashMap::from([
+            (
+                "key-mgmt".to_string(),
+                owned_value(Value::new("wpa-psk".to_string())),
+            ),
+            ("psk-flags".to_string(), owned_value(Value::new(1_u32))),
+        ]),
+    );
+    assert!(wifi_settings_need_secret_agent(&settings, None, None));
+
+    settings
+        .get_mut("802-11-wireless-security")
+        .expect("security settings")
+        .insert(
+            "psk-flags".to_string(),
+            owned_value(Value::new(4_u32)),
+        );
+    assert!(!wifi_settings_need_secret_agent(&settings, None, None));
+
+    settings
+        .get_mut("802-11-wireless-security")
+        .expect("security settings")
+        .remove("psk-flags");
+    let mut secrets = ConnectionSettings::new();
+    secrets.insert("802-11-wireless-security".to_string(), HashMap::new());
+    assert!(wifi_settings_need_secret_agent(&settings, Some(&secrets), None));
+    secrets
+        .get_mut("802-11-wireless-security")
+        .expect("secret settings")
+        .insert(
+            "psk".to_string(),
+            owned_value(Value::new("correct horse battery staple".to_string())),
+        );
+    assert!(!wifi_settings_need_secret_agent(
+        &settings,
+        Some(&secrets),
+        None
+    ));
 }
 
 #[test]

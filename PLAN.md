@@ -1,18 +1,18 @@
-# nm-api migration plan
+# nm-daemon migration plan
 
-Goal: `nm-api` is a local JSON/JSONL NetworkManager adapter for Shelllist and any future GUI/TUI clients. Shelllist owns UI, prompting, presentation, and user flows. `nm-api` owns NetworkManager behavior and the stable machine protocol.
+Goal: `nm-daemon` is a local JSON/JSONL NetworkManager adapter and user D-Bus service for Shelllist and any future GUI/TUI clients. Shelllist owns UI, prompting, presentation, and user flows. `nm-daemon` owns NetworkManager behavior and the stable machine protocol. During migration, the JSON envelope protocol remains `nm-api` version 1 for compatibility.
 
 This is scratch-your-own-itch software: the API may grow from Wi-Fi into broader NetworkManager surfaces as needed.
 
 ## Scope boundary
 
-`nm-api` owns backend behavior:
+`nm-daemon` owns backend behavior:
 
 - NetworkManager D-Bus integration.
 - Wi-Fi device discovery, scans, status, and activation.
 - Saved-profile listing and mutation.
 - Connectivity/portal state.
-- Cache files under `$XDG_RUNTIME_DIR/nm-api`.
+- Cache files under `$XDG_RUNTIME_DIR/nm-daemon`.
 - Structured JSON/JSONL protocol responses.
 - Typed validation and operation errors.
 - Debug/parity probes against `nmcli` where useful.
@@ -63,19 +63,19 @@ Shelllist must check `protocol == "nm-api"` and `version == 1` before relying on
 Current transport remains command-oriented while the boundary hardens. Stable operations are grouped by API surface:
 
 ```bash
-nm-api wifi networks [--cached] [--refresh-cache]
-nm-api wifi scan [--stream] [--cache] [--strict] [--timeout <seconds>] [--retries <count>] [--ifname <iface>] [--ssid <ssid>...]
-nm-api wifi connect <ssid> [--password-stdin] [--bssid <bssid>] [--hidden] [--key-mgmt <hint>] [--wep-key-type key|phrase]
-nm-api wifi connect-target [--wep-key-type key|phrase] < request.json
-nm-api wifi saved
-nm-api wifi profile delete <path>
-nm-api wifi profile autoconnect <path> true|false
-nm-api wifi profile mac-randomization <path> true|false
-nm-api wifi profile share <path>
-nm-api wifi profile send-hostname <path> true|false
-nm-api wifi status
-nm-api wifi disconnect
-nm-api network connectivity
+nm-daemon wifi networks [--cached] [--refresh-cache]
+nm-daemon wifi scan [--stream] [--cache] [--strict] [--timeout <seconds>] [--retries <count>] [--ifname <iface>] [--ssid <ssid>...]
+nm-daemon wifi connect <ssid> [--password-stdin] [--bssid <bssid>] [--hidden] [--key-mgmt <hint>] [--wep-key-type key|phrase]
+nm-daemon wifi connect-target [--wep-key-type key|phrase] < request.json
+nm-daemon wifi saved
+nm-daemon wifi profile delete <path>
+nm-daemon wifi profile autoconnect <path> true|false
+nm-daemon wifi profile mac-randomization <path> true|false
+nm-daemon wifi profile share <path>
+nm-daemon wifi profile send-hostname <path> true|false
+nm-daemon wifi status
+nm-daemon wifi disconnect
+nm-daemon network connectivity
 ```
 
 Debug and unstable surfaces:
@@ -101,7 +101,7 @@ These fields are considered frontend contract fields once emitted in v1 fixtures
 - Capabilities: `can_connect`, `can_connect_now`, `can_connect_with_password`, `needs_password`, `can_connect_with_credentials`, `needs_credentials`, `supported_auth`, `unsupported_reason`.
 - Auth descriptors: `auth.kind`, `auth.key_management`, `auth.required_fields`, `auth.optional_fields`, `auth.note`.
 - Status: `active`, `access_point`, `network`, `profile`, `connectivity`, `ip4`, `wireless`, `metered`, `active_since_ms`.
-- Results: `result.status`, `result.message`, typed failure `reason`, `connectivity`, `suggest_open_portal`.
+- Results: `result.status`, `result.message`, typed failure `reason`, connect engine `path`, `connectivity`, `suggest_open_portal`.
 
 ## Typed frontend error codes
 
@@ -110,59 +110,78 @@ Use these codes at the Shelllist boundary:
 - `invalid-request`
 - `validation-error`
 - `secret-required`
+- `wrong-password`
+- `password-unavailable`
 - `credentials-required`
 - `authorization-required`
 - `unsupported-auth`
 - `not-found`
 - `networkmanager-unavailable`
 - `timeout`
+- `dhcp-failed`
 - `activation-failed`
 - `disconnect-failed`
 - `internal-error`
 - `unknown` only for genuinely unclassified failures
 
-## Fixture/schema plan
+## Fixture/schema status
 
-The existing contract fixture is now enveloped as `data.fixture`. Add per-method fixtures next:
+The combined contract fixture is enveloped as `data.fixture` from:
 
-- `contracts/v1/wifi-networks.saved.json`
-- `contracts/v1/wifi-networks.password-required.json`
-- `contracts/v1/wifi-networks.enterprise-required.json`
-- `contracts/v1/wifi-status.active.json`
-- `contracts/v1/wifi-status.inactive.json`
-- `contracts/v1/wifi-connect.success.json`
-- `contracts/v1/wifi-connect.secret-required.json`
-- `contracts/v1/wifi-scan.stream.jsonl`
-- `contracts/v1/wifi-profile.share.json`
+```bash
+nm-daemon debug contract-fixture
+```
+
+Per-method fixture payloads are emitted as `data.fixtures` from:
+
+```bash
+nm-daemon debug contract-fixtures
+```
+
+The fixture map currently covers:
+
+- `wifi-networks.saved`
+- `wifi-networks.password-required`
+- `wifi-networks.enterprise-required`
+- `wifi-status.active`
+- `wifi-status.inactive`
+- `wifi-connect.success`
+- `wifi-connect.secret-required`
+- `wifi-scan.stream`
+- `wifi-profile.share`
 
 Shelllist checks should validate envelopes and contract fields before runtime.
 
 ## Migration status
 
-Started:
+Implemented in this repository:
 
-1. Renamed project/binary/crate/docs references from `nm-wifi` to `nm-api`.
-2. Moved runtime cache/log paths to `$XDG_RUNTIME_DIR/nm-api` and `NM_API_*` logging environment variables.
-3. Removed `--password <secret>` from the CLI structs; stdin is the only secret transport.
-4. Removed the `active` command from the supported command enum.
-5. Made core API responses use the v1 envelope (`protocol`, `version`, `ok`, `data`, and typed `error` for connect failures).
-6. Updated Shelllist to invoke `nm-api` and unwrap v1 response envelopes.
-7. Updated the Shelllist contract check to validate the v1 envelope.
-8. Moved `diagnose` and `contract-fixture` under the explicit `debug` namespace.
-9. Added stdin request JSON for `connect-target` and updated Shelllist to send targets/secrets through that transport; positional target JSON remains temporarily compatible.
-10. Added `protocol`, `version`, and `stream` metadata to scan JSONL events.
-11. Removed stable `--json` no-op flags, the `list` compatibility alias, and positional `connect-target <target-json>`.
-12. Added per-method v1 fixture output and Shelllist schema checks for network/status/connect/scan/profile shapes.
-13. Added top-level typed JSON error envelopes for unhandled command failures while avoiding duplicate connect-error reports.
-14. Re-ran rust-quality-lens `measure all` successfully.
-15. Reshaped stable commands into grouped namespaces: `wifi ...`, `network ...`, and `debug ...`.
-16. Added `nm-api-connect-parity-probe`, a simple command-line probe that compares `nm-api wifi connect-target` against `nmcli device wifi connect` across visible networks and writes progress plus JSONL/summary logs for review.
-17. Reviewed NetworkManager `nmcli device wifi connect` behavior: nmcli resolves an AP at activation time by SSID/BSSID on the selected Wi-Fi device, then uses AvailableConnections or AddAndActivateConnection with the AP object path. nm-api now re-resolves stale exact AP object paths by SSID+BSSID before falling back, classifies nmcli "not found" failures as `not-found`, and trims post-connect status waiting to reduce command latency.
-18. Made connect waits signal-assisted: nm-api subscribes to NetworkManager device `State`/`ActiveConnection` and Wi-Fi `ActiveAccessPoint` property changes and wakes the activation loop from those signals instead of sleeping through each poll interval.
-19. Moved full network cache refresh after successful connect into a background worker so the response is not blocked by a full list/enrichment refresh.
+1. Renamed the Rust package/binary and repository target to `nm-daemon` while preserving the `nm-api` v1 JSON protocol envelope.
+2. Moved runtime/state/log paths to `$XDG_RUNTIME_DIR/nm-daemon` and `$XDG_STATE_HOME/nm-daemon`, with `NM_DAEMON_*` log env vars and temporary `NM_API_*` fallbacks.
+3. Removed unsupported frontend surfaces such as plaintext/TSV output, the `active` shortcut, the `list` compatibility alias, stable no-op `--json` flags, and argv password transport. Secrets now move through stdin JSON, `--password-stdin`, D-Bus request JSON, or the SecretAgent response path.
+4. Reshaped stable CLI commands into grouped namespaces: `wifi ...`, `network ...`, and `debug ...`.
+5. Added v1 JSON envelopes, typed frontend error codes, per-method contract fixtures, and Shelllist schema checks for network/status/connect/scan/profile shapes.
+6. Added parity tooling: `debug diagnose` and `tools/connect-parity-probe.sh` compare daemon behavior against relevant `nmcli` surfaces.
+7. Improved connect parity with `nmcli`: AP re-resolution by SSID/BSSID, one targeted rescan before fallback, `not-found` classification, signal-assisted activation waits, shorter post-connect waits, background cache refresh, and structured connect-attempt history.
+8. Added `nm-daemon daemon`, exporting a session-bus service at `org.laufan.NmDaemon` `/org/laufan/NmDaemon` with interface `org.laufan.NmDaemon1`.
+9. Implemented D-Bus `Call`, `Subscribe`, `Cancel`, and `Event(stream, event_json)`.
+10. Implemented D-Bus method keys: `wifi.status`, `network.connectivity`, `wifi.networks`, `wifi.scan`, `wifi.connectTarget`/`wifi.connect-target`, `wifi.secret.capabilities`, and `wifi.secret.provide`.
+11. Added CLI forwarding for read-only methods (`wifi.status`, `wifi.networks`, `network.connectivity`) through the daemon, with `--direct` and `NM_DAEMON_DIRECT=1` as recovery/debug escape hatches.
+12. Added event streams for scan/status/connectivity/connect flows. Scan and connect calls return immediately with a `request_id`; clients consume follow-up `Event` signals.
+13. Added real NetworkManager SecretAgent registration on the system bus at `/org/laufan/NmDaemon/SecretAgent`, bridging `GetSecrets`/`CancelGetSecrets` to `wifi.secret` requested/cancelled events and `wifi.secret.provide` responses.
+14. Added Secret Service keyring lookup/store/delete support for `wifi.secret.provide save:true`, NetworkManager `SaveSecrets`, and `DeleteSecrets`. Secret lookup prefers stable NetworkManager UUIDs and falls back to connection paths.
+15. Expanded SecretAgent key mapping for `802-11-wireless-security`, `802-1x`, `vpn`, `gsm`, and `cdma` settings. Prompt events include `secret_keys` and `primary_secret_key` for Shelllist forms.
+16. Added deep best-effort connect cancellation: `Cancel(connect-*)` kills in-flight `nmcli`, interrupts activation waits, and asks NetworkManager to disconnect/abort active Wi-Fi activation through a parallel cancellation watcher. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call.
+17. Added packaged systemd user service metadata for `nm-daemon daemon`.
+18. Re-ran `cargo fmt`, `cargo clippy -D warnings`, `cargo test`, `cargo build`, and rust-quality-lens after the daemon/cancellation/keyring work.
 
-Next:
+## Remaining open items
 
-1. Re-run connect parity probe to verify the JOE & THE JUICE stale-AP gap is closed and compare latency again.
-2. Investigate saved-profile secret availability so networks like `oldNote` are not advertised as `can_connect_now` when NetworkManager will still require a secret.
-3. Expand request schemas beyond `connect-target` as new NetworkManager surfaces are added.
+1. Update Shelllist to call `org.laufan.NmDaemon1.Call` for `wifi.status`, `network.connectivity`, and `wifi.networks`.
+2. Update Shelllist scan refresh to `Subscribe(["wifi.scan"])` plus `Call("wifi.scan", params_json)` and filter events by `request_id`.
+3. Enable the installed `nm-daemon.service` user unit in the host/Home Manager configuration; add a D-Bus activation file later as a startup fallback.
+4. Update Shelllist connect forms to `Call("wifi.connectTarget", ...)` and consume `wifi.connect` events by `request_id`.
+5. Wire Shelllist secret prompts to `wifi.secret` requested/cancelled events and answer with `Call("wifi.secret.provide", ...)`. Use `secret_keys` and `primary_secret_key` to label fields and choose the primary password/PIN entry.
+6. Add handling for Secret Service prompt objects returned by locked collections or create/delete operations that require desktop interaction.
+7. Run real Wi-Fi connect/cancel/SecretAgent/keyring integration tests on target machines.
+8. Continue reviewing rust-quality-lens hotspots after recent daemon, cancellation, and keyring additions.

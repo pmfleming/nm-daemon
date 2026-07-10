@@ -52,16 +52,18 @@ pub(crate) enum StreamOutput<'a> {
     },
 }
 
-pub(crate) fn print_access_points_json(aps: &[AccessPoint]) -> Result<()> {
-    print_api_data("access_points", aps, "serialize AP response JSON")
+macro_rules! print_api_data_fns {
+    ($($name:ident($arg:ident: $ty:ty) => $key:literal, $context:literal;)+) => {
+        $(pub(crate) fn $name($arg: $ty) -> Result<()> {
+            print_api_data($key, $arg, $context)
+        })+
+    };
 }
 
-pub(crate) fn print_network_entries_json(networks: &[NetworkEntry]) -> Result<()> {
-    print_api_data("networks", networks, "serialize network response JSON")
-}
-
-pub(crate) fn print_saved_wifi_connections_json(profiles: &[SavedWifiConnection]) -> Result<()> {
-    print_api_data("profiles", profiles, "serialize saved Wi-Fi response JSON")
+print_api_data_fns! {
+    print_access_points_json(aps: &[AccessPoint]) => "access_points", "serialize AP response JSON";
+    print_network_entries_json(networks: &[NetworkEntry]) => "networks", "serialize network response JSON";
+    print_saved_wifi_connections_json(profiles: &[SavedWifiConnection]) => "profiles", "serialize saved Wi-Fi response JSON";
 }
 
 pub(crate) fn print_connect_result(result: &ConnectResult) -> Result<()> {
@@ -91,28 +93,22 @@ pub(crate) fn print_connect_result(result: &ConnectResult) -> Result<()> {
     print_api_data("result", result, "serialize connect response JSON")
 }
 
-pub(crate) fn print_connectivity(status: &ConnectivityStatus) -> Result<()> {
-    print_api_data(
-        "connectivity",
-        status,
-        "serialize connectivity response JSON",
-    )
-}
-
-pub(crate) fn print_wifi_status(status: &WifiStatus) -> Result<()> {
-    print_api_data("status", status, "serialize Wi-Fi status response JSON")
-}
-
-pub(crate) fn print_wifi_share_payload(payload: &WifiSharePayload) -> Result<()> {
-    print_api_data("payload", payload, "serialize Wi-Fi share response JSON")
-}
-
-pub(crate) fn print_disconnect_result(result: &DisconnectResult) -> Result<()> {
-    print_api_data("result", result, "serialize disconnect response JSON")
+print_api_data_fns! {
+    print_connectivity(status: &ConnectivityStatus) => "connectivity", "serialize connectivity response JSON";
+    print_wifi_status(status: &WifiStatus) => "status", "serialize Wi-Fi status response JSON";
+    print_wifi_share_payload(payload: &WifiSharePayload) => "payload", "serialize Wi-Fi share response JSON";
+    print_disconnect_result(result: &DisconnectResult) => "result", "serialize disconnect response JSON";
 }
 
 pub(crate) fn print_api_error(code: &str, message: &str) -> Result<()> {
-    let envelope = json!({
+    print_pretty_json(
+        &api_error_value(code, message),
+        "serialize API error response JSON",
+    )
+}
+
+pub(crate) fn api_error_value(code: &str, message: &str) -> Value {
+    json!({
         "protocol": API_PROTOCOL,
         "version": API_VERSION,
         "ok": false,
@@ -122,8 +118,7 @@ pub(crate) fn print_api_error(code: &str, message: &str) -> Result<()> {
             "details": {},
         },
         "data": {},
-    });
-    print_pretty_json(&envelope, "serialize API error response JSON")
+    })
 }
 
 pub(crate) fn print_api_message(message: &str) -> Result<()> {
@@ -139,18 +134,20 @@ pub(crate) fn print_api_data<T: Serialize + ?Sized>(
     value: &T,
     context: &'static str,
 ) -> Result<()> {
-    let mut data = Map::new();
-    data.insert(
-        key.to_string(),
-        serde_json::to_value(value).context(context)?,
-    );
-    let envelope = json!({
+    print_pretty_json(&api_data_value(key, value, context)?, context)
+}
+
+pub(crate) fn api_data_value<T: Serialize + ?Sized>(
+    key: &str,
+    value: &T,
+    context: &'static str,
+) -> Result<Value> {
+    Ok(json!({
         "protocol": API_PROTOCOL,
         "version": API_VERSION,
         "ok": true,
-        "data": data,
-    });
-    print_pretty_json(&envelope, context)
+        "data": api_data_map(key, value, context)?,
+    }))
 }
 
 fn print_api_error_with_data<T: Serialize + ?Sized>(
@@ -159,19 +156,27 @@ fn print_api_error_with_data<T: Serialize + ?Sized>(
     value: &T,
     context: &'static str,
 ) -> Result<()> {
-    let mut data = Map::new();
-    data.insert(
-        key.to_string(),
-        serde_json::to_value(value).context(context)?,
-    );
     let envelope = json!({
         "protocol": API_PROTOCOL,
         "version": API_VERSION,
         "ok": false,
         "error": error,
-        "data": data,
+        "data": api_data_map(key, value, context)?,
     });
     print_pretty_json(&envelope, context)
+}
+
+fn api_data_map<T: Serialize + ?Sized>(
+    key: &str,
+    value: &T,
+    context: &'static str,
+) -> Result<Map<String, Value>> {
+    let mut data = Map::new();
+    data.insert(
+        key.to_string(),
+        serde_json::to_value(value).context(context)?,
+    );
+    Ok(data)
 }
 
 fn connect_failure_code(reason: &ConnectFailureReason) -> Result<String> {

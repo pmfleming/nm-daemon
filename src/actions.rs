@@ -69,6 +69,7 @@ fn connect_error(target: &WifiConnectTarget, err: &anyhow::Error) -> ConnectResu
     ConnectResult {
         status: "error",
         reason: Some(connect::connect_failure_reason(err)),
+        path: None,
         ssid: target.ssid.clone(),
         message,
         connectivity: None,

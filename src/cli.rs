@@ -5,21 +5,26 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use crate::model::WepKeyType;
 
 #[derive(Parser)]
-#[command(name = "nm-api")]
-#[command(about = "NetworkManager JSON/JSONL API adapter")]
+#[command(name = "nm-daemon")]
+#[command(about = "NetworkManager JSON/JSONL API adapter and user D-Bus service")]
 pub(crate) struct Cli {
     /// Increase stderr logging verbosity (-v info, -vv debug). Detailed logs always go to the log file.
     #[arg(short, long, global = true, action = ArgAction::Count)]
     pub(crate) verbose: u8,
-    /// Write detailed logs to this file instead of $XDG_RUNTIME_DIR/nm-api/nm-api.log.
+    /// Write detailed logs to this file instead of $XDG_RUNTIME_DIR/nm-daemon/nm-daemon.log.
     #[arg(long, global = true)]
     pub(crate) log_file: Option<PathBuf>,
+    /// Bypass the user D-Bus service and run the command implementation in this process.
+    #[arg(long, global = true)]
+    pub(crate) direct: bool,
     #[command(subcommand)]
     pub(crate) command: Command,
 }
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Run the long-lived user D-Bus service.
+    Daemon,
     /// Wi-Fi NetworkManager API operations.
     Wifi {
         #[command(subcommand)]
@@ -68,7 +73,7 @@ pub(crate) enum NetworkCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum DebugCommand {
-    /// Compare nm-api's active/cached Wi-Fi data with nmcli.
+    /// Compare nm-daemon's active/cached Wi-Fi data with nmcli.
     Diagnose {
         /// Emit JSON instead of debug text.
         #[arg(long)]
@@ -107,7 +112,7 @@ pub(crate) struct ScanOptions {
     /// Number of scan request retries when NetworkManager rejects a request.
     #[arg(long, default_value_t = 2)]
     pub(crate) retries: u32,
-    /// Write latest snapshot/status files under $XDG_RUNTIME_DIR/nm-api.
+    /// Write latest snapshot/status files under $XDG_RUNTIME_DIR/nm-daemon.
     #[arg(long)]
     pub(crate) cache: bool,
     /// Restrict scan to a Wi-Fi interface.
@@ -150,33 +155,36 @@ pub(crate) struct ConnectTargetOptions {
 pub(crate) enum ProfileCommand {
     /// Delete/forget a saved Wi-Fi profile.
     Delete {
-        /// NetworkManager settings object path, from `nm-api wifi saved`.
+        /// NetworkManager settings object path, from `nm-daemon wifi saved`.
         path: String,
     },
     /// Enable or disable autoconnect for a saved Wi-Fi profile.
     Autoconnect {
-        /// NetworkManager settings object path, from `nm-api wifi saved`.
+        /// NetworkManager settings object path, from `nm-daemon wifi saved`.
         path: String,
         /// true to enable autoconnect, false to disable it.
+        #[arg(action = ArgAction::Set)]
         enabled: bool,
     },
     /// Set per-profile Wi-Fi MAC privacy.
     MacRandomization {
-        /// NetworkManager settings object path, from `nm-api wifi saved`.
+        /// NetworkManager settings object path, from `nm-daemon wifi saved`.
         path: String,
         /// true uses a stable randomized MAC, false uses the device's permanent MAC.
+        #[arg(action = ArgAction::Set)]
         randomized: bool,
     },
     /// Build a standard Wi-Fi QR payload for a shareable saved profile.
     Share {
-        /// NetworkManager settings object path, from `nm-api wifi saved`.
+        /// NetworkManager settings object path, from `nm-daemon wifi saved`.
         path: String,
     },
     /// Enable or disable sending this device's hostname through DHCP for a saved profile.
     SendHostname {
-        /// NetworkManager settings object path, from `nm-api wifi saved`.
+        /// NetworkManager settings object path, from `nm-daemon wifi saved`.
         path: String,
         /// true to send hostname, false to keep device name private.
+        #[arg(action = ArgAction::Set)]
         enabled: bool,
     },
 }

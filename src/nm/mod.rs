@@ -32,7 +32,7 @@ pub(super) const NM_DEVICE_STATE_DISCONNECTED: u32 = 30;
 pub(super) const NM_DEVICE_STATE_ACTIVATED: u32 = 100;
 pub(super) const NM_ACTIVE_CONNECTION_STATE_ACTIVATED: u32 = 2;
 
-pub(super) type ConnectionSettings = HashMap<String, HashMap<String, OwnedValue>>;
+pub(crate) type ConnectionSettings = HashMap<String, HashMap<String, OwnedValue>>;
 
 pub(super) fn owned_value<T>(value: T) -> Result<OwnedValue>
 where

@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use tracing_subscriber::Layer;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::prelude::*;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Clone)]
 struct SharedFileWriter {
@@ -44,7 +46,9 @@ impl Write for LockedFileWriter {
 }
 
 pub(crate) fn init(verbose: u8, log_file: Option<PathBuf>) -> Result<PathBuf> {
-    let env_log_file = std::env::var_os("NM_API_LOG_FILE").map(PathBuf::from);
+    let env_log_file = std::env::var_os("NM_DAEMON_LOG_FILE")
+        .or_else(|| std::env::var_os("NM_API_LOG_FILE"))
+        .map(PathBuf::from);
     let use_default_log_path = log_file.is_none() && env_log_file.is_none();
     let log_path = log_file
         .or(env_log_file)
@@ -74,9 +78,11 @@ pub(crate) fn init(verbose: u8, log_file: Option<PathBuf>) -> Result<PathBuf> {
             .with_context(|| format!("chmod 0600 {}", log_path.display()))?;
     }
 
-    let stderr_filter = EnvFilter::try_from_env("NM_API_STDERR_LOG")
+    let stderr_filter = EnvFilter::try_from_env("NM_DAEMON_STDERR_LOG")
+        .or_else(|_| EnvFilter::try_from_env("NM_API_STDERR_LOG"))
         .unwrap_or_else(|_| EnvFilter::new(stderr_directive(verbose)));
-    let file_filter = EnvFilter::try_from_env("NM_API_LOG")
+    let file_filter = EnvFilter::try_from_env("NM_DAEMON_LOG")
+        .or_else(|_| EnvFilter::try_from_env("NM_API_LOG"))
         .unwrap_or_else(|_| EnvFilter::new(file_directive(verbose)));
 
     let stderr_layer = tracing_subscriber::fmt::layer()
@@ -129,7 +135,7 @@ fn stderr_directive(verbose: u8) -> &'static str {
 
 fn file_directive(verbose: u8) -> &'static str {
     match verbose {
-        0 | 1 => "nm_api=debug,warn",
+        0 | 1 => "nm_daemon=debug,warn",
         _ => "debug",
     }
 }

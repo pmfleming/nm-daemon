@@ -9,8 +9,13 @@ use super::{
 };
 use crate::model::{
     AccessPoint, NetworkEntry, ProfilePrivacy, SavedWifiConnection, WifiConnectTarget, WifiDevice,
-    WifiSharePayload, display_ssid, network_entries_with_profile_matches,
+    WifiSharePayload, ap_supports_enterprise, ap_supports_psk, ap_uses_wep, display_ssid,
+    network_entries_with_profile_matches,
 };
+
+const NM_SECRET_FLAG_AGENT_OWNED: u32 = 0x1;
+const NM_SECRET_FLAG_NOT_SAVED: u32 = 0x2;
+const NM_SECRET_FLAG_NOT_REQUIRED: u32 = 0x4;
 
 impl Nm {
     pub(super) fn saved_wifi_activation_target_for(
@@ -78,7 +83,7 @@ impl Nm {
                 .entry("802-11-wireless".to_string())
                 .or_default()
                 .insert(
-                    "cloned-mac-address".to_string(),
+                    "assigned-mac-address".to_string(),
                     owned_value(if randomized { "stable" } else { "permanent" }.to_string())?,
                 );
             Ok(())
@@ -131,6 +136,22 @@ impl Nm {
         }
         connections.sort_by_key(|connection| connection.id.to_lowercase());
         Ok(connections)
+    }
+
+    pub(super) fn saved_wifi_connection_needs_secret_agent(
+        &self,
+        path: &OwnedObjectPath,
+        ap: Option<&AccessPoint>,
+    ) -> Result<bool> {
+        let settings = self.connection_settings(path)?;
+        let secrets = self
+            .connection_secrets(path, "802-11-wireless-security")
+            .ok();
+        Ok(wifi_settings_need_secret_agent(
+            &settings,
+            secrets.as_ref(),
+            ap,
+        ))
     }
 
     pub(crate) fn wifi_share_payload_by_path(&self, path: &str) -> Result<WifiSharePayload> {
@@ -508,6 +529,81 @@ fn secret_string(
         .filter(|value| !value.is_empty())
 }
 
+fn wifi_settings_need_secret_agent(
+    settings: &ConnectionSettings,
+    secrets: Option<&ConnectionSettings>,
+    ap: Option<&AccessPoint>,
+) -> bool {
+    let Some(security) = settings.get("802-11-wireless-security") else {
+        return false;
+    };
+    let key_mgmt = setting_string(security, "key-mgmt").unwrap_or_default();
+    if key_mgmt == "owe" {
+        return false;
+    }
+
+    if key_mgmt == "wpa-psk"
+        || key_mgmt == "sae"
+        || ap.is_some_and(|ap| ap_supports_psk(ap.wpa_flags, ap.rsn_flags))
+    {
+        return required_secret_needs_agent(settings, secrets, "psk", "psk-flags");
+    }
+
+    if key_mgmt == "none"
+        || key_mgmt.is_empty()
+        || ap.is_some_and(|ap| ap_uses_wep(ap.flags, ap.wpa_flags, ap.rsn_flags))
+    {
+        let key_index = security
+            .get("wep-tx-keyidx")
+            .and_then(setting_u32)
+            .unwrap_or(0)
+            .min(3);
+        let key = format!("wep-key{key_index}");
+        let flags_key = format!("{key}-flags");
+        return required_secret_needs_agent(settings, secrets, &key, &flags_key);
+    }
+
+    if key_mgmt.contains("eap")
+        || ap.is_some_and(|ap| ap_supports_enterprise(ap.wpa_flags, ap.rsn_flags))
+    {
+        return [
+            ("password", "password-flags"),
+            ("private-key-password", "private-key-password-flags"),
+            ("pin", "pin-flags"),
+        ]
+        .into_iter()
+        .any(|(secret_key, flags_key)| {
+            required_secret_needs_agent(settings, secrets, secret_key, flags_key)
+        });
+    }
+
+    false
+}
+
+fn required_secret_needs_agent(
+    settings: &ConnectionSettings,
+    secrets: Option<&ConnectionSettings>,
+    secret_key: &str,
+    flags_key: &str,
+) -> bool {
+    let flags = secret_flags(settings, flags_key);
+    if flags & NM_SECRET_FLAG_NOT_REQUIRED != 0 {
+        return false;
+    }
+    if flags & (NM_SECRET_FLAG_AGENT_OWNED | NM_SECRET_FLAG_NOT_SAVED) != 0 {
+        return true;
+    }
+    secrets.is_some() && secret_string(settings, secrets, secret_key).is_none()
+}
+
+fn secret_flags(settings: &ConnectionSettings, flags_key: &str) -> u32 {
+    settings
+        .get("802-11-wireless-security")
+        .and_then(|section| section.get(flags_key))
+        .and_then(setting_u32)
+        .unwrap_or(0)
+}
+
 fn section_has_key(settings: &ConnectionSettings, section: &str, key: &str) -> bool {
     settings
         .get(section)
@@ -541,7 +637,10 @@ fn wifi_qr_escape(value: &str) -> String {
 fn privacy_from_settings(settings: &ConnectionSettings) -> ProfilePrivacy {
     let mac_address_policy = settings
         .get("802-11-wireless")
-        .and_then(|wireless| setting_string(wireless, "cloned-mac-address"))
+        .and_then(|wireless| {
+            setting_string(wireless, "assigned-mac-address")
+                .or_else(|| setting_string(wireless, "cloned-mac-address"))
+        })
         .unwrap_or_else(|| "default".to_string());
     let randomized_mac = matches!(mac_address_policy.as_str(), "random" | "stable");
     let ipv4_send_hostname = settings
@@ -617,7 +716,11 @@ fn setting_string(settings: &HashMap<String, OwnedValue>, key: &str) -> Option<S
 }
 
 fn setting_value_string(value: &OwnedValue) -> Option<String> {
-    value.try_clone().ok()?.try_into().ok()
+    value
+        .try_clone()
+        .ok()
+        .and_then(|value| value.try_into().ok())
+        .or_else(|| String::from_utf8(setting_bytes(value)?).ok())
 }
 
 fn setting_bool(value: &OwnedValue) -> Option<bool> {
