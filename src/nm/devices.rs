@@ -59,7 +59,7 @@ impl Nm {
         let target_ssid = target.ssid_bytes();
         let matches = access_point_matches(
             &ap,
-            target_ssid.as_ref(),
+            target_ssid,
             target.ap_path.as_deref(),
             target.bssid.as_deref(),
         );
@@ -391,7 +391,7 @@ mod tests {
             ssid: "Example".to_string(),
             ssid_bytes: b"Example".to_vec(),
             active: false,
-            security: "WPA2/3".to_string(),
+            security: crate::model::Security::Wpa2Or3,
             strength: 80,
             frequency: 2412,
             channel: 1,

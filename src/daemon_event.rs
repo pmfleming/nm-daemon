@@ -2,6 +2,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 
+use crate::protocol::Stream;
+
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn next_request_id(prefix: &str) -> String {
@@ -10,7 +12,7 @@ pub(crate) fn next_request_id(prefix: &str) -> String {
 }
 
 pub(crate) fn event_json(
-    stream: &str,
+    stream: Stream,
     request_id: Option<&str>,
     event: &str,
     mut data: Value,
@@ -29,7 +31,7 @@ pub(crate) fn event_json(
     serde_json::to_string(&data).unwrap_or_else(|err| fallback_event_json(stream, err))
 }
 
-fn fallback_event_json(stream: &str, err: serde_json::Error) -> String {
+fn fallback_event_json(stream: Stream, err: serde_json::Error) -> String {
     json!({
         "protocol": crate::output::API_PROTOCOL,
         "version": crate::output::API_VERSION,

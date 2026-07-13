@@ -18,7 +18,13 @@ pub(crate) fn emit_snapshot(nm: &Nm, scanning: bool, cache: bool) -> Result<usiz
         crate::cache::write_live_scan_snapshot(scanning, &access_points)?;
     }
     let mut networks = nm.network_entries_for_access_points(access_points)?;
-    crate::cache::attach_connection_details(&mut networks);
+    match crate::cache::attach_connection_details(&mut networks)? {
+        crate::cache::CacheRead::Available(_) | crate::cache::CacheRead::Missing => {}
+        state => tracing::warn!(
+            message = %state.unavailable_message("known-connections cache").unwrap_or_default(),
+            "connection details are unavailable for scan stream"
+        ),
+    }
     emit_stream_event(&StreamOutput::Snapshot {
         scanning,
         networks_found,

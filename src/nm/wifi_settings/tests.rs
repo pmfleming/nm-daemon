@@ -263,7 +263,7 @@ fn test_ap(rsn_flags: u32) -> AccessPoint {
     AccessPoint {
         ssid: "Example".to_string(),
         ssid_bytes: b"Example".to_vec(),
-        security: "WPA2/3".to_string(),
+        security: crate::model::Security::Wpa2Or3,
         strength: 50,
         frequency: 2412,
         band: "2.4 GHz".to_string(),

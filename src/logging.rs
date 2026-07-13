@@ -60,7 +60,7 @@ pub(crate) fn init(verbose: u8, log_file: Option<PathBuf>) -> Result<PathBuf> {
             create_log_parent(parent)?;
         }
     }
-    reject_symlink(&log_path)?;
+    crate::cache::reject_symlink_file(&log_path, "log file")?;
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -104,18 +104,6 @@ pub(crate) fn init(verbose: u8, log_file: Option<PathBuf>) -> Result<PathBuf> {
 
     tracing::info!(path = %log_path.display(), "logging initialized");
     Ok(log_path)
-}
-
-fn reject_symlink(path: &Path) -> Result<()> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("lstat {}", path.display())),
-    };
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("refusing to use symlinked log file {}", path.display());
-    }
-    Ok(())
 }
 
 fn create_log_parent(parent: &Path) -> Result<()> {

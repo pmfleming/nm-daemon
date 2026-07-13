@@ -8,9 +8,13 @@ Local NetworkManager JSON/JSONL adapter and user D-Bus service for Shelllist and
 
 - Long-lived user D-Bus service is implemented at `org.laufan.NmDaemon` and packaged as `nm-daemon.service`.
 - The host NixOS/Home Manager setup enables the user service at login; D-Bus activation is still a future fallback path.
-- Read-only CLI calls can forward through the daemon; mutating/profile/debug commands still run directly.
-- Event-driven scan, connect, status/connectivity subscriptions, connect cancellation, and NetworkManager SecretAgent bridging are implemented.
-- Shelllist still needs to migrate from CLI calls to the D-Bus API/events.
+- Read-only, disconnect, and saved-profile CLI calls forward through the daemon; scan/connect/debug commands retain direct implementations.
+- CLI and D-Bus adapters share one typed application layer for status, network listing, scan, connect, disconnect, and saved-profile operations.
+- Connection orchestration is an explicit state machine with centralized fallback, verification, cancellation, and cleanup policy.
+- The daemon owns one NetworkManager connection, bounded background work, and signal-driven shared subscriptions; it does not create a polling thread per subscriber.
+- Typed protocol registries, errors, identifiers, authentication/readiness states, cache results, and command results define the internal boundaries while custom serializers preserve the `nm-api` v1 response fields.
+- Event-driven scan/connect, cancellation, NetworkManager SecretAgent bridging, transactional keyring outcomes, and concurrency-safe cache repositories are implemented.
+- `nm-daemon client` provides a long-lived JSONL frontend session over one D-Bus connection for Shelllist and similar process-oriented UIs.
 
 Stable responses use protocol envelope v1:
 
@@ -30,10 +34,16 @@ Failures use typed errors:
   "protocol": "nm-api",
   "version": 1,
   "ok": false,
-  "error": { "code": "secret-required", "message": "...", "details": {} },
+  "error": {
+    "code": "secret-required",
+    "message": "...",
+    "details": { "operation": "connect", "source": "network-manager" }
+  },
   "data": {}
 }
 ```
+
+See [the architecture guide](./docs/architecture.md) for component ownership, state transitions, cache/command/runtime guarantees, and test boundaries.
 
 ## D-Bus service
 
@@ -54,16 +64,13 @@ Current D-Bus surface:
   - `Cancel(in s request_id) -> ()`
 - Signal: `Event(s stream, s event_json)`
 
-Implemented method keys:
+The canonical method/stream registry—including aliases, parameter shapes, response keys, subscription defaults, and events—is generated in [`docs/dbus-daemon.md`](./docs/dbus-daemon.md). `nm-daemon debug protocol-registry` exposes it as JSON for frontend code generation.
 
-- `wifi.status` with `{}`
-- `network.connectivity` with `{}`
-- `wifi.networks` with `{ "cached": false, "refresh_cache": false, "refresh_timeout": 10 }`
-- `wifi.scan` with `{ "timeout": 12, "strict": false, "cache": false, "ifname": null, "ssids": [] }`, returning a `request_id` and emitting `wifi.scan` events
-- `wifi.connectTarget` / `wifi.connect-target` with `{ "target": { ... }, "password": null, "wep_key_type": null }`, returning a `request_id` and emitting `wifi.connect` events; `Cancel(request_id)` kills nmcli fallback, interrupts activation waits, and aborts NetworkManager activation best-effort
-- `wifi.secret.capabilities` / `wifi.secret.provide` for NetworkManager SecretAgent prompt bridging and optional Secret Service keyring persistence
+Frontends that cannot conveniently maintain an arbitrary D-Bus client can run `nm-daemon client`. It accepts JSONL `call`, `subscribe`, `cancel`, and `shutdown` messages on stdin and emits correlated `response` and `event` messages on stdout. It filters operation events to IDs started by that session, preserves response-before-event ordering, and cancels owned requests/subscriptions when stdin closes.
 
-`response_json` is the same `nm-api` v1 envelope the CLI prints today. See [`docs/dbus-daemon.md`](./docs/dbus-daemon.md) for Shelllist integration notes and migration progress.
+Contract fixtures derive network/authentication readiness through the production model constructors. Tests lock their serialized v1 boundary in [`test_support/contract-v1.json`](./test_support/contract-v1.json) and exercise the real daemon D-Bus lifecycle against in-process fake NetworkManager and Secret Service peers, alongside scripted command fallback and concurrent cache I/O.
+
+`response_json` is the same `nm-api` v1 envelope the CLI prints today. Shelllist should refresh scan caches only while the network UI is in use: call `wifi.networks` with `cached:true, refresh_cache:true` for fast open/background warming, or `wifi.scan` with `cache:true` for explicit refresh events. See the daemon documentation for Shelllist integration notes and migration progress.
 
 ## Startup and packaging
 
@@ -77,19 +84,21 @@ The current host configuration enables this user service at `default.target`, so
 
 ## CLI compatibility
 
-When the user D-Bus service is available, read-only CLI commands currently forward through `org.laufan.NmDaemon1.Call` for parity with Shelllist's migration path. Use `--direct` or `NM_DAEMON_DIRECT=1` to bypass the daemon for debugging/recovery.
+When the user D-Bus service is available, compatible CLI commands forward through `org.laufan.NmDaemon1.Call`. Use `--direct` or `NM_DAEMON_DIRECT=1` to bypass the daemon for debugging/recovery.
 
 Forwarded today:
 
 - `nm-daemon wifi status`
 - `nm-daemon wifi networks ...`
 - `nm-daemon network connectivity`
+- `nm-daemon wifi disconnect`
+- `nm-daemon wifi profile delete|autoconnect|mac-randomization|share|send-hostname ...`
 
 Current Wi-Fi commands:
 
 ```bash
-nm-daemon wifi networks [--cached] [--refresh-cache]
-nm-daemon wifi scan [--stream] [--cache] [--strict] [--timeout <seconds>] [--retries <count>] [--ifname <iface>] [--ssid <ssid>...]
+nm-daemon wifi networks [--cached] [--refresh-cache] [--refresh-timeout <seconds>]
+nm-daemon wifi scan [--stream] [--cache] [--quiet] [--strict] [--timeout <seconds>] [--retries <count>] [--ifname <iface>] [--ssid <ssid>...]
 nm-daemon wifi connect <ssid> [--password-stdin] [--bssid <bssid>] [--hidden] [--key-mgmt <hint>] [--wep-key-type key|phrase]
 nm-daemon wifi connect-target [--wep-key-type key|phrase] < request.json
 nm-daemon wifi saved
@@ -105,13 +114,13 @@ nm-daemon network connectivity
 
 `connect-target` reads stdin JSON: `{ "target": { ... }, "password": "optional secret" }`.
 
-Debug/unstable surfaces live under `debug`, including `debug diagnose`, `debug contract-fixture`, and `debug contract-fixtures`.
+Debug/unstable surfaces live under `debug`, including `debug diagnose`, `debug contract-fixture`, `debug contract-fixtures`, and `debug protocol-registry`.
 
 Secrets must use stdin (`wifi connect-target` request JSON or `wifi connect --password-stdin`); argv password transport has been removed.
 
-Runtime files and logs live under `$XDG_RUNTIME_DIR/nm-daemon` by default. Persistent connect-attempt history is appended to `$XDG_STATE_HOME/nm-daemon/connects.jsonl` (or `~/.local/state/nm-daemon/connects.jsonl`). Logging environment variables are `NM_DAEMON_LOG_FILE`, `NM_DAEMON_LOG`, and `NM_DAEMON_STDERR_LOG`; the old `NM_API_*` names remain fallback-compatible for now.
+Runtime files and logs live under `$XDG_RUNTIME_DIR/nm-daemon` by default. Cache reads distinguish missing, stale-schema, corrupt, and available data; writes use private files, repository locking, and atomic replacement. Persistent connect-attempt history is appended to `$XDG_STATE_HOME/nm-daemon/connects.jsonl` (or `~/.local/state/nm-daemon/connects.jsonl`) and rotates at 512 KiB, retaining three older files. Logging environment variables are `NM_DAEMON_LOG_FILE`, `NM_DAEMON_LOG`, and `NM_DAEMON_STDERR_LOG`; the old `NM_API_*` names remain fallback-compatible for now.
 
-`nm-daemon daemon` registers a NetworkManager SecretAgent on the system bus when NetworkManager is available, exports `/org/laufan/NmDaemon/SecretAgent`, emits `wifi.secret` requested/cancelled events, and accepts one-shot responses through `wifi.secret.provide`. If Shelllist sends `save:true`, nm-daemon stores the secret in the user's Secret Service keyring and tries matching keyring entries before prompting next time. Prompt events include `secret_keys` and `primary_secret_key` so frontends can label password/PIN fields accurately.
+`nm-daemon daemon` registers a NetworkManager SecretAgent on the system bus when NetworkManager is available, exports `/org/laufan/NmDaemon/SecretAgent`, emits `wifi.secret` requested/cancelled events, and accepts named secret values, explicit cancellation, and an optional save request through `wifi.secret.provide`. If Shelllist sends `save:true`, nm-daemon attempts to store the secrets in the user's Secret Service keyring and emits a `wifi.secret persistence` outcome. Desktop keyring prompts cannot be presented by the daemon: they are dismissed and reported as `prompt_unsupported`, never as a successful store/delete/unlock. Prompt events include `secret_keys` and `primary_secret_key` so frontends can label password/PIN fields accurately.
 
 Visible-network connection parity probe:
 
@@ -132,4 +141,6 @@ nix develop path:.
 just check
 ```
 
-See [PLAN.md](./PLAN.md) for current status and the remaining Shelllist migration plan.
+`just check` runs formatting verification, Clippy with warnings denied, and the complete test suite. Use `cargo test serialized_v1_boundary_matches_checked_in_snapshot` when intentionally reviewing the checked-in protocol snapshot, and update the production constructors before changing the snapshot.
+
+See [PLAN.md](./PLAN.md) for current status and the remaining Shelllist migration plan, [the architecture guide](./docs/architecture.md) for implementation boundaries, and [the D-Bus guide](./docs/dbus-daemon.md) for frontend integration.

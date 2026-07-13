@@ -1,11 +1,10 @@
-use std::collections::BTreeMap;
-use std::process::Command;
-
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::model::{NetworkEntry, WifiStatus};
-use crate::nm::{Nm, split_nmcli_fields, split_nmcli_key_value as split_key_value};
+use crate::command::nmcli::{Nmcli, NmcliWifiRow};
+use crate::error::ErrorOperation;
+use crate::model::{Ip4Status, NetworkEntry, WifiStatus};
+use crate::nm::Nm;
 
 #[derive(Serialize)]
 struct ParityReport {
@@ -46,25 +45,8 @@ struct NmApiSnapshot {
 struct NmcliSnapshot {
     available: bool,
     active_wifi: Option<NmcliWifiRow>,
-    ip4: Option<NmcliIp4>,
+    ip4: Option<Ip4Status>,
     errors: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct NmcliWifiRow {
-    ssid: String,
-    bssid: String,
-    signal: Option<u8>,
-    security: String,
-    frequency_mhz: Option<u32>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct NmcliIp4 {
-    address: Option<String>,
-    prefix: Option<u32>,
-    gateway: Option<String>,
-    dns: Vec<String>,
 }
 
 pub(crate) fn print_diagnosis(nm: &Nm, json: bool) -> Result<()> {
@@ -82,7 +64,13 @@ pub(crate) fn print_diagnosis(nm: &Nm, json: bool) -> Result<()> {
 fn build_report(nm: &Nm) -> Result<ParityReport> {
     let status = nm.wifi_status()?;
     let mut networks = nm.network_entries_for_access_points(nm.list_all_access_points()?)?;
-    crate::cache::attach_connection_details(&mut networks);
+    match crate::cache::attach_connection_details(&mut networks)? {
+        crate::cache::CacheRead::Available(_) | crate::cache::CacheRead::Missing => {}
+        state => tracing::warn!(
+            message = %state.unavailable_message("known-connections cache").unwrap_or_default(),
+            "connection details are unavailable for diagnosis"
+        ),
+    }
     let active_network = networks
         .iter()
         .find(|network| network.access_point.active)
@@ -91,7 +79,10 @@ fn build_report(nm: &Nm) -> Result<ParityReport> {
         .iter()
         .filter(|network| network.last_connection.is_some())
         .count();
-    let nmcli = nmcli_snapshot(status.device_iface.as_deref());
+    let nmcli = nmcli_snapshot(
+        &Nmcli::new(nm.command_runner()),
+        status.device_iface.as_deref(),
+    );
     let nm_api = NmApiSnapshot {
         status,
         network_count: networks.len(),
@@ -108,127 +99,38 @@ fn build_report(nm: &Nm) -> Result<ParityReport> {
     })
 }
 
-fn nmcli_snapshot(iface: Option<&str>) -> NmcliSnapshot {
+fn nmcli_snapshot(nmcli: &Nmcli<'_>, iface: Option<&str>) -> NmcliSnapshot {
     let mut errors = Vec::new();
-    let active_wifi = match nmcli_active_wifi() {
-        Ok(active) => active,
-        Err(err) => {
-            errors.push(err);
+    let mut available = false;
+    let active_wifi = match nmcli.active_wifi(ErrorOperation::Status) {
+        Ok(active) => {
+            available = true;
+            active
+        }
+        Err(error) => {
+            errors.push(format!("{error:#}"));
             None
         }
     };
     let ip4 = match iface {
-        Some(iface) => match nmcli_ip4_for_device(iface) {
-            Ok(ip4) => ip4,
-            Err(err) => {
-                errors.push(err);
+        Some(iface) => match nmcli.device_ip4(iface, ErrorOperation::Status) {
+            Ok(ip4) => {
+                available = true;
+                ip4
+            }
+            Err(error) => {
+                errors.push(format!("{error:#}"));
                 None
             }
         },
         None => None,
     };
     NmcliSnapshot {
-        available: errors.iter().all(|error| !error.starts_with("run nmcli"))
-            || active_wifi.is_some()
-            || ip4.is_some(),
+        available,
         active_wifi,
         ip4,
         errors,
     }
-}
-
-fn nmcli_active_wifi() -> std::result::Result<Option<NmcliWifiRow>, String> {
-    let output = Command::new("nmcli")
-        .args([
-            "-t",
-            "-f",
-            "IN-USE,SSID,BSSID,SIGNAL,SECURITY,FREQ",
-            "dev",
-            "wifi",
-            "list",
-            "--rescan",
-            "no",
-        ])
-        .output()
-        .map_err(|err| format!("run nmcli wifi list: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "nmcli wifi list exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.lines().find_map(parse_active_wifi_row))
-}
-
-fn parse_active_wifi_row(line: &str) -> Option<NmcliWifiRow> {
-    let fields = split_nmcli_fields(line);
-    if fields.first().map(String::as_str) != Some("*") || fields.len() < 6 {
-        return None;
-    }
-    Some(NmcliWifiRow {
-        ssid: fields[1].clone(),
-        bssid: fields[2].clone(),
-        signal: fields[3].parse().ok(),
-        security: fields[4].clone(),
-        frequency_mhz: fields[5]
-            .split_whitespace()
-            .next()
-            .and_then(|value| value.parse().ok()),
-    })
-}
-
-fn nmcli_ip4_for_device(iface: &str) -> std::result::Result<Option<NmcliIp4>, String> {
-    let output = Command::new("nmcli")
-        .args(["-t", "device", "show", iface])
-        .output()
-        .map_err(|err| format!("run nmcli device show: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "nmcli device show {iface} exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_nmcli_ip4(&stdout))
-}
-
-fn parse_nmcli_ip4(output: &str) -> Option<NmcliIp4> {
-    let mut values = BTreeMap::<String, Vec<String>>::new();
-    for line in output.lines() {
-        let Some((key, value)) = split_key_value(line) else {
-            continue;
-        };
-        values.entry(key).or_default().push(value);
-    }
-    let (address, prefix) = values
-        .iter()
-        .find(|(key, _)| key.starts_with("IP4.ADDRESS"))
-        .and_then(|(_, values)| values.first())
-        .map(|value| parse_cidr(value))
-        .unwrap_or((None, None));
-    let gateway = values
-        .get("IP4.GATEWAY")
-        .and_then(|values| values.first())
-        .filter(|value| !value.is_empty())
-        .cloned();
-    let dns = values
-        .iter()
-        .filter(|(key, _)| key.starts_with("IP4.DNS"))
-        .flat_map(|(_, values)| values.iter().filter(|value| !value.is_empty()).cloned())
-        .collect::<Vec<_>>();
-
-    if address.is_none() && gateway.is_none() && dns.is_empty() {
-        return None;
-    }
-    Some(NmcliIp4 {
-        address,
-        prefix,
-        gateway,
-        dns,
-    })
 }
 
 fn parity_checks(nm_api: &NmApiSnapshot, nmcli: &NmcliSnapshot) -> Vec<ParityCheck> {
@@ -360,7 +262,7 @@ fn compare_signal(status: &WifiStatus, nmcli_active: Option<&NmcliWifiRow>) -> P
     }
 }
 
-fn compare_dns(status: &WifiStatus, nmcli_ip4: Option<&NmcliIp4>) -> ParityCheck {
+fn compare_dns(status: &WifiStatus, nmcli_ip4: Option<&Ip4Status>) -> ParityCheck {
     let left = status.ip4.as_ref().map(|ip4| ip4.dns.join(","));
     let right = nmcli_ip4.map(|ip4| ip4.dns.join(","));
     compare_optional("ip4", "dns", left, right)
@@ -430,40 +332,6 @@ fn print_text_report(report: &ParityReport) {
     }
 }
 
-fn parse_cidr(value: &str) -> (Option<String>, Option<u32>) {
-    let Some((address, prefix)) = value.split_once('/') else {
-        return (Some(value.to_string()), None);
-    };
-    (Some(address.to_string()), prefix.parse().ok())
-}
-
 fn normalize(value: &str) -> String {
     value.trim().to_ascii_lowercase()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{parse_active_wifi_row, parse_nmcli_ip4};
-
-    #[test]
-    fn parses_escaped_nmcli_wifi_rows() {
-        let row = parse_active_wifi_row("*:Cafe:A0\\:55\\:1F\\:D0\\:42\\:8F:84:WPA2:5220 MHz")
-            .expect("active row");
-
-        assert_eq!(row.ssid, "Cafe");
-        assert_eq!(row.bssid, "A0:55:1F:D0:42:8F");
-        assert_eq!(row.frequency_mhz, Some(5220));
-    }
-
-    #[test]
-    fn parses_nmcli_device_show_ip4() {
-        let ip4 = parse_nmcli_ip4(
-            "IP4.ADDRESS[1]:192.168.178.119/24\nIP4.GATEWAY:192.168.178.1\nIP4.DNS[1]:84.116.46.23\nIP4.DNS[2]:84.116.46.22\n",
-        )
-        .expect("ip4");
-
-        assert_eq!(ip4.address.as_deref(), Some("192.168.178.119"));
-        assert_eq!(ip4.prefix, Some(24));
-        assert_eq!(ip4.dns.len(), 2);
-    }
 }

@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::process::Command;
 
 use anyhow::{Context, Result};
 use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{
     ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_IFACE, NM_PATH, Nm,
-    SETTINGS_CONNECTION_IFACE, WIFI_IFACE, split_nmcli_key_value,
+    SETTINGS_CONNECTION_IFACE, WIFI_IFACE,
 };
+use crate::command::iw::Iw;
+use crate::command::nmcli::Nmcli;
+use crate::error::ErrorOperation;
 use crate::model::{
     DisconnectResult, Ip4Status, MeteredStatus, SavedWifiConnection, WifiStatus, WirelessStatus,
 };
@@ -48,7 +50,14 @@ impl Nm {
 
             let dbus_ip4 = self.ip4_status(&device.path).ok().flatten();
             let ip4 = if ip4_status_needs_nmcli_fill(&dbus_ip4) {
-                merged_ip4_status(dbus_ip4, nmcli_ip4_status(&device.iface))
+                let nmcli_ip4 = Nmcli::new(self.command_runner())
+                    .device_ip4(&device.iface, ErrorOperation::Status)
+                    .inspect_err(|error| {
+                        tracing::debug!(error = %format_args!("{error:#}"), "nmcli IPv4 enrichment unavailable")
+                    })
+                    .ok()
+                    .flatten();
+                merged_ip4_status(dbus_ip4, nmcli_ip4)
             } else {
                 dbus_ip4
             };
@@ -68,19 +77,7 @@ impl Nm {
             });
         }
 
-        Ok(WifiStatus {
-            active: false,
-            device_iface: None,
-            active_connection_path: None,
-            access_point: None,
-            network: None,
-            profile: None,
-            connectivity,
-            ip4: None,
-            wireless: None,
-            metered: None,
-            active_since_ms: None,
-        })
+        Ok(WifiStatus::inactive(None, connectivity))
     }
 
     pub(crate) fn disconnect_wifi(&self) -> Result<DisconnectResult> {
@@ -192,7 +189,12 @@ impl Nm {
     fn wireless_status(&self, device: &crate::model::WifiDevice) -> Result<WirelessStatus> {
         let wifi = self.proxy_path(&device.path, WIFI_IFACE)?;
         let bitrate_kbps: Option<u32> = wifi.get_property("Bitrate").ok();
-        let directional_bitrates = directional_bitrates(&device.iface).unwrap_or_default();
+        let directional_bitrates = Iw::new(self.command_runner())
+            .link_bitrates(&device.iface, ErrorOperation::Status)
+            .inspect_err(|error| {
+                tracing::debug!(error = %format_args!("{error:#}"), "iw bitrate enrichment unavailable")
+            })
+            .unwrap_or_default();
         Ok(WirelessStatus {
             bitrate_mbps: bitrate_kbps.map(|value| value / 1000),
             tx_bitrate_mbps: directional_bitrates.tx_mbps,
@@ -284,92 +286,6 @@ fn merged_ip4_status(dbus: Option<Ip4Status>, nmcli: Option<Ip4Status>) -> Optio
     }
 }
 
-fn nmcli_ip4_status(iface: &str) -> Option<Ip4Status> {
-    let output = Command::new("nmcli")
-        .args(["-t", "device", "show", iface])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_nmcli_ip4_status(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn parse_nmcli_ip4_status(output: &str) -> Option<Ip4Status> {
-    let mut address = None;
-    let mut prefix = None;
-    let mut gateway = None;
-    let mut dns = Vec::new();
-    for line in output.lines() {
-        let Some((key, value)) = split_nmcli_key_value(line) else {
-            continue;
-        };
-        if key.starts_with("IP4.ADDRESS") {
-            let (parsed_address, parsed_prefix) = parse_cidr(&value);
-            address = parsed_address;
-            prefix = parsed_prefix;
-        } else if key == "IP4.GATEWAY" && !value.is_empty() {
-            gateway = Some(value);
-        } else if key.starts_with("IP4.DNS") && !value.is_empty() {
-            dns.push(value);
-        }
-    }
-    (address.is_some() || gateway.is_some() || !dns.is_empty()).then_some(Ip4Status {
-        address,
-        prefix,
-        gateway,
-        dns,
-    })
-}
-
-fn parse_cidr(value: &str) -> (Option<String>, Option<u32>) {
-    let Some((address, prefix)) = value.split_once('/') else {
-        return (Some(value.to_string()), None);
-    };
-    (Some(address.to_string()), prefix.parse().ok())
-}
-
-#[derive(Default)]
-struct DirectionalBitrates {
-    tx_mbps: Option<f64>,
-    rx_mbps: Option<f64>,
-}
-
-fn directional_bitrates(iface: &str) -> Option<DirectionalBitrates> {
-    let output = Command::new("iw")
-        .args(["dev", iface, "link"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Some(parse_iw_link_bitrates(&stdout))
-}
-
-fn parse_iw_link_bitrates(output: &str) -> DirectionalBitrates {
-    let mut bitrates = DirectionalBitrates::default();
-    for line in output.lines().map(str::trim) {
-        if let Some(value) = parse_iw_bitrate_line(line, "tx bitrate:") {
-            bitrates.tx_mbps = Some(value);
-        } else if let Some(value) = parse_iw_bitrate_line(line, "rx bitrate:") {
-            bitrates.rx_mbps = Some(value);
-        }
-    }
-    bitrates
-}
-
-fn parse_iw_bitrate_line(line: &str, prefix: &str) -> Option<f64> {
-    let mut fields = line.strip_prefix(prefix)?.split_whitespace();
-    let value = fields.next()?.parse::<f64>().ok()?;
-    match fields.next()?.to_ascii_lowercase().as_str() {
-        "kbit/s" => Some(value / 1000.0),
-        "mbit/s" => Some(value),
-        "gbit/s" => Some(value * 1000.0),
-        _ => None,
-    }
-}
-
 fn active_connection_profile(
     connection_path: &OwnedObjectPath,
     profiles: &[SavedWifiConnection],
@@ -398,10 +314,7 @@ mod tests {
 
     use zvariant::{DynamicType, OwnedValue, Value};
 
-    use super::{
-        gateway_from_route_data, ip4_status_needs_nmcli_fill, legacy_nameservers,
-        parse_iw_link_bitrates,
-    };
+    use super::{gateway_from_route_data, ip4_status_needs_nmcli_fill, legacy_nameservers};
     use crate::model::Ip4Status;
 
     #[test]
@@ -444,35 +357,6 @@ mod tests {
             gateway_from_route_data(&routes),
             Some("10.0.0.1".to_string())
         );
-    }
-
-    #[test]
-    fn parses_directional_iw_link_bitrates_in_mbps() {
-        for (output, rx_mbps, tx_mbps) in [
-            (
-                r#"
-Connected to 00:11:22:33:44:55 (on wlp2s0)
-	SSID: Example
-	rx bitrate: 866.7 MBit/s VHT-MCS 9 80MHz short GI VHT-NSS 2
-	tx bitrate: 780.0 MBit/s VHT-MCS 8 80MHz VHT-NSS 2
-"#,
-                866.7,
-                780.0,
-            ),
-            (
-                r#"
-	rx bitrate: 54000 KBit/s
-	tx bitrate: 1.2 GBit/s
-"#,
-                54.0,
-                1200.0,
-            ),
-        ] {
-            let bitrates = parse_iw_link_bitrates(output);
-
-            assert_eq!(bitrates.rx_mbps, Some(rx_mbps));
-            assert_eq!(bitrates.tx_mbps, Some(tx_mbps));
-        }
     }
 
     fn owned_value<T>(value: T) -> OwnedValue

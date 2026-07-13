@@ -4,7 +4,7 @@ This document describes the current `nm-daemon` user D-Bus API for Shelllist and
 
 ## Current status
 
-`nm-daemon daemon` is implemented and packaged as a systemd user service. The host NixOS/Home Manager configuration now starts that service at login. D-Bus activation is intentionally not present yet and remains a fallback startup enhancement. Shelllist has not fully migrated to this API yet, so the CLI keeps daemon-forwarding read-only commands as a bridge.
+`nm-daemon daemon` is implemented and packaged as a systemd user service. The host NixOS/Home Manager configuration starts that service at login. D-Bus activation is intentionally not present yet and remains a fallback startup enhancement. Shelllist consumes this API through the long-lived `nm-daemon client` JSONL session. CLI and D-Bus transports call the same typed application services; the daemon adds a shared event runtime rather than a second orchestration path.
 
 ## Service identity
 
@@ -35,20 +35,37 @@ signal Event(s stream, s event_json)
 
 `Event` signals are broadcast on the user/session object. `event_json` also carries `protocol`, `version`, `stream`, `event`, and usually `request_id` so Shelllist can filter relevant events.
 
-### Method keys
+<!-- BEGIN GENERATED PROTOCOL REGISTRY -->
+### Method registry
 
-| Method key | Params | Response data key | Notes |
-| --- | --- | --- | --- |
-| `wifi.status` | `{}` | `status` | Current active Wi-Fi status and connection details. |
-| `network.connectivity` | `{}` | `connectivity` | NetworkManager connectivity/portal state. |
-| `wifi.networks` | `{ "cached": false, "refresh_cache": false, "refresh_timeout": 10 }` | `networks` | Visible Wi-Fi networks enriched with saved-profile/capability details. |
-| `wifi.scan` | `{ "timeout": 12, "strict": false, "cache": false, "ifname": null, "ssids": [] }` | `result` with `request_id` | Event-driven scan; follow `wifi.scan` events by `request_id`. |
-| `wifi.connectTarget` | `{ "target": { ... }, "password": null, "wep_key_type": null }` | `result` with `request_id` | Event-driven connect; follow `wifi.connect` events by `request_id`. |
-| `wifi.connect-target` | same as `wifi.connectTarget` | `result` with `request_id` | Kebab-case alias. |
-| `wifi.secret.capabilities` | `{}` | `secret_agent` | Reports SecretAgent/keyring capabilities. |
-| `wifi.secret.provide` | `{ "request_id": "...", "password": "...", "save": false }` | `result` | Answers a pending SecretAgent request; `save:true` stores in Secret Service when available. |
+| Method | Aliases | Parameters | Response key | Stream | Description |
+| --- | --- | --- | --- | --- | --- |
+| `wifi.status` | `—` | `{}` (`Empty`) | `status` | `wifi.status` | Current active Wi-Fi status and connection details. |
+| `network.connectivity` | `—` | `{}` (`Empty`) | `connectivity` | `network.connectivity` | NetworkManager connectivity and captive-portal state. |
+| `wifi.networks` | `—` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `—` | Visible networks enriched with saved-profile and capability details. |
+| `wifi.scan` | `—` | `{"timeout":12,"strict":false,"cache":false,"ifname":null,"ssids":[]}` (`Scan`) | `result` | `wifi.scan` | Starts an event-driven scan and returns its request id. |
+| `wifi.connectTarget` | `wifi.connect-target` | `{"target":{"ssid":"Example"},"password":null,"wep_key_type":null}` (`ConnectTarget`) | `result` | `wifi.connect` | Starts an event-driven Wi-Fi connection and returns its request id. |
+| `wifi.disconnect` | `—` | `{}` (`Empty`) | `result` | `—` | Disconnects the active Wi-Fi connection. |
+| `wifi.profile.operation` | `—` | `{"operation":"set-autoconnect","path":"/org/freedesktop/NetworkManager/Settings/1","enabled":true}` (`ProfileOperation`) | `result` | `—` | Mutates or builds a share payload for one saved Wi-Fi profile. |
+| `wifi.secret.capabilities` | `—` | `{}` (`SecretCapabilities`) | `secret_agent` | `wifi.secret` | Reports SecretAgent and keyring capabilities. |
+| `wifi.secret.provide` | `—` | `{"request_id":"...","values":{"psk":"..."},"save":false,"cancel":false}` (`SecretProvide`) | `result` | `wifi.secret` | Answers a pending SecretAgent request. |
 
-Unknown method keys return an `ok: false` envelope with `error.code = "invalid-request"`. Invalid JSON/params return an `ok: false` envelope with a classified typed error, normally `validation-error`.
+### Stream registry
+
+| Stream | Subscribable | Default | Delivery | Events | Description |
+| --- | --- | --- | --- | --- | --- |
+| `wifi.status` | true | true | `Continuous` | `subscribed, changed` | Current Wi-Fi status, emitted immediately and whenever it changes. |
+| `network.connectivity` | true | true | `Continuous` | `subscribed, changed` | Connectivity and portal state, emitted immediately and on change. |
+| `wifi.scan` | true | true | `Operation` | `subscribed, status, warning, snapshot, complete, cancelled, failed` | Events associated with a wifi.scan request id. |
+| `wifi.connect` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a wifi.connectTarget request id. |
+| `wifi.secret` | true | false | `External` | `subscribed, requested, cancelled, persistence` | SecretAgent prompt, cancellation, and keyring persistence events. |
+| `daemon.request` | false | false | `Internal` | `cancelled` | Internal request-cancellation acknowledgements. |
+| `daemon.subscription` | false | false | `Internal` | `cancelled` | Internal subscription-cancellation acknowledgements. |
+<!-- END GENERATED PROTOCOL REGISTRY -->
+
+Unknown method keys and unsupported subscription streams return an `ok: false` envelope with `error.code = "validation-error"`. Invalid JSON/params use the same typed error shape. `Subscribe([])` selects the streams marked as defaults above; explicit subscriptions are deduplicated and rejected as a whole if any name is unsupported.
+
+`src/protocol.rs` is the source of truth for this registry. Dispatch parsing, aliases, defaults, event sets, contract metadata, and the generated tables above all consume it. A test fails if this generated block drifts from the registry.
 
 ## Example Shelllist call shape
 
@@ -68,6 +85,10 @@ assert(response.protocol == "nm-api" && response.version == 1)
 if (response.ok) render(response.data.networks)
 else showTypedError(response.error.code, response.error.message)
 ```
+
+## Cache refresh lifecycle
+
+Shelllist should own scan/cache refresh intent. Prefer on-demand refresh while the Wi-Fi UI is open or focused instead of an always-on user timer. On open, call `wifi.networks` with `cached:true, refresh_cache:true` to render the last snapshot immediately and warm the next one. For explicit refresh/spinner flows, subscribe to `wifi.scan`, then call `wifi.scan` with `cache:true` and filter events by `request_id`. Stop requesting refreshes when the UI closes. The daemon coalesces duplicate background refresh requests and performs them in its bounded runtime; it does not spawn another executable.
 
 ## Event streams
 
@@ -94,11 +115,12 @@ Events:
 - `warning`: scan failed but non-strict mode is returning cached/latest NetworkManager results
 - `snapshot`: final enriched network snapshot, with `networks_found` and `networks`
 - `complete`: scan finished
+- `cancelled`: the request was cancelled
 - `failed`: strict scan or internal failure
 
 ### `wifi.status` and `network.connectivity`
 
-Continuous status/connectivity subscriptions emit a `changed` event immediately, then whenever the serialized status/connectivity payload changes. Cancel the subscription id returned by `Subscribe` to stop the polling worker.
+Continuous status/connectivity subscriptions emit a `changed` event immediately, then whenever the serialized status/connectivity payload changes. One daemon event loop listens to the shared NetworkManager connection, coalesces change notifications, computes each needed payload once, and fans changes out to subscribers. Cancel the subscription id returned by `Subscribe` to remove that subscription; there is no per-subscription polling worker.
 
 ### `wifi.connect`
 
@@ -118,7 +140,9 @@ Events:
 - `failed`
 - `cancelled`
 
-Cancellation is deep and best-effort for the connect worker: the daemon sets a cancellation flag, kills an in-flight `nmcli` fallback process, shortens activation waits, and asks NetworkManager to disconnect Wi-Fi to abort an in-flight activation. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call, but cancellation is applied immediately before/after those calls and by a parallel abort watcher.
+Cancellation is deep and best-effort for the connect task: the daemon sets its cancellation flag, wakes activation waits, kills an in-flight `nmcli` fallback through the command gateway, and queues a NetworkManager disconnect to abort an in-flight activation. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call, but transitions check cancellation before and after those calls. Cancellation is coordinated by the shared runtime; it does not add a watcher thread per connection.
+
+The underlying connection workflow is the canonical `AlreadyActive → SavedProfile → CreateProfile → Rescan → Fallback → Verify` state machine. Terminal authentication/authorization errors do not enter subprocess fallback, one targeted rescan is allowed for not-found cases, and a failed profile created by the attempt is cleaned up centrally.
 
 ### `wifi.secret`
 
@@ -128,28 +152,35 @@ Events:
 
 - `requested`: NetworkManager needs one or more secrets.
 - `cancelled`: NetworkManager cancelled a pending secret request.
+- `persistence`: a `save:true`, NetworkManager `SaveSecrets`, or `DeleteSecrets` keyring action completed, required an unsupported prompt, or failed.
 
-Shelllist answers with:
+Shelllist answers with named values, or explicitly cancels the request:
 
 ```text
-Call("wifi.secret.provide", "{\"request_id\":\"...\",\"password\":\"...\",\"save\":false}")
+Call("wifi.secret.provide", "{\"request_id\":\"...\",\"values\":{\"psk\":\"...\"},\"save\":false,\"cancel\":false}")
 ```
 
-When `save:true`, `nm-daemon` stores the one-shot secret in the user's Secret Service keyring and later tries matching keyring entries before prompting. NetworkManager `SaveSecrets` and `DeleteSecrets` are also mapped to Secret Service store/delete operations for known secret keys.
+When `save:true`, the provide response reports `persistence_status: "pending"`; a subsequent `wifi.secret persistence` event reports `stored`, `prompt_unsupported`, or `failed`. The daemon cannot safely present desktop Secret Service prompts, so it dismisses them and never reports the prompted create/delete/unlock operation as complete. NetworkManager `SaveSecrets` and `DeleteSecrets` are also mapped to Secret Service store/delete operations for known secret keys and log the same explicit outcomes.
+
+`wifi.secret.capabilities` reports `keyring.available`, `persistence_supported`, `default_save`, `prompt_handling: "unsupported"`, and `prompt_policy: "dismiss_and_report"`. Clients should use those fields instead of assuming that keyring availability means every operation can complete without user interaction.
 
 Secret key mapping uses NetworkManager's requested setting/hints. Supported keys include `802-11-wireless-security` keys `psk`, `wep-key0..3`, and `leap-password`; `802-1x` keys `password`, `private-key-password`, and `pin`; and common `vpn`/`gsm`/`cdma` `password`/`pin` keys. The `wifi.secret requested` event includes `secret_keys` and `primary_secret_key` so Shelllist can label prompts accurately.
 
+Pending SecretAgent calls live in one registry. A registration guard removes entries on response, NetworkManager cancellation, timeout, or unwind, so a stale secondary lookup cannot outlive the request.
+
 ## CLI forwarding status
 
-The CLI tries the daemon first for these read-only methods:
+The CLI tries the daemon first for these compatible methods:
 
 ```bash
 nm-daemon wifi status
-nm-daemon wifi networks [--cached] [--refresh-cache]
+nm-daemon wifi networks [--cached] [--refresh-cache] [--refresh-timeout <seconds>]
 nm-daemon network connectivity
+nm-daemon wifi disconnect
+nm-daemon wifi profile delete|autoconnect|mac-randomization|share|send-hostname ...
 ```
 
-If the session bus/service is unavailable, those commands fall back to the direct in-process implementation. Use `--direct` or `NM_DAEMON_DIRECT=1` to force direct mode. CLI scan streaming, connect, profile mutation, debug fixtures, and disconnect still run directly.
+If the session bus/service is unavailable, those commands fall back to the direct in-process implementation. Use `--direct` or `NM_DAEMON_DIRECT=1` to force direct mode. CLI scan streaming, connect, and debug fixtures still run directly.
 
 ## Startup/install status
 
@@ -173,32 +204,29 @@ Implemented here:
 
 1. `nm-daemon daemon` session-bus service.
 2. D-Bus `Call`, `Subscribe`, `Cancel`, and `Event`.
-3. Read-only method keys: `wifi.status`, `network.connectivity`, and `wifi.networks`.
-4. Event-driven `wifi.scan`.
-5. Continuous `wifi.status` and `network.connectivity` subscription events.
-6. Event-driven `wifi.connectTarget` / `wifi.connect-target`.
-7. Deep best-effort connect cancellation.
+3. Typed method/stream registry validation and generated contract documentation.
+4. Method keys for status, connectivity, networks, disconnect, and saved-profile operations.
+5. Event-driven `wifi.scan` and `wifi.connectTarget` / `wifi.connect-target`.
+6. Signal-driven `wifi.status` and `network.connectivity` subscription events.
+7. Deep best-effort connect/scan cancellation through the shared runtime and command gateway.
 8. Real NetworkManager SecretAgent registration on the system bus.
-9. Secret Service keyring lookup/store/delete for known NetworkManager secret keys.
-10. CLI forwarding for read-only methods with direct-mode escape hatches.
-11. Packaged systemd user service metadata.
+9. Secret Service keyring lookup/store/delete for known NetworkManager secret keys, with explicit pending/prompt-unsupported/failure outcomes.
+10. CLI forwarding for compatible methods with direct-mode recovery escape hatches.
+11. A transport-neutral application layer shared by CLI and D-Bus adapters, with typed requests, results, events, identifiers, and errors.
+12. An explicit connect state machine with centralized fallback eligibility, verification, and failed-profile cleanup.
+13. One daemon-owned NetworkManager connection and event runtime, with shared/coalesced subscription refreshes, cancellable requests, a bounded worker queue, and bounded cache-refresh work.
+14. Locked, atomic cache repositories with explicit unavailable states and rotated history.
+15. In-process D-Bus lifecycle tests against fake NetworkManager/Secret Service peers, scripted command fallback tests, and concurrent cache tests.
+16. Packaged systemd user service metadata.
+17. A long-lived JSONL frontend client with correlated operation events and cleanup on EOF.
+18. Caller-owned subscriptions that are removed automatically when the D-Bus client disconnects.
 
 Still open:
 
-- Shelllist migration to the D-Bus API/events outside this repository.
-- Prompt handling for Secret Service create/delete/unlock prompts that need desktop interaction.
-- More specialized Shelllist UI copy/forms using `secret_keys` and `primary_secret_key`.
+- Optional desktop integration for completing Secret Service prompts; the daemon currently dismisses and reports them as unsupported.
+- Rich multi-field frontend forms for requests that contain several `secret_keys`.
 - D-Bus activation file as a fallback startup path.
 
-## Recommended Shelllist update sequence
+## Shelllist integration
 
-1. Add a D-Bus helper that calls `org.laufan.NmDaemon1.Call` and parses `response_json`.
-2. Migrate read-only views first:
-   - status: `wifi.status`
-   - connectivity: `network.connectivity`
-   - visible network list: `wifi.networks`
-3. During migration, Shelllist can compare direct D-Bus results with forwarded CLI output for those same read-only methods.
-4. Migrate scan refresh to `Subscribe(["wifi.scan"])` plus `Call("wifi.scan", ...)`; use `request_id` to match events to the initiating request.
-5. Migrate connect forms to `Call("wifi.connectTarget", ...)` and listen for `wifi.connect` events by `request_id`.
-6. Wire Shelllist secret prompts to `wifi.secret` requested/cancelled events and answer with `wifi.secret.provide`.
-7. Continue validating `nm-api` v1 envelopes exactly as before.
+Shelllist starts `nm-daemon client`, subscribes once to the canonical streams, sends tagged JSONL calls, and validates every embedded `nm-api` v1 envelope. Its Nix check regenerates the frontend method/stream constants from `debug protocol-registry`, compares contract fixtures, and fails on drift.

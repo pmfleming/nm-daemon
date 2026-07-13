@@ -2,10 +2,11 @@ use std::collections::HashMap;
 
 mod profile;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use zvariant::OwnedValue;
 
 use super::{ConnectionSettings, owned_value};
+use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     AccessPoint, EnterpriseAuth, NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, WepKeyType,
     WifiConnectTarget, ap_uses_owe, enterprise_key_mgmt,
@@ -38,7 +39,7 @@ pub(super) fn hidden_wifi_connection_settings(
     wep_key_type: Option<WepKeyType>,
 ) -> Result<ConnectionSettings> {
     let mut settings =
-        base_wifi_connection_settings(&target.ssid, target.ssid_bytes().as_ref(), true)?;
+        base_wifi_connection_settings(target.ssid.as_str(), target.ssid_bytes(), true)?;
     if let Some(security) = security_settings_for_target_hint(target, password, wep_key_type)? {
         settings.extend(security);
     }
@@ -138,24 +139,39 @@ fn security_settings_for_target_hint(
         Some("owe") => owe_wifi_connection_settings().map(Some),
         Some("wep") => {
             let Some(password) = password else {
-                bail!("hidden WEP network requires a password/key")
+                return Err(DomainError::connect(
+                    crate::model::ConnectFailureReason::SecretRequired,
+                    "hidden WEP network requires a password/key",
+                )
+                .into());
             };
             wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key))
                 .map(Some)
         }
         Some("sae" | "wpa-psk") => {
             let Some(password) = password else {
-                bail!("hidden WPA/SAE network requires a password")
+                return Err(DomainError::connect(
+                    crate::model::ConnectFailureReason::SecretRequired,
+                    "hidden WPA/SAE network requires a password",
+                )
+                .into());
             };
             validate_wpa_psk(password)?;
             Ok(Some(security_connection_settings(
                 wireless_security_section(key_mgmt.as_deref().unwrap_or("wpa-psk"), password)?,
             )))
         }
-        Some("wpa-eap" | "wpa-eap-suite-b-192") => {
-            bail!("hidden enterprise network requires an enterprise credential object")
-        }
-        Some(other) => bail!("unsupported hidden key management '{other}'"),
+        Some("wpa-eap" | "wpa-eap-suite-b-192") => Err(DomainError::connect(
+            crate::model::ConnectFailureReason::SecretRequired,
+            "hidden enterprise network requires an enterprise credential object",
+        )
+        .into()),
+        Some(other) => Err(DomainError::connect(
+            crate::model::ConnectFailureReason::UnsupportedAuth,
+            format!("unsupported hidden key management '{other}'"),
+        )
+        .with_detail("key_management", other)
+        .into()),
     }
 }
 
@@ -269,7 +285,7 @@ fn ensure_wireless_settings(
     let connection = settings.entry("connection".to_string()).or_default();
     connection
         .entry("id".to_string())
-        .or_insert(owned_value(target.ssid.clone())?);
+        .or_insert(owned_value(target.ssid.to_string())?);
     connection
         .entry("type".to_string())
         .or_insert(owned_value("802-11-wireless".to_string())?);
@@ -373,7 +389,12 @@ fn insert_required_string(
     value: Option<&str>,
 ) -> Result<()> {
     let Some(value) = value.filter(|value| !value.is_empty()) else {
-        bail!("enterprise Wi-Fi field '{key}' is required")
+        return Err(DomainError::validation(
+            ErrorOperation::Connect,
+            format!("enterprise Wi-Fi field '{key}' is required"),
+        )
+        .with_detail("field", key)
+        .into());
     };
     settings.insert(key.to_string(), owned_value(value.to_string())?);
     Ok(())
@@ -433,17 +454,30 @@ fn validate_wpa_psk(password: &str) -> Result<()> {
     if (8..=63).contains(&len) || (len == 64 && password.chars().all(|ch| ch.is_ascii_hexdigit())) {
         return Ok(());
     }
-    bail!("WPA-PSK password must be 8-63 characters, or 64 hexadecimal characters")
+    Err(DomainError::validation(
+        ErrorOperation::Connect,
+        "WPA-PSK password must be 8-63 characters, or 64 hexadecimal characters",
+    )
+    .with_detail("field", "password")
+    .into())
 }
 
 fn validate_wep_key(password: &str, wep_key_type: WepKeyType) -> Result<()> {
     match wep_key_type {
         WepKeyType::Key if wep_key_is_valid(password) => Ok(()),
-        WepKeyType::Key => {
-            bail!("WEP key must be 5 or 13 ASCII characters, or 10 or 26 hexadecimal characters")
-        }
+        WepKeyType::Key => Err(DomainError::validation(
+            ErrorOperation::Connect,
+            "WEP key must be 5 or 13 ASCII characters, or 10 or 26 hexadecimal characters",
+        )
+        .with_detail("field", "password")
+        .into()),
         WepKeyType::Phrase if (8..=64).contains(&password.len()) => Ok(()),
-        WepKeyType::Phrase => bail!("WEP passphrase must be 8-64 characters"),
+        WepKeyType::Phrase => Err(DomainError::validation(
+            ErrorOperation::Connect,
+            "WEP passphrase must be 8-64 characters",
+        )
+        .with_detail("field", "password")
+        .into()),
     }
 }
 

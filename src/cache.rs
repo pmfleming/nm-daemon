@@ -1,11 +1,10 @@
+mod merge;
+mod storage;
+
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
@@ -13,10 +12,47 @@ use crate::model::{
     WifiConnectTarget, WifiStatus,
 };
 
-const CACHE_VERSION: u32 = 1;
-const CACHE_DIR_NAME: &str = "nm-daemon";
+use self::merge::{mark_inactive, network_key, upsert_connected_access_point};
+use self::storage::{LockedRepository, Repository};
 
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub(crate) use self::storage::{create_private_dir_all, log_path, reject_symlink_file};
+
+const CACHE_VERSION: u32 = 2;
+const SNAPSHOT_FILE: &str = "latest.json";
+const SESSION_FILE: &str = "scan-session.json";
+const STATUS_FILE: &str = "status.json";
+const ACTIVE_STATUS_FILE: &str = "active-status.json";
+const KNOWN_CONNECTIONS_FILE: &str = "known-connections.json";
+const CONNECT_HISTORY_FILE: &str = "connects.jsonl";
+
+#[derive(Debug, Clone)]
+pub(crate) enum CacheRead<T> {
+    Missing,
+    Stale {
+        found_version: u32,
+        expected_version: u32,
+    },
+    Corrupt {
+        message: String,
+    },
+    Available(T),
+}
+
+impl<T> CacheRead<T> {
+    pub(crate) fn unavailable_message(&self, subject: &str) -> Option<String> {
+        match self {
+            Self::Missing => Some(format!("{subject} is missing")),
+            Self::Stale {
+                found_version,
+                expected_version,
+            } => Some(format!(
+                "{subject} uses schema version {found_version}; expected {expected_version}"
+            )),
+            Self::Corrupt { message } => Some(format!("{subject} is corrupt: {message}")),
+            Self::Available(_) => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct CachedSnapshot {
@@ -91,8 +127,8 @@ impl<'a> ConnectAttemptRecord<'a> {
             status,
             reason,
             path,
-            ssid: &target.ssid,
-            ssid_bytes: target.ssid_bytes().into_owned(),
+            ssid: target.ssid.as_str(),
+            ssid_bytes: target.ssid_bytes().to_vec(),
             bssid: non_empty(target.bssid.as_deref()),
             ap_path: non_empty(target.ap_path.as_deref()),
             device_iface: non_empty(target.ifname.as_deref()),
@@ -103,14 +139,16 @@ impl<'a> ConnectAttemptRecord<'a> {
 }
 
 pub(crate) fn write_live_scan_snapshot(scanning: bool, networks: &[AccessPoint]) -> Result<()> {
-    if !scanning {
-        write_snapshot(false, networks)?;
-    }
-    write_session_snapshot(scanning, networks)
+    Repository::runtime().write_transaction(|repository| {
+        if !scanning {
+            repository.write_json(SNAPSHOT_FILE, &snapshot_record(false, networks))?;
+        }
+        repository.write_json(SESSION_FILE, &snapshot_record(scanning, networks))
+    })
 }
 
 pub(crate) fn write_snapshot(scanning: bool, networks: &[AccessPoint]) -> Result<()> {
-    write_snapshot_to(snapshot_path(), scanning, networks)
+    Repository::runtime().write_json(SNAPSHOT_FILE, &snapshot_record(scanning, networks))
 }
 
 pub(crate) fn write_status(state: impl Into<String>, message: impl Into<String>) -> Result<()> {
@@ -140,70 +178,75 @@ pub(crate) fn write_complete(timed_out: bool, networks_found: usize) -> Result<(
     })
 }
 
-pub(crate) fn read_snapshot() -> Result<Option<CachedSnapshot>> {
-    let Some(snapshot) = read_json::<CachedSnapshot>(snapshot_path())? else {
-        return Ok(None);
-    };
-    if snapshot.version != CACHE_VERSION {
-        warn_cache_ignored(format!(
-            "cache version {} is stale; expected {CACHE_VERSION}",
-            snapshot.version
-        ));
-        return Ok(None);
-    }
-    Ok(Some(snapshot))
-}
-
-pub(crate) fn write_active_status(status: &WifiStatus) -> Result<()> {
-    write_json(
-        active_status_path(),
-        &CachedActiveStatus {
-            version: CACHE_VERSION,
-            updated_at_ms: now_ms(),
-            active: status.active,
-            status,
-        },
-    )
+pub(crate) fn read_snapshot() -> Result<CacheRead<CachedSnapshot>> {
+    Ok(validate_version(
+        Repository::runtime().read_json(SNAPSHOT_FILE)?,
+        |snapshot| snapshot.version,
+    ))
 }
 
 pub(crate) fn cache_connected_network_status(status: &WifiStatus) -> Result<()> {
-    write_active_status(status)?;
-    match &status.access_point {
-        Some(access_point) if status.active => {
-            remember_connection_details(access_point, status)?;
-            upsert_snapshot_access_point(access_point)
+    Repository::runtime().write_transaction(|repository| {
+        let snapshot = read_snapshot_locked(repository)?;
+        let known = if status.active && status.access_point.is_some() {
+            Some(read_known_for_update(repository)?)
+        } else {
+            None
+        };
+
+        repository.write_json(ACTIVE_STATUS_FILE, &active_status_record(status))?;
+        match (&status.access_point, known) {
+            (Some(access_point), Some(mut known)) => {
+                known.updated_at_ms = now_ms();
+                known.connections.insert(
+                    network_key(access_point),
+                    ConnectionDetails {
+                        ip4: status.ip4.clone(),
+                        wireless: status.wireless.clone(),
+                        metered: status.metered.clone(),
+                        active_since_ms: status.active_since_ms,
+                        updated_at_ms: known.updated_at_ms,
+                    },
+                );
+                repository.write_json(KNOWN_CONNECTIONS_FILE, &known)?;
+                update_snapshot(repository, snapshot, |networks| {
+                    upsert_connected_access_point(networks, access_point.clone());
+                })
+            }
+            _ => update_snapshot(repository, snapshot, |networks| mark_inactive(networks)),
         }
-        _ => mark_snapshot_inactive(),
-    }
+    })
 }
 
-pub(crate) fn attach_connection_details(networks: &mut [NetworkEntry]) {
-    let Ok(Some(known)) = read_known_connections() else {
-        return;
-    };
-    for network in networks {
-        network.last_connection = known
-            .connections
-            .get(&network_key(&network.access_point))
-            .cloned();
+pub(crate) fn attach_connection_details(networks: &mut [NetworkEntry]) -> Result<CacheRead<usize>> {
+    match read_known_connections()? {
+        CacheRead::Available(known) => Ok(CacheRead::Available(merge::attach_connection_details(
+            networks,
+            &known.connections,
+        ))),
+        CacheRead::Missing => Ok(CacheRead::Missing),
+        CacheRead::Stale {
+            found_version,
+            expected_version,
+        } => Ok(CacheRead::Stale {
+            found_version,
+            expected_version,
+        }),
+        CacheRead::Corrupt { message } => Ok(CacheRead::Corrupt { message }),
     }
 }
 
 pub(crate) fn clear_active_connection_cache() -> Result<()> {
-    remove_file_if_exists(active_status_path())?;
-    mark_snapshot_inactive()
+    Repository::runtime().write_transaction(|repository| {
+        let snapshot = read_snapshot_locked(repository)?;
+        repository.remove_if_exists(ACTIVE_STATUS_FILE)?;
+        update_snapshot(repository, snapshot, |networks| mark_inactive(networks))
+    })
 }
 
 pub(crate) fn append_connect_attempt(record: &ConnectAttemptRecord<'_>) -> Result<()> {
-    append_json_line(connect_history_path(), record)
-}
-
-fn write_session_snapshot(scanning: bool, networks: &[AccessPoint]) -> Result<()> {
-    write_snapshot_to(session_path(), scanning, networks)
-}
-
-fn write_snapshot_to(path: PathBuf, scanning: bool, networks: &[AccessPoint]) -> Result<()> {
-    write_json(path, &snapshot_record(scanning, networks))
+    Repository::state()
+        .write_transaction(|repository| repository.append_history(CONNECT_HISTORY_FILE, record))
 }
 
 fn snapshot_record(scanning: bool, networks: &[AccessPoint]) -> CachedSnapshot {
@@ -216,34 +259,51 @@ fn snapshot_record(scanning: bool, networks: &[AccessPoint]) -> CachedSnapshot {
     }
 }
 
-fn remember_connection_details(access_point: &AccessPoint, status: &WifiStatus) -> Result<()> {
-    let mut known = read_known_connections()?.unwrap_or_else(empty_known_connections);
-    known.updated_at_ms = now_ms();
-    known.connections.insert(
-        network_key(access_point),
-        ConnectionDetails {
-            ip4: status.ip4.clone(),
-            wireless: status.wireless.clone(),
-            metered: status.metered.clone(),
-            active_since_ms: status.active_since_ms,
-            updated_at_ms: known.updated_at_ms,
-        },
-    );
-    write_known_connections(&known)
+fn active_status_record(status: &WifiStatus) -> CachedActiveStatus<'_> {
+    CachedActiveStatus {
+        version: CACHE_VERSION,
+        updated_at_ms: now_ms(),
+        active: status.active,
+        status,
+    }
 }
 
-fn read_known_connections() -> Result<Option<CachedKnownConnections>> {
-    let Some(known) = read_json::<CachedKnownConnections>(known_connections_path())? else {
-        return Ok(None);
-    };
-    if known.version != CACHE_VERSION {
-        warn_cache_ignored(format!(
-            "known connections cache version {} is stale; expected {CACHE_VERSION}",
-            known.version
-        ));
-        return Ok(None);
+fn write_status_record(status: CachedStatus) -> Result<()> {
+    Repository::runtime().write_json(STATUS_FILE, &status)
+}
+
+fn read_snapshot_locked(repository: &LockedRepository<'_>) -> Result<CacheRead<CachedSnapshot>> {
+    Ok(validate_version(
+        repository.read_json(SNAPSHOT_FILE)?,
+        |snapshot| snapshot.version,
+    ))
+}
+
+fn read_known_connections() -> Result<CacheRead<CachedKnownConnections>> {
+    Ok(validate_version(
+        Repository::runtime().read_json(KNOWN_CONNECTIONS_FILE)?,
+        |known| known.version,
+    ))
+}
+
+fn read_known_for_update(repository: &LockedRepository<'_>) -> Result<CachedKnownConnections> {
+    match validate_version(
+        repository.read_json::<CachedKnownConnections>(KNOWN_CONNECTIONS_FILE)?,
+        |known| known.version,
+    ) {
+        CacheRead::Available(known) => Ok(known),
+        CacheRead::Missing => Ok(empty_known_connections()),
+        state @ CacheRead::Stale { .. } => {
+            tracing::warn!(
+                message = %state.unavailable_message("known-connections cache").unwrap_or_default(),
+                "replacing stale known-connections cache"
+            );
+            Ok(empty_known_connections())
+        }
+        CacheRead::Corrupt { message } => {
+            bail!("refusing to overwrite corrupt known-connections cache: {message}")
+        }
     }
-    Ok(Some(known))
 }
 
 fn empty_known_connections() -> CachedKnownConnections {
@@ -254,320 +314,50 @@ fn empty_known_connections() -> CachedKnownConnections {
     }
 }
 
-fn write_known_connections(known: &CachedKnownConnections) -> Result<()> {
-    write_json(known_connections_path(), known)
-}
-
-fn network_key(access_point: &AccessPoint) -> String {
-    format!(
-        "{}|{}",
-        bytes_hex(access_point.ssid_bytes().as_ref()),
-        access_point.security
-    )
-}
-
-fn bytes_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn upsert_snapshot_access_point(access_point: &AccessPoint) -> Result<()> {
-    let mut networks = read_snapshot()?
-        .map(CachedSnapshot::into_networks)
-        .unwrap_or_default();
-    upsert_connected_access_point(&mut networks, access_point.clone());
-    write_snapshot(false, &networks)
-}
-
-fn upsert_connected_access_point(networks: &mut Vec<AccessPoint>, mut access_point: AccessPoint) {
-    networks
-        .iter_mut()
-        .for_each(|network| network.active = false);
-    access_point.active = true;
-
-    if let Some(existing) = networks
-        .iter_mut()
-        .find(|network| same_access_point(network, &access_point))
-    {
-        *existing = access_point;
-    } else {
-        networks.insert(0, access_point);
-    }
-}
-
-fn same_access_point(left: &AccessPoint, right: &AccessPoint) -> bool {
-    if !left.path.is_empty() && !right.path.is_empty() {
-        return left.path == right.path;
-    }
-    if !left.bssid.is_empty() && !right.bssid.is_empty() {
-        return left.bssid.eq_ignore_ascii_case(&right.bssid);
-    }
-    left.ssid_bytes().as_ref() == right.ssid_bytes().as_ref() && left.security == right.security
-}
-
-fn mark_snapshot_inactive() -> Result<()> {
-    let Some(snapshot) = read_snapshot()? else {
-        return Ok(());
-    };
-    let mut networks = snapshot.into_networks();
-    networks
-        .iter_mut()
-        .for_each(|network| network.active = false);
-    write_snapshot(false, &networks)
-}
-
-fn write_status_record(status: CachedStatus) -> Result<()> {
-    write_json(status_path(), &status)
-}
-
-fn read_json<T>(path: PathBuf) -> Result<Option<T>>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) => {
-            warn_cache_ignored(format!("could not read {}: {err}", path.display()));
-            return Ok(None);
+fn update_snapshot(
+    repository: &LockedRepository<'_>,
+    snapshot: CacheRead<CachedSnapshot>,
+    update: impl FnOnce(&mut Vec<AccessPoint>),
+) -> Result<()> {
+    match snapshot {
+        CacheRead::Available(snapshot) => {
+            let mut networks = snapshot.into_networks();
+            update(&mut networks);
+            repository.write_json(SNAPSHOT_FILE, &snapshot_record(false, &networks))
         }
-    };
-    match serde_json::from_str(&text) {
-        Ok(value) => Ok(Some(value)),
-        Err(err) => {
-            warn_cache_ignored(format!("could not parse {}: {err}", path.display()));
-            Ok(None)
+        CacheRead::Missing => {
+            tracing::debug!("not creating Wi-Fi scan cache from status-only update");
+            Ok(())
+        }
+        state @ (CacheRead::Stale { .. } | CacheRead::Corrupt { .. }) => {
+            tracing::warn!(
+                message = %state.unavailable_message("Wi-Fi scan cache").unwrap_or_default(),
+                "not updating unusable Wi-Fi scan cache"
+            );
+            Ok(())
         }
     }
 }
 
-fn write_json<T>(path: PathBuf, value: &T) -> Result<()>
-where
-    T: Serialize,
-{
-    let parent = path.parent().context("cache path has no parent")?;
-    create_private_dir_all(parent)?;
-    let tmp_path = temp_path_for(&path)?;
-    let text = serde_json::to_string_pretty(value).context("serialize cache JSON")?;
-    write_private_file(&tmp_path, format!("{text}\n").as_bytes())
-        .with_context(|| format!("write {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, &path)
-        .with_context(|| format!("rename {} to {}", tmp_path.display(), path.display()))
-}
-
-fn temp_path_for(path: &Path) -> Result<PathBuf> {
-    let parent = path.parent().context("cache path has no parent")?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("cache path has no file name")?;
-    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    Ok(parent.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        counter
-    )))
-}
-
-pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        create_private_dir_all_unix(path)
-    }
-    #[cfg(not(unix))]
-    {
-        fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))
-    }
-}
-
-fn append_json_line<T>(path: PathBuf, value: &T) -> Result<()>
-where
-    T: Serialize,
-{
-    let parent = path.parent().context("state path has no parent")?;
-    create_private_dir_all(parent)?;
-    reject_symlink(&path)?;
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))?;
-    serde_json::to_writer(&mut file, value).context("serialize JSONL record")?;
-    file.write_all(b"\n")
-        .with_context(|| format!("write {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("open {}", path.display()))?;
-    file.write_all(contents)
-        .with_context(|| format!("write {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", path.display()))?;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_private_dir_all_unix(path: &Path) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-
-    match fs::symlink_metadata(path) {
-        Ok(link_metadata) => {
-            if link_metadata.file_type().is_symlink() {
-                anyhow::bail!(
-                    "refusing to use symlinked cache directory {}",
-                    path.display()
-                );
+fn validate_version<T>(state: CacheRead<T>, version: impl FnOnce(&T) -> u32) -> CacheRead<T> {
+    match state {
+        CacheRead::Available(value) => {
+            let found_version = version(&value);
+            if found_version == CACHE_VERSION {
+                CacheRead::Available(value)
+            } else {
+                CacheRead::Stale {
+                    found_version,
+                    expected_version: CACHE_VERSION,
+                }
             }
-            let metadata =
-                fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-            if !metadata.is_dir() {
-                anyhow::bail!("{} exists but is not a directory", path.display());
-            }
-            let current_uid = current_euid();
-            if metadata.uid() != current_uid {
-                anyhow::bail!(
-                    "refusing to use {} owned by uid {}; expected uid {}",
-                    path.display(),
-                    metadata.uid(),
-                    current_uid
-                );
-            }
-            if metadata.mode() & 0o077 != 0 {
-                fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                    .with_context(|| format!("chmod 0700 {}", path.display()))?;
-            }
-            return Ok(());
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err).with_context(|| format!("lstat {}", path.display())),
+        other => other,
     }
-
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true).mode(0o700);
-    builder
-        .create(path)
-        .with_context(|| format!("create {}", path.display()))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("chmod 0700 {}", path.display()))
-}
-
-#[cfg(unix)]
-fn current_euid() -> u32 {
-    rustix::process::geteuid().as_raw()
-}
-
-fn reject_symlink(path: &Path) -> Result<()> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).with_context(|| format!("lstat {}", path.display())),
-    };
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("refusing to use symlinked file {}", path.display());
-    }
-    Ok(())
-}
-
-fn remove_file_if_exists(path: PathBuf) -> Result<()> {
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("remove {}", path.display())),
-    }
-}
-
-fn warn_cache_ignored(message: String) {
-    tracing::warn!(message = %message, "ignoring Wi-Fi cache");
-    eprintln!("warning: ignoring Wi-Fi cache: {message}");
-}
-
-fn snapshot_path() -> PathBuf {
-    cache_dir().join("latest.json")
-}
-
-fn status_path() -> PathBuf {
-    cache_dir().join("status.json")
-}
-
-fn active_status_path() -> PathBuf {
-    cache_dir().join("active-status.json")
-}
-
-fn known_connections_path() -> PathBuf {
-    cache_dir().join("known-connections.json")
-}
-
-fn connect_history_path() -> PathBuf {
-    state_dir().join("connects.jsonl")
-}
-
-fn session_path() -> PathBuf {
-    cache_dir().join("scan-session.json")
-}
-
-pub(crate) fn log_path() -> PathBuf {
-    cache_dir().join("nm-daemon.log")
-}
-
-fn cache_dir() -> PathBuf {
-    match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(runtime_dir) => PathBuf::from(runtime_dir).join(CACHE_DIR_NAME),
-        None => std::env::temp_dir().join(format!("{CACHE_DIR_NAME}-{}", current_user_id())),
-    }
-}
-
-fn state_dir() -> PathBuf {
-    if let Some(state_home) = std::env::var_os("XDG_STATE_HOME") {
-        return PathBuf::from(state_home).join(CACHE_DIR_NAME);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".local")
-            .join("state")
-            .join(CACHE_DIR_NAME);
-    }
-    cache_dir()
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.is_empty())
-}
-
-fn current_user_id() -> u32 {
-    #[cfg(unix)]
-    {
-        current_euid()
-    }
-    #[cfg(not(unix))]
-    {
-        0
-    }
 }
 
 pub(crate) fn now_ms() -> u128 {
@@ -579,67 +369,17 @@ pub(crate) fn now_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use super::{same_access_point, temp_path_for, upsert_connected_access_point};
-    use crate::model::AccessPoint;
+    use super::{CACHE_VERSION, CacheRead, validate_version};
 
     #[test]
-    fn temp_paths_are_unique_for_same_cache_path() {
-        let path = PathBuf::from("/tmp/nm-daemon/status.json");
-
-        let first = temp_path_for(&path).expect("first temp path");
-        let second = temp_path_for(&path).expect("second temp path");
-
-        assert_ne!(first, second);
-        assert_eq!(first.parent(), path.parent());
-        assert_eq!(second.parent(), path.parent());
-    }
-
-    #[test]
-    fn connected_access_point_replaces_cached_network_and_marks_only_it_active() {
-        let mut networks = vec![test_ap("/ap/1", "00:11:22:33:44:55", false)];
-        let connected = test_ap("/ap/1", "00:11:22:33:44:55", false);
-
-        upsert_connected_access_point(&mut networks, connected);
-
-        assert_eq!(networks.len(), 1);
-        assert!(networks[0].active);
-    }
-
-    #[test]
-    fn connected_access_point_can_be_matched_by_bssid_without_path() {
-        let left = test_ap("", "00:11:22:33:44:55", false);
-        let right = test_ap("", "00:11:22:33:44:55", true);
-
-        assert!(same_access_point(&left, &right));
-    }
-
-    fn test_ap(path: &str, bssid: &str, active: bool) -> AccessPoint {
-        AccessPoint {
-            ssid: "Example".to_string(),
-            ssid_bytes: b"Example".to_vec(),
-            active,
-            security: "WPA2/3".to_string(),
-            strength: 80,
-            frequency: 2412,
-            channel: 1,
-            band: "2.4 GHz".to_string(),
-            mode: "Infra".to_string(),
-            max_bitrate_mbps: 0,
-            bandwidth_mhz: 0,
-            ssid_hex: "4578616d706c65".to_string(),
-            wpa_flags_label: "(none)".to_string(),
-            rsn_flags_label: "(none)".to_string(),
-            bssid: bssid.to_string(),
-            last_seen: 0,
-            last_seen_age_ms: None,
-            path: path.to_string(),
-            device_path: "/device/1".to_string(),
-            device_iface: "wlan0".to_string(),
-            flags: 0,
-            wpa_flags: 0,
-            rsn_flags: 0,
-        }
+    fn version_mismatch_is_stale_instead_of_missing() {
+        let state = validate_version(CacheRead::Available(CACHE_VERSION - 1), |version| *version);
+        assert!(matches!(
+            state,
+            CacheRead::Stale {
+                found_version,
+                expected_version: CACHE_VERSION,
+            } if found_version == CACHE_VERSION - 1
+        ));
     }
 }

@@ -1,29 +1,40 @@
 mod actions;
 mod app;
+mod application;
+mod background_scan;
 mod cache;
 mod cli;
+mod client;
+mod command;
 mod connect;
 mod connect_cancel;
+mod connect_error;
+mod connect_wait;
 mod contract;
 mod daemon;
 mod daemon_connect;
 mod daemon_dispatch;
 mod daemon_event;
+mod daemon_methods;
+mod daemon_runtime;
 mod daemon_scan;
 mod daemon_secret;
-mod daemon_state;
 mod daemon_status;
 mod deadline;
 mod diagnose;
 mod error;
 mod keyring;
-mod list;
 mod logging;
 mod model;
 mod nm;
 mod output;
+mod protocol;
+mod qr;
 mod stream;
 mod stream_emit;
 mod stream_watch;
+
+#[cfg(test)]
+mod test_support;
 
 pub use app::{report_error, run};

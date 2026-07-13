@@ -1,4 +1,7 @@
-use anyhow::{Context, Result};
+use std::sync::Arc;
+
+use anyhow::Result;
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
@@ -6,64 +9,109 @@ use zbus::object_server::SignalEmitter;
 use crate::daemon::emit_json_event_best_effort;
 use crate::daemon_connect::DbusConnectTargetParams;
 use crate::daemon_event::next_request_id;
+use crate::daemon_methods::{
+    ProfileOperationParams, call_connectivity, call_disconnect, call_networks,
+    call_profile_operation, call_status,
+};
+use crate::daemon_runtime::DaemonRuntime;
 use crate::daemon_scan::DbusScanParams;
 use crate::daemon_secret::{SecretCapabilitiesParams, SecretProvideParams};
-use crate::list::enriched_network_list;
-use crate::nm::Nm;
-use crate::output::{api_data_value, api_error_value};
+use crate::error::{DomainError, ErrorOperation, ErrorReport, operation_result};
+use crate::output::{api_data_value, api_error_value_for};
+use crate::protocol::{Method, Stream};
 
 pub(crate) fn dispatch_call(
     method: &str,
     params_json: &str,
     emitter: SignalEmitter<'static>,
+    runtime: &Arc<DaemonRuntime>,
 ) -> Result<Value> {
-    match method {
-        "wifi.status" => call_status(),
-        "network.connectivity" => call_connectivity(),
-        "wifi.networks" => call_networks(parse_params(params_json)?),
-        "wifi.scan" => {
-            crate::daemon_scan::start_scan(parse_params::<DbusScanParams>(params_json)?, emitter)
+    let Some(method) = Method::parse(method) else {
+        let error: anyhow::Error = DomainError::validation(
+            ErrorOperation::ParseRequest,
+            format!("unsupported D-Bus method key: {method}"),
+        )
+        .with_detail("method", method)
+        .into();
+        return Ok(api_error_value_for(&ErrorReport::from_error(
+            &error,
+            ErrorOperation::ParseRequest,
+        )));
+    };
+    let result = match method {
+        Method::WifiStatus => {
+            parse_params::<EmptyParams>(params_json)?;
+            call_status(runtime)
         }
-        "wifi.connectTarget" | "wifi.connect-target" => {
-            crate::daemon_connect::start_connect_target(
-                parse_required_params::<DbusConnectTargetParams>(params_json)?,
-                emitter,
-            )
+        Method::NetworkConnectivity => {
+            parse_params::<EmptyParams>(params_json)?;
+            call_connectivity(runtime)
         }
-        "wifi.secret.capabilities" => crate::daemon_secret::capabilities(parse_params::<
-            SecretCapabilitiesParams,
-        >(params_json)?),
-        "wifi.secret.provide" => crate::daemon_secret::provide(parse_required_params::<
+        Method::WifiNetworks => call_networks(runtime, parse_params(params_json)?),
+        Method::WifiScan => crate::daemon_scan::start_scan(
+            runtime,
+            parse_params::<DbusScanParams>(params_json)?,
+            emitter,
+        ),
+        Method::WifiConnectTarget => crate::daemon_connect::start_connect_target(
+            runtime,
+            parse_required_params::<DbusConnectTargetParams>(params_json)?,
+            emitter,
+        ),
+        Method::WifiDisconnect => {
+            parse_params::<EmptyParams>(params_json)?;
+            call_disconnect(runtime)
+        }
+        Method::WifiProfileOperation => call_profile_operation(
+            runtime,
+            parse_required_params::<ProfileOperationParams>(params_json)?,
+        ),
+        Method::WifiSecretCapabilities => {
+            crate::daemon_secret::capabilities(parse_params::<SecretCapabilitiesParams>(
+                params_json,
+            )?)
+        }
+        Method::WifiSecretProvide => crate::daemon_secret::provide(parse_required_params::<
             SecretProvideParams,
         >(params_json)?),
-        _ => Ok(api_error_value(
-            "invalid-request",
-            &format!("unsupported D-Bus method key: {method}"),
-        )),
-    }
+    };
+    operation_result(method.spec().operation, result)
 }
 
 pub(crate) fn subscribe_streams(
     streams: Vec<String>,
+    owner: Option<String>,
     emitter: SignalEmitter<'static>,
+    runtime: &Arc<DaemonRuntime>,
 ) -> Result<Value> {
+    let streams = normalized_streams(streams)?;
     let subscription_id = next_request_id("sub");
-    let streams = normalized_streams(streams);
-    for stream in &streams {
-        emit_subscription_event(&emitter, &subscription_id, stream);
-    }
-    crate::daemon_status::spawn_subscription_worker(&subscription_id, &streams, emitter);
-    api_data_value(
+    let response = api_data_value(
         "subscription",
         &json!({ "id": subscription_id, "streams": streams }),
         "serialize subscription response JSON",
-    )
+    )?;
+    runtime.subscribe(
+        subscription_id.clone(),
+        owner,
+        streams.clone(),
+        emitter.clone(),
+    )?;
+    for stream in &streams {
+        emit_json_event_best_effort(
+            &emitter,
+            *stream,
+            Some(&subscription_id),
+            "subscribed",
+            json!({ "subscription_id": subscription_id, "stream": stream }),
+        );
+    }
+    Ok(response)
 }
 
 pub(crate) fn json_response(result: Result<Value>) -> String {
     let value = result.unwrap_or_else(|err| {
-        let message = format!("{err:#}");
-        api_error_value(crate::error::classify_error(&message), &message)
+        api_error_value_for(&ErrorReport::from_error(&err, ErrorOperation::Unknown))
     });
     serde_json::to_string(&value).unwrap_or_else(|err| {
         format!(
@@ -72,57 +120,44 @@ pub(crate) fn json_response(result: Result<Value>) -> String {
     })
 }
 
-fn call_status() -> Result<Value> {
-    let nm = Nm::new()?;
-    let status = nm.wifi_status()?;
-    if let Err(err) = crate::cache::cache_connected_network_status(&status) {
-        tracing::warn!(error = %format_args!("{err:#}"), "failed to cache active Wi-Fi status");
-    }
-    api_data_value("status", &status, "serialize Wi-Fi status response JSON")
-}
-
-fn call_connectivity() -> Result<Value> {
-    let nm = Nm::new()?;
-    api_data_value(
-        "connectivity",
-        &nm.connectivity_check()?,
-        "serialize connectivity response JSON",
-    )
-}
-
-fn call_networks(params: NetworksParams) -> Result<Value> {
-    let nm = Nm::new()?;
-    let networks = enriched_network_list(
-        &nm,
-        params.cached,
-        params.refresh_cache,
-        params.refresh_timeout.unwrap_or(10),
-        0,
-        &None,
-    )?;
-    api_data_value("networks", &networks, "serialize network response JSON")
-}
-
-fn normalized_streams(streams: Vec<String>) -> Vec<String> {
+fn normalized_streams(streams: Vec<String>) -> Result<Vec<Stream>> {
     if streams.is_empty() {
-        ["wifi.status", "network.connectivity", "wifi.scan"]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+        return Ok(Stream::defaults());
+    }
+    let mut normalized = Vec::new();
+    let mut unsupported = Vec::new();
+    for name in streams {
+        match Stream::parse_subscription(&name) {
+            Some(stream) if !normalized.contains(&stream) => normalized.push(stream),
+            Some(_) => {}
+            None => unsupported.push(name),
+        }
+    }
+    if unsupported.is_empty() {
+        Ok(normalized)
     } else {
-        streams
+        Err(DomainError::validation(
+            ErrorOperation::Subscribe,
+            "subscription contains unsupported event streams",
+        )
+        .with_detail("unsupported_streams", json!(unsupported))
+        .with_detail(
+            "supported_streams",
+            json!(
+                crate::protocol::STREAM_REGISTRY
+                    .iter()
+                    .filter(|spec| spec.subscribable)
+                    .map(|spec| spec.name)
+                    .collect::<Vec<_>>()
+            ),
+        )
+        .into())
     }
 }
 
-fn emit_subscription_event(emitter: &SignalEmitter<'_>, subscription_id: &str, stream: &str) {
-    emit_json_event_best_effort(
-        emitter,
-        stream,
-        Some(subscription_id),
-        "subscribed",
-        json!({ "subscription_id": subscription_id, "stream": stream }),
-    );
-}
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct EmptyParams {}
 
 fn parse_params<T>(params_json: &str) -> Result<T>
 where
@@ -139,13 +174,42 @@ fn parse_required_params<T>(params_json: &str) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    serde_json::from_str(params_json.trim()).context("parse D-Bus params_json")
+    serde_json::from_str(params_json.trim()).map_err(|error| {
+        DomainError::validation(ErrorOperation::ParseRequest, &error)
+            .with_detail("transport", "dbus")
+            .with_cause(error.into())
+            .into()
+    })
 }
 
-#[derive(Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct NetworksParams {
-    cached: bool,
-    refresh_cache: bool,
-    refresh_timeout: Option<u64>,
+#[cfg(test)]
+mod tests {
+    use super::normalized_streams;
+    use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
+    use crate::protocol::Stream;
+
+    #[test]
+    fn empty_subscription_uses_registry_defaults() {
+        assert_eq!(normalized_streams(Vec::new()).unwrap(), Stream::defaults());
+    }
+
+    #[test]
+    fn subscriptions_are_typed_deduplicated_and_reject_unknown_names() {
+        assert_eq!(
+            normalized_streams(vec![
+                "wifi.scan".to_string(),
+                "wifi.scan".to_string(),
+                "wifi.connect".to_string(),
+            ])
+            .unwrap(),
+            vec![Stream::WifiScan, Stream::WifiConnect]
+        );
+
+        let error =
+            normalized_streams(vec!["wifi.scan".to_string(), "not.real".to_string()]).unwrap_err();
+        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
+        assert_eq!(report.code, ErrorCode::ValidationError);
+        assert_eq!(report.operation, ErrorOperation::Subscribe);
+        assert_eq!(report.details["unsupported_streams"][0], "not.real");
+    }
 }

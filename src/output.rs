@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport, ErrorSource};
 use crate::model::{
     AccessPoint, ConnectFailureReason, ConnectResult, ConnectivityStatus, DisconnectResult,
     NetworkEntry, SavedWifiConnection, WifiSharePayload, WifiStatus,
@@ -93,6 +94,27 @@ pub(crate) fn print_connect_result(result: &ConnectResult) -> Result<()> {
     print_api_data("result", result, "serialize connect response JSON")
 }
 
+pub(crate) fn print_connect_failure(result: &ConnectResult, report: &ErrorReport) -> Result<()> {
+    let mut details = report
+        .api_details()
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    details.insert("ssid".to_string(), json!(&result.ssid));
+    details.insert("result".to_string(), json!(result));
+    let error = json!({
+        "code": report.code,
+        "message": report.message,
+        "details": details,
+    });
+    print_api_error_with_data(
+        error,
+        "result",
+        result,
+        "serialize connect error response JSON",
+    )
+}
+
 print_api_data_fns! {
     print_connectivity(status: &ConnectivityStatus) => "connectivity", "serialize connectivity response JSON";
     print_wifi_status(status: &WifiStatus) => "status", "serialize Wi-Fi status response JSON";
@@ -100,22 +122,22 @@ print_api_data_fns! {
     print_disconnect_result(result: &DisconnectResult) => "result", "serialize disconnect response JSON";
 }
 
-pub(crate) fn print_api_error(code: &str, message: &str) -> Result<()> {
+pub(crate) fn print_error_report(report: &ErrorReport) -> Result<()> {
     print_pretty_json(
-        &api_error_value(code, message),
-        "serialize API error response JSON",
+        &api_error_value_for(report),
+        "serialize typed API error response JSON",
     )
 }
 
-pub(crate) fn api_error_value(code: &str, message: &str) -> Value {
+pub(crate) fn api_error_value_for(report: &ErrorReport) -> Value {
     json!({
         "protocol": API_PROTOCOL,
         "version": API_VERSION,
         "ok": false,
         "error": {
-            "code": code,
-            "message": message,
-            "details": {},
+            "code": report.code,
+            "message": report.message,
+            "details": report.api_details(),
         },
         "data": {},
     })
@@ -174,7 +196,15 @@ fn api_data_map<T: Serialize + ?Sized>(
     let mut data = Map::new();
     data.insert(
         key.to_string(),
-        serde_json::to_value(value).context(context)?,
+        serde_json::to_value(value).map_err(|error| {
+            DomainError::new(
+                ErrorCode::InternalError,
+                ErrorOperation::SerializeResponse,
+                ErrorSource::Serialization,
+                format!("{context}: {error}"),
+            )
+            .with_cause(error.into())
+        })?,
     );
     Ok(data)
 }
@@ -185,13 +215,29 @@ fn connect_failure_code(reason: &ConnectFailureReason) -> Result<String> {
 }
 
 fn print_pretty_json<T: Serialize + ?Sized>(value: &T, context: &'static str) -> Result<()> {
-    let text = serde_json::to_string_pretty(value).context(context)?;
+    let text = serde_json::to_string_pretty(value).map_err(|error| {
+        DomainError::new(
+            ErrorCode::InternalError,
+            ErrorOperation::SerializeResponse,
+            ErrorSource::Serialization,
+            format!("{context}: {error}"),
+        )
+        .with_cause(error.into())
+    })?;
     println!("{text}");
     Ok(())
 }
 
 pub(crate) fn emit_stream_event(event: &StreamOutput<'_>) -> Result<()> {
-    let mut value = serde_json::to_value(event).context("serialize JSON stream event")?;
+    let mut value = serde_json::to_value(event).map_err(|error| {
+        DomainError::new(
+            ErrorCode::InternalError,
+            ErrorOperation::EmitEvent,
+            ErrorSource::Serialization,
+            format!("serialize JSON stream event: {error}"),
+        )
+        .with_cause(error.into())
+    })?;
     if let Value::Object(object) = &mut value {
         object.insert("protocol".to_string(), json!(API_PROTOCOL));
         object.insert("version".to_string(), json!(API_VERSION));
@@ -200,8 +246,26 @@ pub(crate) fn emit_stream_event(event: &StreamOutput<'_>) -> Result<()> {
 
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    serde_json::to_writer(&mut stdout, &value).context("write JSON event")?;
-    stdout.write_all(b"\n").context("write JSON newline")?;
-    stdout.flush().context("flush JSON event")?;
+    serde_json::to_writer(&mut stdout, &value).map_err(|error| {
+        DomainError::new(
+            ErrorCode::InternalError,
+            ErrorOperation::EmitEvent,
+            ErrorSource::Serialization,
+            format!("write JSON event: {error}"),
+        )
+        .with_cause(error.into())
+    })?;
+    stdout.write_all(b"\n").map_err(event_io_error)?;
+    stdout.flush().map_err(event_io_error)?;
     Ok(())
+}
+
+fn event_io_error(error: io::Error) -> DomainError {
+    DomainError::new(
+        ErrorCode::InternalError,
+        ErrorOperation::EmitEvent,
+        ErrorSource::Io,
+        format!("write JSON event: {error}"),
+    )
+    .with_cause(error.into())
 }

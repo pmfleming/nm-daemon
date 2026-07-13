@@ -1,141 +1,146 @@
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
-
-use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use zbus::object_server::SignalEmitter;
 
+use crate::application::Application;
 use crate::daemon::emit_json_event_best_effort;
-use crate::daemon_state;
+use crate::daemon_runtime::SharedPayloads;
 use crate::nm::Nm;
+use crate::protocol::{Method, Stream, StreamDelivery};
 
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-pub(crate) fn spawn_subscription_worker(
-    subscription_id: &str,
-    streams: &[String],
+pub(crate) struct SubscriptionState {
+    id: String,
+    owner: Option<String>,
+    streams: Vec<Stream>,
     emitter: SignalEmitter<'static>,
-) {
-    let watched_streams = watched_streams(streams);
-    if watched_streams.is_empty() {
-        return;
-    }
-    let subscription_id = subscription_id.to_string();
-    let cancel_flag = daemon_state::register(&subscription_id);
-    std::thread::spawn(move || {
-        run_subscription_worker(&subscription_id, watched_streams, cancel_flag, emitter);
-        daemon_state::remove(&subscription_id);
-    });
+    last_status: Option<Value>,
+    last_connectivity: Option<Value>,
 }
 
-fn run_subscription_worker(
-    subscription_id: &str,
-    streams: Vec<WatchedStream>,
-    cancel_flag: Arc<AtomicBool>,
-    emitter: SignalEmitter<'static>,
-) {
-    let mut last_status = None;
-    let mut last_connectivity = None;
-    while !daemon_state::is_cancelled(&cancel_flag) {
-        if let Ok(nm) = Nm::new() {
-            for stream in &streams {
-                stream.poll_and_emit(
-                    &nm,
-                    subscription_id,
-                    &emitter,
-                    &mut last_status,
-                    &mut last_connectivity,
-                );
-            }
+impl SubscriptionState {
+    pub(crate) fn new(
+        id: String,
+        owner: Option<String>,
+        streams: Vec<Stream>,
+        emitter: SignalEmitter<'static>,
+    ) -> Self {
+        Self {
+            id,
+            owner,
+            streams: streams
+                .into_iter()
+                .filter(|stream| stream.spec().delivery == StreamDelivery::Continuous)
+                .collect(),
+            emitter,
+            last_status: None,
+            last_connectivity: None,
         }
-        std::thread::sleep(POLL_INTERVAL);
     }
-    emit_json_event_best_effort(
-        &emitter,
-        "daemon.subscription",
-        Some(subscription_id),
-        "cancelled",
-        json!({ "subscription_id": subscription_id }),
-    );
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn watches(&self, stream: Stream) -> bool {
+        self.streams.contains(&stream)
+    }
+
+    pub(crate) fn owned_by(&self, owner: &str) -> bool {
+        self.owner.as_deref() == Some(owner)
+    }
+
+    pub(crate) fn emit_changes(&mut self, payloads: &SharedPayloads) {
+        if self.watches(Stream::WifiStatus)
+            && let Some(value) = &payloads.status
+        {
+            emit_on_change(
+                &self.emitter,
+                Stream::WifiStatus,
+                &self.id,
+                Method::WifiStatus,
+                &mut self.last_status,
+                value,
+            );
+        }
+        if self.watches(Stream::NetworkConnectivity)
+            && let Some(value) = &payloads.connectivity
+        {
+            emit_on_change(
+                &self.emitter,
+                Stream::NetworkConnectivity,
+                &self.id,
+                Method::NetworkConnectivity,
+                &mut self.last_connectivity,
+                value,
+            );
+        }
+    }
 }
 
-fn watched_streams(streams: &[String]) -> Vec<WatchedStream> {
-    streams
-        .iter()
-        .filter_map(|stream| match stream.as_str() {
-            "wifi.status" => Some(WatchedStream::WifiStatus),
-            "network.connectivity" => Some(WatchedStream::NetworkConnectivity),
-            _ => None,
-        })
-        .collect()
+pub(crate) fn refresh_payloads(
+    nm: &Nm,
+    need_status: bool,
+    need_connectivity: bool,
+) -> SharedPayloads {
+    let application = Application::new(nm);
+    let status = need_status
+        .then(|| application.status())
+        .and_then(log_typed_refresh_error);
+    let connectivity_from_status = status
+        .as_ref()
+        .and_then(|status| status.connectivity.clone());
+    SharedPayloads {
+        status: status.map(|status| json!(status)),
+        connectivity: need_connectivity
+            .then(|| match connectivity_from_status {
+                Some(connectivity) => Ok(json!(connectivity)),
+                None => application
+                    .connectivity()
+                    .map(|connectivity| json!(connectivity)),
+            })
+            .and_then(log_refresh_error),
+    }
 }
 
-#[derive(Clone, Copy)]
-enum WatchedStream {
-    WifiStatus,
-    NetworkConnectivity,
+fn log_typed_refresh_error<T>(result: anyhow::Result<T>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "shared subscription refresh failed");
+            None
+        }
+    }
 }
 
-impl WatchedStream {
-    fn poll_and_emit(
-        self,
-        nm: &Nm,
-        subscription_id: &str,
-        emitter: &SignalEmitter<'static>,
-        last_status: &mut Option<Value>,
-        last_connectivity: &mut Option<Value>,
-    ) {
-        match self {
-            WatchedStream::WifiStatus => emit_on_change(
-                emitter,
-                "wifi.status",
-                subscription_id,
-                "changed",
-                last_status,
-                || status_payload(nm, subscription_id),
-            ),
-            WatchedStream::NetworkConnectivity => emit_on_change(
-                emitter,
-                "network.connectivity",
-                subscription_id,
-                "changed",
-                last_connectivity,
-                || connectivity_payload(nm, subscription_id),
-            ),
+fn log_refresh_error(result: anyhow::Result<Value>) -> Option<Value> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "shared subscription refresh failed");
+            None
         }
     }
 }
 
 fn emit_on_change(
     emitter: &SignalEmitter<'static>,
-    stream: &str,
+    stream: Stream,
     subscription_id: &str,
-    event: &str,
+    method: Method,
     last: &mut Option<Value>,
-    payload: impl FnOnce() -> Result<Value>,
+    value: &Value,
 ) {
-    let Ok(value) = payload() else {
-        return;
-    };
-    if last.as_ref() == Some(&value) {
+    if last.as_ref() == Some(value) {
         return;
     }
     *last = Some(value.clone());
-    emit_json_event_best_effort(emitter, stream, Some(subscription_id), event, value);
-}
-
-fn status_payload(nm: &Nm, subscription_id: &str) -> Result<Value> {
-    let status = nm.wifi_status()?;
-    if let Err(err) = crate::cache::cache_connected_network_status(&status) {
-        tracing::warn!(error = %format_args!("{err:#}"), "failed to cache active Wi-Fi status");
-    }
-    Ok(json!({ "subscription_id": subscription_id, "status": status }))
-}
-
-fn connectivity_payload(nm: &Nm, subscription_id: &str) -> Result<Value> {
-    Ok(json!({
-        "subscription_id": subscription_id,
-        "connectivity": nm.connectivity_check()?,
-    }))
+    let mut payload = Map::new();
+    payload.insert("subscription_id".to_string(), json!(subscription_id));
+    payload.insert(method.spec().response_key.to_string(), value.clone());
+    emit_json_event_best_effort(
+        emitter,
+        stream,
+        Some(subscription_id),
+        "changed",
+        Value::Object(payload),
+    );
 }

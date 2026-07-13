@@ -1,14 +1,18 @@
 use std::collections::HashMap;
-use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use zbus::blocking::{Connection, Proxy};
 use zvariant::{DynamicType, OwnedObjectPath, OwnedValue, Value};
 
+use crate::command::{CommandRunner, default_runner};
+use crate::error::{ErrorOperation, ensure_domain};
+
 mod activate;
 mod connectivity;
 mod devices;
+mod events;
 mod scan;
 mod settings;
 mod status;
@@ -41,33 +45,6 @@ where
     OwnedValue::try_from(Value::new(value)).context("create D-Bus variant value")
 }
 
-pub(crate) fn split_nmcli_fields(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut current = String::new();
-    let mut escaped = false;
-
-    for ch in line.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == ':' {
-            fields.push(std::mem::take(&mut current));
-        } else {
-            current.push(ch);
-        }
-    }
-
-    fields.push(current);
-    fields
-}
-
-pub(crate) fn split_nmcli_key_value(line: &str) -> Option<(String, String)> {
-    let mut parts = split_nmcli_fields(line).into_iter();
-    Some((parts.next()?, parts.next().unwrap_or_default()))
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct WifiActivationStatus {
     pub(crate) iface: String,
@@ -92,45 +69,69 @@ impl WifiActivationStatus {
 
 pub(crate) struct Nm {
     conn: Connection,
+    destination: String,
+    commands: Arc<dyn CommandRunner>,
+    events: Arc<events::NetworkEvents>,
 }
 
 impl Nm {
     pub(crate) fn new() -> Result<Self> {
-        Ok(Self {
-            conn: Connection::system().context("connect to system D-Bus")?,
-        })
+        Self::with_command_runner(default_runner())
+    }
+
+    pub(crate) fn with_command_runner(commands: Arc<dyn CommandRunner>) -> Result<Self> {
+        let conn = Connection::system()
+            .map_err(|error| ensure_domain(ErrorOperation::ConnectSystemBus, error.into()))?;
+        Ok(Self::with_connection_and_runner(conn, commands))
+    }
+
+    pub(crate) fn with_connection_and_runner(
+        conn: Connection,
+        commands: Arc<dyn CommandRunner>,
+    ) -> Self {
+        Self::with_connection_runner_and_destination(conn, commands, NM_DEST)
+    }
+
+    pub(crate) fn with_connection_runner_and_destination(
+        conn: Connection,
+        commands: Arc<dyn CommandRunner>,
+        destination: impl Into<String>,
+    ) -> Self {
+        Self {
+            events: events::NetworkEvents::start(conn.clone()),
+            conn,
+            destination: destination.into(),
+            commands,
+        }
     }
 
     pub(crate) fn connection(&self) -> Connection {
         self.conn.clone()
     }
 
-    pub(crate) fn spawn_activation_signal_watcher(&self, device_path: String, wake: Sender<()>) {
-        spawn_property_watcher::<u32>(
-            self.connection(),
-            device_path.clone(),
-            DEVICE_IFACE,
-            "State",
-            wake.clone(),
-        );
-        spawn_property_watcher::<OwnedObjectPath>(
-            self.connection(),
-            device_path.clone(),
-            DEVICE_IFACE,
-            "ActiveConnection",
-            wake.clone(),
-        );
-        spawn_property_watcher::<OwnedObjectPath>(
-            self.connection(),
-            device_path,
-            WIFI_IFACE,
-            "ActiveAccessPoint",
-            wake,
-        );
+    pub(crate) fn command_runner(&self) -> &dyn CommandRunner {
+        self.commands.as_ref()
+    }
+
+    pub(crate) fn event_generation(&self) -> u64 {
+        self.events.generation()
+    }
+
+    pub(crate) fn wait_for_event(&self, observed: u64, timeout: Duration) -> u64 {
+        self.events.wait_for_change(observed, timeout)
+    }
+
+    pub(crate) fn subscribe_events(&self, listener: Arc<dyn Fn() + Send + Sync>) {
+        self.events.subscribe(listener);
+    }
+
+    pub(crate) fn wake_waiters(&self) {
+        self.events.notify();
     }
 
     pub(super) fn proxy<'a>(&'a self, path: &'a str, iface: &'a str) -> Result<Proxy<'a>> {
-        Proxy::new(&self.conn, NM_DEST, path, iface).context("create D-Bus proxy")
+        Proxy::new(&self.conn, self.destination.as_str(), path, iface)
+            .map_err(|error| ensure_domain(ErrorOperation::CreateDbusProxy, error.into()))
     }
 
     pub(super) fn proxy_path<'a>(
@@ -139,43 +140,5 @@ impl Nm {
         iface: &'a str,
     ) -> Result<Proxy<'a>> {
         self.proxy(path.as_str(), iface)
-    }
-}
-
-fn spawn_property_watcher<T>(
-    conn: Connection,
-    path: String,
-    iface: &'static str,
-    property: &'static str,
-    wake: Sender<()>,
-) where
-    T: TryFrom<OwnedValue> + Unpin + Send + 'static,
-{
-    std::thread::spawn(move || {
-        let path_for_log = path.clone();
-        let proxy = match Proxy::new_owned(conn, NM_DEST, path, iface) {
-            Ok(proxy) => proxy,
-            Err(err) => {
-                tracing::debug!(path = %path_for_log, iface, property, error = %format_args!("{err:#}"), "could not create signal watcher proxy");
-                return;
-            }
-        };
-        let mut changes = proxy.receive_property_changed::<T>(property);
-        while changes.next().is_some() {
-            let _ = wake.send(());
-        }
-    });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::split_nmcli_fields;
-
-    #[test]
-    fn split_nmcli_fields_unescapes_colons() {
-        assert_eq!(
-            split_nmcli_fields("a:b\\:c:d"),
-            vec!["a".to_string(), "b:c".to_string(), "d".to_string()]
-        );
     }
 }

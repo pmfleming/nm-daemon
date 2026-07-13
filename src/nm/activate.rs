@@ -10,6 +10,7 @@ use super::wifi_settings::{
 use super::{
     ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_IFACE, NM_PATH, Nm, owned_value,
 };
+use crate::error::DomainError;
 use crate::model::{
     WepKeyType, WifiConnectTarget, ap_is_passwordless, ap_supports_enterprise, ap_supports_psk,
     ap_uses_owe, ap_uses_wep,
@@ -33,10 +34,15 @@ impl Nm {
         };
         if self.saved_wifi_connection_needs_secret_agent(&connection_path, None)? {
             tracing::info!(ssid = %target.ssid, connection = %connection_path, "saved Wi-Fi profile needs a secret agent before activation");
-            anyhow::bail!(
-                "saved Wi-Fi profile for {} requires a secret agent or a newly supplied password",
-                target.ssid
-            );
+            return Err(DomainError::connect(
+                crate::model::ConnectFailureReason::PasswordUnavailable,
+                format!(
+                    "saved Wi-Fi profile for {} requires a secret agent or a newly supplied password",
+                    target.ssid
+                ),
+            )
+            .with_detail("ssid", target.ssid.to_string())
+            .into());
         }
         tracing::info!(
             ssid = %target.ssid,
@@ -95,7 +101,7 @@ impl Nm {
             )?;
             apply_target_connection_metadata(&mut settings, target)?;
             return self
-                .add_and_activate(&target.ssid, settings, device.path, ap_path)
+                .add_and_activate(target.ssid.as_str(), settings, device.path, ap_path)
                 .map(Some);
         }
 
@@ -135,7 +141,7 @@ impl Nm {
 
         apply_target_connection_metadata(&mut settings, target)?;
         apply_target_profile_settings(&mut settings, target)?;
-        self.add_and_activate(&target.ssid, settings, device.path, ap_path)
+        self.add_and_activate(target.ssid.as_str(), settings, device.path, ap_path)
             .map(Some)
     }
 
@@ -151,8 +157,13 @@ impl Nm {
         self.request_hidden_scan(&device, target.ssid_bytes().as_ref())?;
         let mut settings = hidden_wifi_connection_settings(target, password, wep_key_type)?;
         apply_target_connection_metadata(&mut settings, target)?;
-        self.add_and_activate(&target.ssid, settings, device.path, root_object_path()?)
-            .map(Some)
+        self.add_and_activate(
+            target.ssid.as_str(),
+            settings,
+            device.path,
+            root_object_path()?,
+        )
+        .map(Some)
     }
 
     fn add_and_activate(

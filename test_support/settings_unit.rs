@@ -129,7 +129,7 @@ fn test_ap(ssid: &str, bssid: &str) -> AccessPoint {
         ssid: ssid.to_string(),
         ssid_bytes: ssid.as_bytes().to_vec(),
         active: false,
-        security: "WPA2/3".to_string(),
+        security: crate::model::Security::Wpa2Or3,
         strength: 50,
         frequency: 2412,
         channel: 1,

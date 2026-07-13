@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ use zvariant::{OwnedObjectPath, OwnedValue, Value as ZValue};
 use crate::daemon::{DBUS_OBJECT_PATH, emit_json_event_best_effort};
 use crate::nm::{ConnectionSettings, NM_DEST};
 use crate::output::api_data_value;
+use crate::protocol::{Method, Stream};
 
 pub(crate) const SECRET_AGENT_OBJECT_PATH: &str = "/org/laufan/NmDaemon/SecretAgent";
 
@@ -23,8 +24,7 @@ const SECRET_AGENT_ID: &str = "nm-daemon";
 const SECRET_TIMEOUT: Duration = Duration::from_secs(90);
 
 static REGISTERED: AtomicBool = AtomicBool::new(false);
-static PENDING: OnceLock<Mutex<HashMap<String, Sender<SecretResponse>>>> = OnceLock::new();
-static PENDING_KEYS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static PENDING: OnceLock<Mutex<PendingRegistry>> = OnceLock::new();
 
 pub(crate) struct SecretAgentInterface {
     event_connection: zbus::Connection,
@@ -38,8 +38,10 @@ impl SecretAgentInterface {
     }
 }
 
-pub(crate) fn register_secret_agent(session_connection: &Connection) -> Result<Connection> {
-    let system_connection = Connection::system().context("connect to system D-Bus")?;
+pub(crate) fn register_secret_agent(
+    session_connection: &Connection,
+    system_connection: &Connection,
+) -> Result<()> {
     system_connection
         .object_server()
         .at(
@@ -48,7 +50,7 @@ pub(crate) fn register_secret_agent(session_connection: &Connection) -> Result<C
         )
         .context("export nm-daemon SecretAgent on system D-Bus")?;
     let manager = Proxy::new(
-        &system_connection,
+        system_connection,
         NM_DEST,
         AGENT_MANAGER_PATH,
         AGENT_MANAGER_IFACE,
@@ -62,7 +64,7 @@ pub(crate) fn register_secret_agent(session_connection: &Connection) -> Result<C
         path = SECRET_AGENT_OBJECT_PATH,
         "registered NetworkManager SecretAgent"
     );
-    Ok(system_connection)
+    Ok(())
 }
 
 #[zbus::interface(name = "org.freedesktop.NetworkManager.SecretAgent")]
@@ -81,16 +83,18 @@ impl SecretAgentInterface {
             return Ok(connection);
         }
 
-        let request_id = request.id.clone();
-        let rx = register_pending(&request);
+        let (registration, displaced_request_id) = register_pending(&request);
+        if let Some(displaced_request_id) = displaced_request_id {
+            emit_secret_cancelled(&self.event_connection, &displaced_request_id);
+        }
         emit_secret_requested(&self.event_connection, &request);
 
-        let response = rx.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
-            remove_pending(&request_id);
-            zbus::fdo::Error::NoReply(format!("timed out waiting for secret {request_id}"))
+        let response = registration.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
+            zbus::fdo::Error::NoReply(format!("timed out waiting for secret {}", request.id))
         })?;
-        remove_pending(&request_id);
-        apply_secret_response(&mut connection, &request, response)?;
+        if let Some(persistence) = apply_secret_response(&mut connection, &request, response)? {
+            emit_secret_persistence(&self.event_connection, &request.id, persistence);
+        }
         Ok(connection)
     }
 
@@ -98,10 +102,7 @@ impl SecretAgentInterface {
         tracing::info!(%connection_path, setting_name, "NetworkManager cancelled SecretAgent request");
         let key = PendingSecretRequest::key_for(connection_path.as_str(), setting_name);
         if let Some((request_id, sender)) = remove_pending_by_key(&key) {
-            let _ = sender.send(SecretResponse {
-                password: None,
-                save: false,
-            });
+            let _ = sender.send(SecretResponse::cancelled());
             emit_secret_cancelled(&self.event_connection, &request_id);
         }
     }
@@ -127,12 +128,16 @@ pub(crate) struct SecretProvideParams {
     save: bool,
     #[serde(default)]
     password: Option<String>,
+    #[serde(default)]
+    values: HashMap<String, String>,
+    #[serde(default)]
+    cancel: bool,
 }
 
 pub(crate) fn capabilities(_: SecretCapabilitiesParams) -> Result<Value> {
     let keyring_available = crate::keyring::available();
     api_data_value(
-        "secret_agent",
+        Method::WifiSecretCapabilities.spec().response_key,
         &json!({
             "registered": REGISTERED.load(Ordering::Relaxed),
             "agent_path": SECRET_AGENT_OBJECT_PATH,
@@ -140,12 +145,15 @@ pub(crate) fn capabilities(_: SecretCapabilitiesParams) -> Result<Value> {
                 "available": keyring_available,
                 "persistence_supported": keyring_available,
                 "default_save": false,
+                "prompt_handling": "unsupported",
+                "prompt_policy": "dismiss_and_report",
             },
             "events": {
-                "stream": "wifi.secret",
+                "stream": Stream::WifiSecret,
                 "implemented": true,
+                "persistence_outcomes": true,
             },
-            "message": "SecretAgent is registered when NetworkManager is available; save:true uses the user's Secret Service keyring when available",
+            "message": "SecretAgent is registered when NetworkManager is available; save:true persists only when the user's Secret Service keyring can complete without a desktop prompt",
         }),
         "serialize secret-agent capabilities response JSON",
     )
@@ -156,67 +164,78 @@ pub(crate) fn provide(params: SecretProvideParams) -> Result<Value> {
         sender
             .send(SecretResponse {
                 password: params.password,
+                values: params.values,
                 save: params.save,
+                cancelled: params.cancel,
             })
             .is_ok()
     } else {
         false
     };
     api_data_value(
-        "result",
+        Method::WifiSecretProvide.spec().response_key,
         &json!({
-            "status": if accepted { "accepted" } else { "unavailable" },
+            "status": if accepted && params.cancel { "cancelled" } else if accepted { "accepted" } else { "unavailable" },
             "request_id": params.request_id,
             "accepted": accepted,
-            "save_requested": params.save,
-            "message": if accepted { "Secret provided to pending NetworkManager request" } else { "No pending SecretAgent request matched request_id" },
+            "save_requested": params.save && !params.cancel,
+            "persistence_status": match (accepted, params.cancel, params.save) {
+                (true, true, _) => "not_requested",
+                (true, false, true) => "pending",
+                (true, false, false) => "not_requested",
+                (false, _, _) => "not_started",
+            },
+            "message": match (accepted, params.cancel, params.save) {
+                (true, true, _) => "Pending NetworkManager secret request cancelled",
+                (true, false, true) => "Secret provided to pending NetworkManager request; the wifi.secret stream reports the persistence outcome",
+                (true, false, false) => "Secret provided to pending NetworkManager request",
+                (false, _, _) => "No pending SecretAgent request matched request_id",
+            },
         }),
         "serialize secret provide response JSON",
     )
 }
 
-fn register_pending(request: &PendingSecretRequest) -> mpsc::Receiver<SecretResponse> {
+fn register_pending(request: &PendingSecretRequest) -> (PendingRegistration, Option<String>) {
     let (tx, rx) = mpsc::channel();
-    pending()
-        .lock()
-        .expect("secret pending map poisoned")
-        .insert(request.id.clone(), tx);
-    pending_keys()
-        .lock()
-        .expect("secret pending key map poisoned")
-        .insert(request.key.clone(), request.id.clone());
-    rx
+    let displaced = with_pending_registry(|registry| {
+        registry.insert(request.id.clone(), request.key.clone(), tx)
+    });
+    let displaced_request_id = displaced.map(|(request_id, sender)| {
+        let _ = sender.send(SecretResponse::cancelled());
+        tracing::warn!(%request_id, key = %request.key, "replaced duplicate pending SecretAgent request");
+        request_id
+    });
+    (
+        PendingRegistration {
+            request_id: request.id.clone(),
+            receiver: rx,
+        },
+        displaced_request_id,
+    )
 }
 
 fn remove_pending(request_id: &str) -> Option<Sender<SecretResponse>> {
-    pending_keys()
-        .lock()
-        .expect("secret pending key map poisoned")
-        .retain(|_, id| id != request_id);
-    pending()
-        .lock()
-        .expect("secret pending map poisoned")
-        .remove(request_id)
+    with_pending_registry(|registry| registry.remove(request_id))
 }
 
 fn remove_pending_by_key(key: &str) -> Option<(String, Sender<SecretResponse>)> {
-    let request_id = pending_keys()
-        .lock()
-        .expect("secret pending key map poisoned")
-        .remove(key)?;
-    let sender = pending()
-        .lock()
-        .expect("secret pending map poisoned")
-        .remove(&request_id)?;
-    Some((request_id, sender))
+    with_pending_registry(|registry| registry.remove_by_key(key))
 }
 
-fn pending() -> &'static Mutex<HashMap<String, Sender<SecretResponse>>> {
-    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+fn pending() -> &'static Mutex<PendingRegistry> {
+    PENDING.get_or_init(|| Mutex::new(PendingRegistry::default()))
 }
 
-fn pending_keys() -> &'static Mutex<HashMap<String, String>> {
-    PENDING_KEYS.get_or_init(|| Mutex::new(HashMap::new()))
+fn with_pending_registry<T>(action: impl FnOnce(&mut PendingRegistry) -> T) -> T {
+    let mut registry = match pending().lock() {
+        Ok(registry) => registry,
+        Err(poisoned) => {
+            tracing::error!("recovering poisoned SecretAgent pending-request registry");
+            poisoned.into_inner()
+        }
+    };
+    action(&mut registry)
 }
 
 fn emit_secret_requested(bus: &zbus::Connection, request: &PendingSecretRequest) {
@@ -247,6 +266,31 @@ fn emit_secret_cancelled(bus: &zbus::Connection, request_id: &str) {
     );
 }
 
+fn emit_secret_persistence(
+    bus: &zbus::Connection,
+    request_id: &str,
+    outcome: SecretPersistenceOutcome,
+) {
+    let data = match outcome {
+        SecretPersistenceOutcome::Stored => json!({
+            "request_id": request_id,
+            "status": "stored",
+        }),
+        SecretPersistenceOutcome::PromptUnsupported { operation, prompt } => json!({
+            "request_id": request_id,
+            "status": "prompt_unsupported",
+            "operation": operation.to_string(),
+            "prompt": prompt,
+        }),
+        SecretPersistenceOutcome::Failed(error) => json!({
+            "request_id": request_id,
+            "status": "failed",
+            "error": error,
+        }),
+    };
+    emit_secret_event(bus, request_id, "persistence", data);
+}
+
 fn emit_secret_event(bus: &zbus::Connection, request_id: &str, event: &str, data: Value) {
     let Ok(emitter) = SignalEmitter::new(bus, DBUS_OBJECT_PATH) else {
         tracing::warn!(
@@ -255,7 +299,7 @@ fn emit_secret_event(bus: &zbus::Connection, request_id: &str, event: &str, data
         );
         return;
     };
-    emit_json_event_best_effort(&emitter, "wifi.secret", Some(request_id), event, data);
+    emit_json_event_best_effort(&emitter, Stream::WifiSecret, Some(request_id), event, data);
 }
 
 fn lookup_stored_secret(
@@ -268,7 +312,13 @@ fn lookup_stored_secret(
         &request.setting_name,
         &request.secret_keys,
     ) {
-        Ok(secret) => secret,
+        Ok(crate::keyring::KeyringOutcome::Completed(secret)) => secret,
+        Ok(crate::keyring::KeyringOutcome::PromptUnsupported {
+            operation, prompt, ..
+        }) => {
+            tracing::info!(request_id = %request.id, %operation, %prompt, "keyring lookup requires an unsupported desktop prompt");
+            None
+        }
         Err(err) => {
             tracing::debug!(request_id = %request.id, error = %format_args!("{err:#}"), "keyring lookup failed");
             None
@@ -280,17 +330,34 @@ fn apply_secret_response(
     connection: &mut ConnectionSettings,
     request: &PendingSecretRequest,
     response: SecretResponse,
-) -> zbus::fdo::Result<()> {
-    let Some(password) = response.password.filter(|password| !password.is_empty()) else {
+) -> zbus::fdo::Result<Option<SecretPersistenceOutcome>> {
+    if response.cancelled {
         return Err(zbus::fdo::Error::Failed(
-            "secret request cancelled or empty password supplied".to_string(),
+            "secret request cancelled by frontend".to_string(),
         ));
-    };
-    let key = request.primary_secret_key();
-    if response.save {
-        store_secret_best_effort(request, connection, key, &password);
     }
-    apply_password(connection, &request.setting_name, key, password)
+    let mut values = response.values;
+    if let Some(password) = response.password.filter(|password| !password.is_empty()) {
+        values
+            .entry(request.primary_secret_key().to_string())
+            .or_insert(password);
+    }
+    values.retain(|key, value| request.secret_keys.contains(key) && !value.is_empty());
+    if values.is_empty() {
+        return Err(zbus::fdo::Error::Failed(
+            "secret request contained no requested values".to_string(),
+        ));
+    }
+    for (key, value) in &values {
+        apply_password(connection, &request.setting_name, key, value.to_string())?;
+    }
+    Ok(response.save.then(|| {
+        values
+            .iter()
+            .map(|(key, value)| store_secret_outcome(request, connection, key, value))
+            .find(|outcome| !matches!(outcome, SecretPersistenceOutcome::Stored))
+            .unwrap_or(SecretPersistenceOutcome::Stored)
+    }))
 }
 
 fn apply_password(
@@ -306,20 +373,30 @@ fn apply_password(
     Ok(())
 }
 
-fn store_secret_best_effort(
+fn store_secret_outcome(
     request: &PendingSecretRequest,
     connection: &ConnectionSettings,
     key: &str,
     password: &str,
-) {
-    if let Err(err) = crate::keyring::store_secret(
+) -> SecretPersistenceOutcome {
+    match crate::keyring::store_secret(
         &request.connection_path,
         connection,
         &request.setting_name,
         key,
         password,
     ) {
-        tracing::warn!(request_id = %request.id, error = %format_args!("{err:#}"), "failed to store secret in keyring");
+        Ok(crate::keyring::KeyringOutcome::Completed(())) => SecretPersistenceOutcome::Stored,
+        Ok(crate::keyring::KeyringOutcome::PromptUnsupported {
+            operation, prompt, ..
+        }) => {
+            tracing::warn!(request_id = %request.id, %operation, %prompt, "secret was not stored because the keyring requires an unsupported desktop prompt");
+            SecretPersistenceOutcome::PromptUnsupported { operation, prompt }
+        }
+        Err(err) => {
+            tracing::warn!(request_id = %request.id, error = %format_args!("{err:#}"), "failed to store secret in keyring");
+            SecretPersistenceOutcome::Failed(format!("{err:#}"))
+        }
     }
 }
 
@@ -329,14 +406,22 @@ fn save_connection_secrets_best_effort(
 ) {
     for (setting_name, secrets) in connection_secret_values(connection) {
         for (key, password) in secrets {
-            if let Err(err) = crate::keyring::store_secret(
+            match crate::keyring::store_secret(
                 connection_path.as_str(),
                 connection,
                 &setting_name,
                 &key,
                 &password,
             ) {
-                tracing::warn!(%connection_path, setting_name, key, error = %format_args!("{err:#}"), "failed to save NetworkManager secret to keyring");
+                Ok(crate::keyring::KeyringOutcome::Completed(())) => {}
+                Ok(crate::keyring::KeyringOutcome::PromptUnsupported {
+                    operation, prompt, ..
+                }) => {
+                    tracing::warn!(%connection_path, setting_name, key, %operation, %prompt, "NetworkManager secret was not saved because the keyring requires an unsupported desktop prompt");
+                }
+                Err(err) => {
+                    tracing::warn!(%connection_path, setting_name, key, error = %format_args!("{err:#}"), "failed to save NetworkManager secret to keyring");
+                }
             }
         }
     }
@@ -348,13 +433,25 @@ fn delete_connection_secrets_best_effort(
 ) {
     for setting_name in connection.keys() {
         for key in known_secret_keys(setting_name) {
-            if let Err(err) = crate::keyring::delete_secret(
+            match crate::keyring::delete_secret(
                 connection_path.as_str(),
                 connection,
                 setting_name,
                 key,
             ) {
-                tracing::warn!(%connection_path, setting_name, key, error = %format_args!("{err:#}"), "failed to delete NetworkManager secret from keyring");
+                Ok(crate::keyring::KeyringOutcome::Completed(deleted)) => {
+                    tracing::debug!(%connection_path, setting_name, key, deleted, "deleted NetworkManager secrets from keyring");
+                }
+                Ok(crate::keyring::KeyringOutcome::PromptUnsupported {
+                    operation,
+                    prompt,
+                    completed,
+                }) => {
+                    tracing::warn!(%connection_path, setting_name, key, %operation, %prompt, deleted = completed, "keyring delete stopped because it requires an unsupported desktop prompt");
+                }
+                Err(err) => {
+                    tracing::warn!(%connection_path, setting_name, key, error = %format_args!("{err:#}"), "failed to delete NetworkManager secret from keyring");
+                }
             }
         }
     }
@@ -470,5 +567,242 @@ fn default_secret_key_for_setting(setting_name: &str) -> &'static str {
 
 struct SecretResponse {
     password: Option<String>,
+    values: HashMap<String, String>,
     save: bool,
+    cancelled: bool,
+}
+
+impl SecretResponse {
+    fn cancelled() -> Self {
+        Self {
+            password: None,
+            values: HashMap::new(),
+            save: false,
+            cancelled: true,
+        }
+    }
+}
+
+enum SecretPersistenceOutcome {
+    Stored,
+    PromptUnsupported {
+        operation: crate::keyring::KeyringPromptOperation,
+        prompt: OwnedObjectPath,
+    },
+    Failed(String),
+}
+
+struct PendingEntry {
+    key: String,
+    sender: Sender<SecretResponse>,
+}
+
+#[derive(Default)]
+struct PendingRegistry {
+    requests: HashMap<String, PendingEntry>,
+}
+
+impl PendingRegistry {
+    fn insert(
+        &mut self,
+        request_id: String,
+        key: String,
+        sender: Sender<SecretResponse>,
+    ) -> Option<(String, Sender<SecretResponse>)> {
+        let duplicate = self
+            .requests
+            .iter()
+            .find_map(|(id, entry)| (entry.key == key).then(|| id.clone()));
+        let displaced =
+            duplicate.and_then(|id| self.requests.remove(&id).map(|entry| (id, entry.sender)));
+        if let Some(replaced) = self
+            .requests
+            .insert(request_id.clone(), PendingEntry { key, sender })
+        {
+            tracing::warn!(%request_id, "replaced colliding SecretAgent request id");
+            let _ = replaced.sender.send(SecretResponse::cancelled());
+        }
+        displaced
+    }
+
+    fn remove(&mut self, request_id: &str) -> Option<Sender<SecretResponse>> {
+        self.requests.remove(request_id).map(|entry| entry.sender)
+    }
+
+    fn remove_by_key(&mut self, key: &str) -> Option<(String, Sender<SecretResponse>)> {
+        let request_id = self
+            .requests
+            .iter()
+            .find_map(|(id, entry)| (entry.key == key).then(|| id.clone()))?;
+        self.remove(&request_id).map(|sender| (request_id, sender))
+    }
+}
+
+struct PendingRegistration {
+    request_id: String,
+    receiver: Receiver<SecretResponse>,
+}
+
+impl PendingRegistration {
+    fn recv_timeout(&self, timeout: Duration) -> Result<SecretResponse, mpsc::RecvTimeoutError> {
+        self.receiver.recv_timeout(timeout)
+    }
+}
+
+impl Drop for PendingRegistration {
+    fn drop(&mut self) {
+        remove_pending(&self.request_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    #[test]
+    fn pending_registry_replaces_one_request_per_connection_setting() {
+        let mut registry = PendingRegistry::default();
+        let (first_sender, first_receiver) = mpsc::channel();
+        let (second_sender, _second_receiver) = mpsc::channel();
+
+        assert!(
+            registry
+                .insert("first".into(), "connection\nsetting".into(), first_sender)
+                .is_none()
+        );
+        let (displaced_id, displaced_sender) = registry
+            .insert("second".into(), "connection\nsetting".into(), second_sender)
+            .expect("duplicate key should displace its prior request");
+        displaced_sender
+            .send(SecretResponse::cancelled())
+            .expect("displaced receiver remains active");
+
+        assert_eq!(displaced_id, "first");
+        assert!(
+            first_receiver
+                .recv()
+                .expect("cancellation")
+                .password
+                .is_none()
+        );
+        assert_eq!(
+            registry
+                .remove_by_key("connection\nsetting")
+                .map(|(id, _)| id),
+            Some("second".into())
+        );
+        assert!(registry.requests.is_empty());
+    }
+
+    #[test]
+    fn pending_registration_removes_itself_when_waiting_scope_ends() {
+        let request_id = "test-secret-registration-raii";
+        remove_pending(request_id);
+        let (sender, receiver) = mpsc::channel();
+        with_pending_registry(|registry| {
+            let _ = registry.insert(
+                request_id.into(),
+                "test-connection\ntest-setting".into(),
+                sender,
+            );
+        });
+        let registration = PendingRegistration {
+            request_id: request_id.into(),
+            receiver,
+        };
+
+        assert!(with_pending_registry(|registry| registry
+            .requests
+            .contains_key(request_id)));
+        drop(registration);
+        assert!(!with_pending_registry(|registry| registry
+            .requests
+            .contains_key(request_id)));
+    }
+
+    #[test]
+    fn pending_secret_delivery_observes_delay_and_timeout_cleanup() {
+        let delivered = pending_request("timed-delivery", "timed-delivery-key");
+        let (registration, displaced) = register_pending(&delivered);
+        assert!(displaced.is_none());
+        let sender = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(20));
+            remove_pending("timed-delivery")
+                .expect("timed request remains registered")
+                .send(SecretResponse {
+                    password: Some("secret".to_string()),
+                    values: HashMap::new(),
+                    save: true,
+                    cancelled: false,
+                })
+                .unwrap();
+        });
+        let started = Instant::now();
+        let response = registration
+            .recv_timeout(Duration::from_millis(250))
+            .unwrap();
+        sender.join().unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(20));
+        assert_eq!(response.password.as_deref(), Some("secret"));
+        assert!(response.save);
+        drop(registration);
+
+        let timed_out = pending_request("timed-out", "timed-out-key");
+        let (registration, displaced) = register_pending(&timed_out);
+        assert!(displaced.is_none());
+        assert!(matches!(
+            registration.recv_timeout(Duration::from_millis(10)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(registration);
+        assert!(remove_pending("timed-out").is_none());
+    }
+
+    #[test]
+    fn secret_response_applies_only_requested_named_values() {
+        let request = PendingSecretRequest {
+            id: "named-values".to_string(),
+            key: "named-values-key".to_string(),
+            connection_path: "/test/connection".to_string(),
+            setting_name: "802-1x".to_string(),
+            hints: Vec::new(),
+            secret_keys: vec!["password".to_string(), "pin".to_string()],
+            flags: 0,
+        };
+        let mut connection = ConnectionSettings::new();
+        let response = SecretResponse {
+            password: None,
+            values: HashMap::from([
+                ("password".to_string(), "secret".to_string()),
+                ("pin".to_string(), "1234".to_string()),
+                ("not-requested".to_string(), "ignored".to_string()),
+            ]),
+            save: false,
+            cancelled: false,
+        };
+
+        assert!(
+            apply_secret_response(&mut connection, &request, response)
+                .unwrap()
+                .is_none()
+        );
+        let values = &connection["802-1x"];
+        assert_eq!(value_string(&values["password"]).as_deref(), Some("secret"));
+        assert_eq!(value_string(&values["pin"]).as_deref(), Some("1234"));
+        assert!(!values.contains_key("not-requested"));
+    }
+
+    fn pending_request(id: &str, key: &str) -> PendingSecretRequest {
+        PendingSecretRequest {
+            id: id.to_string(),
+            key: key.to_string(),
+            connection_path: "/test/connection".to_string(),
+            setting_name: "802-11-wireless-security".to_string(),
+            hints: Vec::new(),
+            secret_keys: vec!["psk".to_string()],
+            flags: 0,
+        }
+    }
 }

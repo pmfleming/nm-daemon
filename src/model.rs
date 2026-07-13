@@ -1,9 +1,17 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use crate::qr::wifi_qr_payload;
+
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zvariant::OwnedObjectPath;
+
+mod identity;
+
+pub(crate) use identity::{Bssid, InterfaceName, NmObjectPath, Ssid};
 
 pub(crate) const NM_AP_FLAGS_PRIVACY: u32 = 0x1;
 pub(crate) const NM_AP_SEC_PAIR_WEP40: u32 = 0x0000_0001;
@@ -26,14 +34,14 @@ pub(crate) struct ScanStreamOptions {
     pub(crate) timeout: Duration,
     pub(crate) retries: u32,
     pub(crate) cache: bool,
-    pub(crate) ifname: Option<String>,
+    pub(crate) ifname: Option<InterfaceName>,
     pub(crate) ssid_bytes: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ScanRequestOptions {
     pub(crate) timeout: Duration,
-    pub(crate) ifname: Option<String>,
+    pub(crate) ifname: Option<InterfaceName>,
     pub(crate) ssid_bytes: Vec<Vec<u8>>,
 }
 
@@ -74,6 +82,44 @@ pub(crate) struct ConnectResult {
     pub(crate) suggest_open_portal: bool,
 }
 
+impl ConnectResult {
+    pub(crate) fn connected(
+        ssid: impl Into<String>,
+        message: impl Into<String>,
+        path: ConnectEnginePath,
+        connectivity: Option<ConnectivityStatus>,
+    ) -> Self {
+        let suggest_open_portal = connectivity
+            .as_ref()
+            .is_some_and(|status| status.captive_portal);
+        Self {
+            status: "connected",
+            reason: None,
+            path: Some(path),
+            ssid: ssid.into(),
+            message: message.into(),
+            connectivity,
+            suggest_open_portal,
+        }
+    }
+
+    pub(crate) fn failed(
+        ssid: impl Into<String>,
+        reason: ConnectFailureReason,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: "error",
+            reason: Some(reason),
+            path: None,
+            ssid: ssid.into(),
+            message: message.into(),
+            connectivity: None,
+            suggest_open_portal: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct DisconnectResult {
     pub(crate) status: &'static str,
@@ -93,6 +139,27 @@ pub(crate) struct WifiStatus {
     pub(crate) wireless: Option<WirelessStatus>,
     pub(crate) metered: Option<MeteredStatus>,
     pub(crate) active_since_ms: Option<u64>,
+}
+
+impl WifiStatus {
+    pub(crate) fn inactive(
+        device_iface: Option<String>,
+        connectivity: Option<ConnectivityStatus>,
+    ) -> Self {
+        Self {
+            active: false,
+            device_iface,
+            active_connection_path: None,
+            access_point: None,
+            network: None,
+            profile: None,
+            connectivity,
+            ip4: None,
+            wireless: None,
+            metered: None,
+            active_since_ms: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -216,6 +283,26 @@ pub(crate) struct WifiSharePayload {
     pub(crate) qr_payload: Option<String>,
 }
 
+impl WifiSharePayload {
+    pub(crate) fn shareable(
+        profile: &SavedWifiConnection,
+        auth_type: &str,
+        password: Option<&str>,
+        hidden: bool,
+    ) -> Self {
+        Self {
+            status: "ok",
+            shareable: true,
+            reason: None,
+            path: profile.path.clone(),
+            id: profile.id.clone(),
+            ssid: profile.ssid.clone(),
+            auth_type: Some(auth_type.to_string()),
+            qr_payload: Some(wifi_qr_payload(auth_type, &profile.ssid, password, hidden)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct SavedWifiConnection {
     pub(crate) path: String,
@@ -246,48 +333,184 @@ impl Default for ProfilePrivacy {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Security {
+    Open,
+    Owe,
+    Wpa,
+    Wpa2Or3,
+    Wep,
+    Enterprise,
+    Other(String),
+}
+
+impl Security {
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Open => "--",
+            Self::Owe => "OWE",
+            Self::Wpa => "WPA",
+            Self::Wpa2Or3 => "WPA2/3",
+            Self::Wep => "WEP",
+            Self::Enterprise => "Enterprise",
+            Self::Other(value) => value,
+        }
+    }
+}
+
+impl Default for Security {
+    fn default() -> Self {
+        Self::Other(String::new())
+    }
+}
+
+impl std::fmt::Display for Security {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for Security {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Security {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "--" | "open" | "none" => Self::Open,
+            "OWE" | "owe" => Self::Owe,
+            "WPA" => Self::Wpa,
+            "WPA2/3" => Self::Wpa2Or3,
+            "WEP" | "wep" => Self::Wep,
+            "Enterprise" => Self::Enterprise,
+            _ => Self::Other(value),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct WifiConnectTarget {
-    /// Human-readable display form of the SSID. This may be lossy for non-UTF-8 SSIDs.
-    pub(crate) ssid: String,
-    /// Exact SSID bytes used for identity/matching. Empty only for legacy cache/action records.
-    #[serde(default)]
-    pub(crate) ssid_bytes: Vec<u8>,
-    #[serde(alias = "path")]
-    pub(crate) ap_path: Option<String>,
-    pub(crate) bssid: Option<String>,
-    #[serde(default, alias = "device_iface")]
-    pub(crate) ifname: Option<String>,
-    #[serde(default)]
-    pub(crate) device_path: Option<String>,
+    pub(crate) ssid: Ssid,
+    pub(crate) ap_path: Option<NmObjectPath>,
+    pub(crate) bssid: Option<Bssid>,
+    pub(crate) ifname: Option<InterfaceName>,
+    pub(crate) device_path: Option<NmObjectPath>,
     /// Optional NetworkManager connection id requested by the frontend.
-    #[serde(default, alias = "name")]
     pub(crate) connection_name: Option<String>,
     /// Restrict a newly-created connection to the current user when supported.
-    #[serde(default)]
     pub(crate) private: bool,
-    #[serde(default)]
     pub(crate) hidden: bool,
-    #[serde(default)]
-    pub(crate) security: Option<String>,
+    pub(crate) security: Option<Security>,
     /// Optional key-management/security hint for hidden or otherwise ambiguous targets.
     /// Values follow NetworkManager setting names where possible: open/none, owe,
     /// wpa-psk, sae, wep, wpa-eap, or wpa-eap-suite-b-192.
-    #[serde(default)]
     pub(crate) key_mgmt: Option<String>,
     /// Optional structured 802.1X/EAP credentials for enterprise Wi-Fi creation.
-    #[serde(default)]
     pub(crate) enterprise: Option<EnterpriseAuth>,
     /// Optional profile/IP settings to apply when creating cloned/new profiles.
-    #[serde(default)]
     pub(crate) profile: TargetProfileSettings,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WifiConnectTargetV1 {
+    ssid: String,
+    #[serde(default)]
+    ssid_bytes: Vec<u8>,
+    #[serde(default, alias = "path")]
+    ap_path: Option<NmObjectPath>,
+    #[serde(default)]
+    bssid: Option<Bssid>,
+    #[serde(default, alias = "device_iface")]
+    ifname: Option<InterfaceName>,
+    #[serde(default)]
+    device_path: Option<NmObjectPath>,
+    #[serde(default, alias = "name")]
+    connection_name: Option<String>,
+    #[serde(default)]
+    private: bool,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    security: Option<Security>,
+    #[serde(default)]
+    key_mgmt: Option<String>,
+    #[serde(default)]
+    enterprise: Option<EnterpriseAuth>,
+    #[serde(default)]
+    profile: TargetProfileSettings,
+}
+
+impl Serialize for WifiConnectTarget {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("WifiConnectTarget", 13)?;
+        state.serialize_field("ssid", self.ssid.as_str())?;
+        state.serialize_field("ssid_bytes", self.ssid.as_bytes())?;
+        state.serialize_field("ap_path", &self.ap_path)?;
+        state.serialize_field("bssid", &self.bssid)?;
+        state.serialize_field("ifname", &self.ifname)?;
+        state.serialize_field("device_path", &self.device_path)?;
+        state.serialize_field("connection_name", &self.connection_name)?;
+        state.serialize_field("private", &self.private)?;
+        state.serialize_field("hidden", &self.hidden)?;
+        state.serialize_field("security", &self.security)?;
+        state.serialize_field("key_mgmt", &self.key_mgmt)?;
+        state.serialize_field("enterprise", &self.enterprise)?;
+        state.serialize_field("profile", &self.profile)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for WifiConnectTarget {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = WifiConnectTargetV1::deserialize(deserializer)?;
+        let bytes = if wire.ssid_bytes.is_empty() {
+            wire.ssid.as_bytes().to_vec()
+        } else {
+            wire.ssid_bytes
+        };
+        let ssid = Ssid::from_bytes(bytes).map_err(D::Error::custom)?;
+        if ssid.as_str() != wire.ssid {
+            return Err(D::Error::custom(
+                "ssid display does not match the exact ssid_bytes identity",
+            ));
+        }
+        Ok(Self {
+            ssid,
+            ap_path: wire.ap_path,
+            bssid: wire.bssid,
+            ifname: wire.ifname,
+            device_path: wire.device_path,
+            connection_name: wire.connection_name,
+            private: wire.private,
+            hidden: wire.hidden,
+            security: wire.security,
+            key_mgmt: wire.key_mgmt,
+            enterprise: wire.enterprise,
+            profile: wire.profile,
+        })
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn example_connect_target(hidden: bool) -> WifiConnectTarget {
     WifiConnectTarget {
-        ssid: "Example".to_string(),
-        ssid_bytes: b"Example".to_vec(),
+        ssid: Ssid::from_display("Example".to_string()).expect("valid example SSID"),
         ap_path: None,
         bssid: None,
         ifname: None,
@@ -303,26 +526,16 @@ pub(crate) fn example_connect_target(hidden: bool) -> WifiConnectTarget {
 }
 
 impl WifiConnectTarget {
-    pub(crate) fn ssid_bytes(&self) -> Cow<'_, [u8]> {
-        ssid_bytes_or_display(&self.ssid_bytes, &self.ssid)
+    pub(crate) fn ssid_bytes(&self) -> &[u8] {
+        self.ssid.as_bytes()
     }
 
     pub(crate) fn has_specific_ap(&self) -> bool {
-        self.ap_path
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
-            || self.bssid.as_deref().is_some_and(|value| !value.is_empty())
+        self.ap_path.is_some() || self.bssid.is_some()
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        validate_ssid_bytes(self.ssid_bytes().as_ref())?;
-        if let Some(bssid) = self.bssid.as_deref().filter(|value| !value.is_empty()) {
-            validate_bssid(bssid)?;
-        }
-        if self.hidden
-            && self.bssid.as_deref().is_none_or(str::is_empty)
-            && looks_like_bssid(&self.ssid)
-        {
+        if self.hidden && self.bssid.is_none() && looks_like_bssid(self.ssid.as_str()) {
             bail!(
                 "hidden Wi-Fi target must be an SSID, but '{}' looks like a BSSID",
                 self.ssid
@@ -332,32 +545,146 @@ impl WifiConnectTarget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConnectionReadiness {
+    Ready,
+    NeedsPassword,
+    NeedsEnterpriseCredentials,
+    Unsupported { reason: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NetworkCapabilities {
-    /// Backend has a supported activation flow for this network. Unsaved PSK/WEP
-    /// networks may still require the caller to provide a password.
-    pub(crate) can_connect: bool,
-    /// Backend can connect without prompting for any additional secret.
-    pub(crate) can_connect_now: bool,
-    /// Backend can connect if the caller supplies a password/key.
-    pub(crate) can_connect_with_password: bool,
-    pub(crate) needs_password: bool,
-    /// Backend can connect if the caller supplies a structured credential set
-    /// described by `NetworkEntry::auth`.
-    #[serde(default)]
-    pub(crate) can_connect_with_credentials: bool,
-    #[serde(default)]
-    pub(crate) needs_credentials: bool,
-    pub(crate) can_forget: bool,
-    pub(crate) can_toggle_autoconnect: bool,
-    #[serde(default)]
-    pub(crate) can_set_mac_randomization: bool,
-    #[serde(default)]
-    pub(crate) can_set_send_hostname: bool,
-    #[serde(default)]
+    pub(crate) readiness: ConnectionReadiness,
+    pub(crate) has_profile: bool,
     pub(crate) can_share_qr: bool,
-    pub(crate) supported_auth: bool,
-    pub(crate) unsupported_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NetworkCapabilitiesV1 {
+    can_connect: bool,
+    can_connect_now: bool,
+    can_connect_with_password: bool,
+    needs_password: bool,
+    #[serde(default)]
+    can_connect_with_credentials: bool,
+    #[serde(default)]
+    needs_credentials: bool,
+    can_forget: bool,
+    can_toggle_autoconnect: bool,
+    #[serde(default)]
+    can_set_mac_randomization: bool,
+    #[serde(default)]
+    can_set_send_hostname: bool,
+    #[serde(default)]
+    can_share_qr: bool,
+    supported_auth: bool,
+    unsupported_reason: Option<String>,
+}
+
+impl NetworkCapabilities {
+    fn v1_readiness(&self) -> (bool, bool, bool, bool, bool, bool, bool, Option<&str>) {
+        match &self.readiness {
+            ConnectionReadiness::Ready => (true, true, false, false, false, false, true, None),
+            ConnectionReadiness::NeedsPassword => {
+                (true, false, true, true, false, false, true, None)
+            }
+            ConnectionReadiness::NeedsEnterpriseCredentials => {
+                (true, false, false, false, true, true, true, None)
+            }
+            ConnectionReadiness::Unsupported { reason } => (
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                reason.as_deref(),
+            ),
+        }
+    }
+}
+
+impl Serialize for NetworkCapabilities {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let (
+            can_connect,
+            can_connect_now,
+            with_password,
+            needs_password,
+            with_credentials,
+            needs_credentials,
+            supported_auth,
+            unsupported_reason,
+        ) = self.v1_readiness();
+        let mut state = serializer.serialize_struct("NetworkCapabilities", 13)?;
+        state.serialize_field("can_connect", &can_connect)?;
+        state.serialize_field("can_connect_now", &can_connect_now)?;
+        state.serialize_field("can_connect_with_password", &with_password)?;
+        state.serialize_field("needs_password", &needs_password)?;
+        state.serialize_field("can_connect_with_credentials", &with_credentials)?;
+        state.serialize_field("needs_credentials", &needs_credentials)?;
+        state.serialize_field("can_forget", &self.has_profile)?;
+        state.serialize_field("can_toggle_autoconnect", &self.has_profile)?;
+        state.serialize_field("can_set_mac_randomization", &self.has_profile)?;
+        state.serialize_field("can_set_send_hostname", &self.has_profile)?;
+        state.serialize_field("can_share_qr", &self.can_share_qr)?;
+        state.serialize_field("supported_auth", &supported_auth)?;
+        state.serialize_field("unsupported_reason", &unsupported_reason)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for NetworkCapabilities {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = NetworkCapabilitiesV1::deserialize(deserializer)?;
+        let profile_flags = [
+            wire.can_forget,
+            wire.can_toggle_autoconnect,
+            wire.can_set_mac_randomization,
+            wire.can_set_send_hostname,
+        ];
+        if profile_flags.iter().any(|flag| *flag != profile_flags[0]) {
+            return Err(D::Error::custom(
+                "profile mutation capability flags must agree",
+            ));
+        }
+        let readiness = match (
+            wire.can_connect,
+            wire.can_connect_now,
+            wire.can_connect_with_password,
+            wire.needs_password,
+            wire.can_connect_with_credentials,
+            wire.needs_credentials,
+            wire.supported_auth,
+        ) {
+            (true, true, false, false, false, false, true) => ConnectionReadiness::Ready,
+            (true, false, true, true, false, false, true) => ConnectionReadiness::NeedsPassword,
+            (true, false, false, false, true, true, true) => {
+                ConnectionReadiness::NeedsEnterpriseCredentials
+            }
+            (false, false, false, false, false, false, false) => ConnectionReadiness::Unsupported {
+                reason: wire.unsupported_reason,
+            },
+            _ => {
+                return Err(D::Error::custom(
+                    "contradictory v1 network readiness capability flags",
+                ));
+            }
+        };
+        Ok(Self {
+            readiness,
+            has_profile: profile_flags[0],
+            can_share_qr: wire.can_share_qr,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -433,20 +760,109 @@ pub(crate) struct TargetIpRoute {
     pub(crate) table: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum AuthKind {
+    SavedProfile,
+    Open,
+    Owe,
+    WpaPersonal,
+    Wep,
+    WpaEnterprise,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NetworkAuth {
-    pub(crate) kind: String,
+    pub(crate) kind: AuthKind,
     pub(crate) key_management: Vec<String>,
-    pub(crate) supported: bool,
     pub(crate) required_fields: Vec<String>,
     pub(crate) optional_fields: Vec<String>,
     pub(crate) note: Option<String>,
 }
 
+#[derive(Deserialize, Serialize)]
+struct NetworkAuthV1 {
+    kind: AuthKind,
+    key_management: Vec<String>,
+    supported: bool,
+    required_fields: Vec<String>,
+    optional_fields: Vec<String>,
+    note: Option<String>,
+}
+
+impl NetworkAuth {
+    pub(crate) fn new(
+        kind: AuthKind,
+        key_management: Vec<String>,
+        required_fields: Vec<String>,
+        optional_fields: Vec<String>,
+        note: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            key_management,
+            required_fields,
+            optional_fields,
+            note,
+        }
+    }
+
+    pub(crate) fn supported(&self) -> bool {
+        self.kind != AuthKind::Unsupported
+    }
+}
+
+impl Serialize for NetworkAuth {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        NetworkAuthV1 {
+            kind: self.kind,
+            key_management: self.key_management.clone(),
+            supported: self.supported(),
+            required_fields: self.required_fields.clone(),
+            optional_fields: self.optional_fields.clone(),
+            note: self.note.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for NetworkAuth {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = NetworkAuthV1::deserialize(deserializer)?;
+        if wire.supported != (wire.kind != AuthKind::Unsupported) {
+            return Err(D::Error::custom(
+                "authentication kind contradicts supported flag",
+            ));
+        }
+        Ok(Self::new(
+            wire.kind,
+            wire.key_management,
+            wire.required_fields,
+            wire.optional_fields,
+            wire.note,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PromptKind {
+    None,
+    Password,
+    Enterprise,
+    Unsupported,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct NetworkConnectPrompt {
-    /// One of: none, password, enterprise, unsupported.
-    pub(crate) kind: String,
+    pub(crate) kind: PromptKind,
     pub(crate) required_fields: Vec<String>,
     pub(crate) optional_fields: Vec<String>,
     pub(crate) message: Option<String>,
@@ -502,7 +918,7 @@ pub(crate) struct AccessPoint {
     #[serde(default)]
     pub(crate) ssid_bytes: Vec<u8>,
     pub(crate) active: bool,
-    pub(crate) security: String,
+    pub(crate) security: Security,
     pub(crate) strength: u8,
     pub(crate) frequency: u32,
     #[serde(default)]
@@ -625,14 +1041,21 @@ fn network_entry_with_profiles(
         );
     let supports_enterprise_auth =
         ap_supports_enterprise(access_point.wpa_flags, access_point.rsn_flags);
-    let supported_auth =
-        has_profile || passwordless || supports_password_auth || supports_enterprise_auth;
-    let needs_password = has_identity && !has_profile && supports_password_auth;
-    let needs_credentials = has_identity && !has_profile && supports_enterprise_auth;
-    let can_connect_now = has_identity && (has_profile || passwordless);
-    let can_connect_with_password = has_identity && !has_profile && supports_password_auth;
-    let can_connect_with_credentials = has_identity && !has_profile && supports_enterprise_auth;
-    let unsupported_reason = (!supported_auth).then(|| unsupported_auth_reason(&access_point));
+    let readiness = if !has_identity {
+        ConnectionReadiness::Unsupported {
+            reason: Some("network has no usable SSID".to_string()),
+        }
+    } else if has_profile || passwordless {
+        ConnectionReadiness::Ready
+    } else if supports_password_auth {
+        ConnectionReadiness::NeedsPassword
+    } else if supports_enterprise_auth {
+        ConnectionReadiness::NeedsEnterpriseCredentials
+    } else {
+        ConnectionReadiness::Unsupported {
+            reason: Some(unsupported_auth_reason(&access_point)),
+        }
+    };
     let auth = auth_capability_for(&access_point, has_profile);
     let connect_prompt = connect_prompt_for(&access_point, &auth, has_profile);
     let share = network_share_hint_for(&access_point, primary_profile.as_ref());
@@ -643,19 +1066,9 @@ fn network_entry_with_profiles(
         access_points,
         primary_profile,
         capabilities: NetworkCapabilities {
-            can_connect: has_identity && supported_auth,
-            can_connect_now,
-            can_connect_with_password,
-            needs_password,
-            can_connect_with_credentials,
-            needs_credentials,
-            can_forget: has_profile,
-            can_toggle_autoconnect: has_profile,
-            can_set_mac_randomization: has_profile,
-            can_set_send_hostname: has_profile,
+            readiness,
+            has_profile,
             can_share_qr: share.shareable || share.requires_profile_secret_check,
-            supported_auth,
-            unsupported_reason,
         },
         profiles,
         auth,
@@ -774,19 +1187,19 @@ pub(crate) fn security_flags_label(flags: u32) -> String {
     }
 }
 
-pub(crate) fn security_label(flags: u32, wpa_flags: u32, rsn_flags: u32) -> String {
+pub(crate) fn security_label(flags: u32, wpa_flags: u32, rsn_flags: u32) -> Security {
     if ap_is_passwordless(flags, wpa_flags, rsn_flags) {
         if has_owe(wpa_flags | rsn_flags) {
-            "OWE".to_string()
+            Security::Owe
         } else {
-            "--".to_string()
+            Security::Open
         }
     } else if rsn_flags != 0 {
-        "WPA2/3".to_string()
+        Security::Wpa2Or3
     } else if wpa_flags != 0 {
-        "WPA".to_string()
+        Security::Wpa
     } else {
-        "WEP".to_string()
+        Security::Wep
     }
 }
 
@@ -841,14 +1254,13 @@ fn network_key_for(access_point: &AccessPoint) -> String {
 
 fn auth_capability_for(access_point: &AccessPoint, has_profile: bool) -> NetworkAuth {
     if has_profile {
-        return NetworkAuth {
-            kind: "saved-profile".to_string(),
-            key_management: Vec::new(),
-            supported: true,
-            required_fields: Vec::new(),
-            optional_fields: Vec::new(),
-            note: Some("A compatible saved NetworkManager profile can be activated without collecting new credentials".to_string()),
-        };
+        return NetworkAuth::new(
+            AuthKind::SavedProfile,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some("A compatible saved NetworkManager profile can be activated without collecting new credentials".to_string()),
+        );
     }
 
     if ap_is_passwordless(
@@ -856,37 +1268,36 @@ fn auth_capability_for(access_point: &AccessPoint, has_profile: bool) -> Network
         access_point.wpa_flags,
         access_point.rsn_flags,
     ) {
-        return NetworkAuth {
-            kind: if has_owe(access_point.wpa_flags | access_point.rsn_flags) {
-                "owe".to_string()
+        return NetworkAuth::new(
+            if has_owe(access_point.wpa_flags | access_point.rsn_flags) {
+                AuthKind::Owe
             } else {
-                "open".to_string()
+                AuthKind::Open
             },
-            key_management: Vec::new(),
-            supported: true,
-            required_fields: Vec::new(),
-            optional_fields: Vec::new(),
-            note: None,
-        };
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
     }
 
     if ap_supports_psk(access_point.wpa_flags, access_point.rsn_flags) {
-        return NetworkAuth {
-            kind: "wpa-personal".to_string(),
-            key_management: vec![if (access_point.wpa_flags | access_point.rsn_flags)
-                & NM_AP_SEC_KEY_MGMT_SAE
-                != 0
-                && (access_point.wpa_flags | access_point.rsn_flags) & NM_AP_SEC_KEY_MGMT_PSK == 0
-            {
-                "sae".to_string()
-            } else {
-                "wpa-psk".to_string()
-            }],
-            supported: true,
-            required_fields: vec!["password".to_string()],
-            optional_fields: Vec::new(),
-            note: None,
-        };
+        return NetworkAuth::new(
+            AuthKind::WpaPersonal,
+            vec![
+                if (access_point.wpa_flags | access_point.rsn_flags) & NM_AP_SEC_KEY_MGMT_SAE != 0
+                    && (access_point.wpa_flags | access_point.rsn_flags) & NM_AP_SEC_KEY_MGMT_PSK
+                        == 0
+                {
+                    "sae".to_string()
+                } else {
+                    "wpa-psk".to_string()
+                },
+            ],
+            vec!["password".to_string()],
+            Vec::new(),
+            None,
+        );
     }
 
     if ap_uses_wep(
@@ -894,27 +1305,25 @@ fn auth_capability_for(access_point: &AccessPoint, has_profile: bool) -> Network
         access_point.wpa_flags,
         access_point.rsn_flags,
     ) {
-        return NetworkAuth {
-            kind: "wep".to_string(),
-            key_management: vec!["none".to_string()],
-            supported: true,
-            required_fields: vec!["password".to_string()],
-            optional_fields: vec!["wep_key_type".to_string()],
-            note: None,
-        };
+        return NetworkAuth::new(
+            AuthKind::Wep,
+            vec!["none".to_string()],
+            vec!["password".to_string()],
+            vec!["wep_key_type".to_string()],
+            None,
+        );
     }
 
     if ap_supports_enterprise(access_point.wpa_flags, access_point.rsn_flags) {
-        return NetworkAuth {
-            kind: "wpa-enterprise".to_string(),
-            key_management: vec![enterprise_key_mgmt(
+        return NetworkAuth::new(
+            AuthKind::WpaEnterprise,
+            vec![enterprise_key_mgmt(
                 access_point.wpa_flags,
                 access_point.rsn_flags,
             )
             .to_string()],
-            supported: true,
-            required_fields: vec!["enterprise.eap".to_string(), "enterprise.identity".to_string()],
-            optional_fields: vec![
+            vec!["enterprise.eap".to_string(), "enterprise.identity".to_string()],
+            vec![
                 "password".to_string(),
                 "enterprise.anonymous_identity".to_string(),
                 "enterprise.phase2_auth".to_string(),
@@ -924,18 +1333,17 @@ fn auth_capability_for(access_point: &AccessPoint, has_profile: bool) -> Network
                 "enterprise.private_key".to_string(),
                 "enterprise.private_key_password".to_string(),
             ],
-            note: Some("Provide an enterprise credential object to connect-target; password may be supplied with --password-stdin".to_string()),
-        };
+            Some("Provide an enterprise credential object to connect-target; password may be supplied with --password-stdin".to_string()),
+        );
     }
 
-    NetworkAuth {
-        kind: "unsupported".to_string(),
-        key_management: Vec::new(),
-        supported: false,
-        required_fields: Vec::new(),
-        optional_fields: Vec::new(),
-        note: Some("No nm-daemon creation path is known for this visible network yet".to_string()),
-    }
+    NetworkAuth::new(
+        AuthKind::Unsupported,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Some("No nm-daemon creation path is known for this visible network yet".to_string()),
+    )
 }
 
 fn connect_prompt_for(
@@ -945,12 +1353,11 @@ fn connect_prompt_for(
 ) -> NetworkConnectPrompt {
     if has_profile || auth.required_fields.is_empty() {
         return NetworkConnectPrompt {
-            kind: if auth.supported {
-                "none"
+            kind: if auth.supported() {
+                PromptKind::None
             } else {
-                "unsupported"
-            }
-            .to_string(),
+                PromptKind::Unsupported
+            },
             required_fields: Vec::new(),
             optional_fields: auth.optional_fields.clone(),
             message: auth.note.clone(),
@@ -964,7 +1371,7 @@ fn connect_prompt_for(
         .any(|field| field.starts_with("enterprise."))
     {
         return NetworkConnectPrompt {
-            kind: "enterprise".to_string(),
+            kind: PromptKind::Enterprise,
             required_fields: auth.required_fields.clone(),
             optional_fields: auth.optional_fields.clone(),
             message: auth
@@ -984,7 +1391,7 @@ fn connect_prompt_for(
 
     if auth.required_fields.iter().any(|field| field == "password") {
         return NetworkConnectPrompt {
-            kind: "password".to_string(),
+            kind: PromptKind::Password,
             required_fields: auth.required_fields.clone(),
             optional_fields: auth.optional_fields.clone(),
             message: auth
@@ -996,7 +1403,7 @@ fn connect_prompt_for(
     }
 
     NetworkConnectPrompt {
-        kind: "unsupported".to_string(),
+        kind: PromptKind::Unsupported,
         required_fields: auth.required_fields.clone(),
         optional_fields: auth.optional_fields.clone(),
         message: auth.note.clone(),
@@ -1070,30 +1477,6 @@ fn portal_hint_for(access_point: &AccessPoint) -> NetworkPortalHint {
         reason: auto_open_on_connect
             .then(|| "open network may require captive-portal sign-in".to_string()),
     }
-}
-
-fn wifi_qr_payload(auth_type: &str, ssid: &str, password: Option<&str>, hidden: bool) -> String {
-    let password = password
-        .map(|password| format!(";P:{}", wifi_qr_escape(password)))
-        .unwrap_or_default();
-    let hidden = if hidden { ";H:true" } else { "" };
-    format!(
-        "WIFI:T:{};S:{}{}{};;",
-        auth_type,
-        wifi_qr_escape(ssid),
-        password,
-        hidden
-    )
-}
-
-fn wifi_qr_escape(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|ch| match ch {
-            '\\' | ';' | ',' | ':' | '"' => vec!['\\', ch],
-            ch => vec![ch],
-        })
-        .collect()
 }
 
 pub(crate) fn ap_uses_wep(flags: u32, wpa_flags: u32, rsn_flags: u32) -> bool {

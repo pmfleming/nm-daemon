@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 
-use crate::model::WepKeyType;
+use crate::model::{Bssid, InterfaceName, NmObjectPath, WepKeyType};
 
 #[derive(Parser)]
 #[command(name = "nm-daemon")]
@@ -25,6 +25,8 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Run the long-lived user D-Bus service.
     Daemon,
+    /// Run a long-lived JSON Lines client session for graphical frontends.
+    Client,
     /// Wi-Fi NetworkManager API operations.
     Wifi {
         #[command(subcommand)]
@@ -83,6 +85,8 @@ pub(crate) enum DebugCommand {
     ContractFixture,
     /// Print per-method contract fixtures for API/schema checks.
     ContractFixtures,
+    /// Print the canonical D-Bus method and stream registry.
+    ProtocolRegistry,
 }
 
 #[derive(Clone, Args)]
@@ -115,9 +119,12 @@ pub(crate) struct ScanOptions {
     /// Write latest snapshot/status files under $XDG_RUNTIME_DIR/nm-daemon.
     #[arg(long)]
     pub(crate) cache: bool,
+    /// Suppress the access-point JSON response (intended for cache refresh timers).
+    #[arg(long)]
+    pub(crate) quiet: bool,
     /// Restrict scan to a Wi-Fi interface.
     #[arg(long)]
-    pub(crate) ifname: Option<String>,
+    pub(crate) ifname: Option<InterfaceName>,
     /// Request a targeted scan for an SSID. May be repeated.
     #[arg(long = "ssid")]
     pub(crate) ssids: Vec<String>,
@@ -132,7 +139,7 @@ pub(crate) struct ConnectOptions {
     pub(crate) password_stdin: bool,
     /// Restrict connection to a visible BSSID.
     #[arg(long)]
-    pub(crate) bssid: Option<String>,
+    pub(crate) bssid: Option<Bssid>,
     /// Treat the SSID as hidden and request a targeted scan before connecting.
     #[arg(long)]
     pub(crate) hidden: bool,
@@ -156,12 +163,12 @@ pub(crate) enum ProfileCommand {
     /// Delete/forget a saved Wi-Fi profile.
     Delete {
         /// NetworkManager settings object path, from `nm-daemon wifi saved`.
-        path: String,
+        path: NmObjectPath,
     },
     /// Enable or disable autoconnect for a saved Wi-Fi profile.
     Autoconnect {
         /// NetworkManager settings object path, from `nm-daemon wifi saved`.
-        path: String,
+        path: NmObjectPath,
         /// true to enable autoconnect, false to disable it.
         #[arg(action = ArgAction::Set)]
         enabled: bool,
@@ -169,7 +176,7 @@ pub(crate) enum ProfileCommand {
     /// Set per-profile Wi-Fi MAC privacy.
     MacRandomization {
         /// NetworkManager settings object path, from `nm-daemon wifi saved`.
-        path: String,
+        path: NmObjectPath,
         /// true uses a stable randomized MAC, false uses the device's permanent MAC.
         #[arg(action = ArgAction::Set)]
         randomized: bool,
@@ -177,12 +184,12 @@ pub(crate) enum ProfileCommand {
     /// Build a standard Wi-Fi QR payload for a shareable saved profile.
     Share {
         /// NetworkManager settings object path, from `nm-daemon wifi saved`.
-        path: String,
+        path: NmObjectPath,
     },
     /// Enable or disable sending this device's hostname through DHCP for a saved profile.
     SendHostname {
         /// NetworkManager settings object path, from `nm-daemon wifi saved`.
-        path: String,
+        path: NmObjectPath,
         /// true to send hostname, false to keep device name private.
         #[arg(action = ArgAction::Set)]
         enabled: bool,

@@ -1,21 +1,22 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
-use crate::connect;
+use crate::application::{Application, ConnectEvent, ConnectOutcome, ConnectRequest};
 use crate::daemon::{emit_json_event, emit_json_event_best_effort};
 use crate::daemon_event::next_request_id;
-use crate::daemon_state;
-use crate::model::{ConnectResult, WepKeyType, WifiConnectTarget};
+use crate::daemon_runtime::{DaemonRuntime, TaskKind};
+use crate::error::{ErrorOperation, ErrorReport};
+use crate::model::{WepKeyType, WifiConnectTarget};
 use crate::nm::Nm;
 use crate::output::api_data_value;
+use crate::protocol::{Method, Stream};
 
-const STREAM: &str = "wifi.connect";
+const STREAM: Stream = Stream::WifiConnect;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,15 +29,28 @@ pub(crate) struct DbusConnectTargetParams {
 }
 
 pub(crate) fn start_connect_target(
+    runtime: &Arc<DaemonRuntime>,
     params: DbusConnectTargetParams,
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
-    params.target.validate()?;
+    let request = ConnectRequest::from(params);
+    request.validate()?;
     let request_id = next_request_id("connect");
-    let cancel_flag = daemon_state::register(&request_id);
-    spawn_connect_worker(request_id.clone(), params, cancel_flag, emitter);
+    let worker_request_id = request_id.clone();
+    runtime.start_cancellable(
+        request_id.clone(),
+        TaskKind::Connect,
+        move |nm, cancel_flag| {
+            if let Err(err) =
+                run_connect_worker(nm, &worker_request_id, request, cancel_flag, &emitter)
+            {
+                let report = ErrorReport::from_error(&err, ErrorOperation::Connect);
+                emit_connect_failure(&emitter, &worker_request_id, &report);
+            }
+        },
+    )?;
     api_data_value(
-        "result",
+        Method::WifiConnectTarget.spec().response_key,
         &json!({
             "status": "started",
             "request_id": request_id,
@@ -47,145 +61,68 @@ pub(crate) fn start_connect_target(
     )
 }
 
-fn spawn_connect_worker(
-    request_id: String,
-    params: DbusConnectTargetParams,
-    cancel_flag: Arc<AtomicBool>,
-    emitter: SignalEmitter<'static>,
-) {
-    let done = Arc::new(AtomicBool::new(false));
-    spawn_networkmanager_cancel_watcher(&request_id, Arc::clone(&cancel_flag), Arc::clone(&done));
-    std::thread::spawn(move || {
-        if let Err(err) = run_connect_worker(&request_id, params, &cancel_flag, &emitter) {
-            emit_connect_failure(&emitter, &request_id, &format!("{err:#}"), None);
-        }
-        done.store(true, Ordering::Relaxed);
-        daemon_state::remove(&request_id);
-    });
-}
-
-fn spawn_networkmanager_cancel_watcher(
-    request_id: &str,
-    cancel_flag: Arc<AtomicBool>,
-    done: Arc<AtomicBool>,
-) {
-    let request_id = request_id.to_string();
-    std::thread::spawn(move || {
-        while !done.load(Ordering::Relaxed) {
-            if daemon_state::is_cancelled(&cancel_flag) {
-                abort_networkmanager_activation(&request_id);
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    });
-}
-
-fn abort_networkmanager_activation(request_id: &str) {
-    match Nm::new().and_then(|nm| nm.disconnect_wifi()) {
-        Ok(result) => {
-            tracing::info!(request_id, message = %result.message, "aborted NetworkManager Wi-Fi activation after cancellation")
-        }
-        Err(err) => {
-            tracing::warn!(request_id, error = %format_args!("{err:#}"), "failed to abort NetworkManager Wi-Fi activation after cancellation")
+impl From<DbusConnectTargetParams> for ConnectRequest {
+    fn from(params: DbusConnectTargetParams) -> Self {
+        Self {
+            target: params.target,
+            password: params.password,
+            wep_key_type: params.wep_key_type,
         }
     }
 }
 
 fn run_connect_worker(
+    nm: &Nm,
     request_id: &str,
-    params: DbusConnectTargetParams,
+    request: ConnectRequest,
     cancel_flag: &AtomicBool,
     emitter: &SignalEmitter<'static>,
 ) -> Result<()> {
-    emit_progress(emitter, request_id, "started", "starting Wi-Fi connection")?;
-    if daemon_state::is_cancelled(cancel_flag) {
-        return emit_cancelled(
-            emitter,
-            request_id,
-            "cancelled before connection attempt started",
-        );
-    }
-
-    let nm = Nm::new()?;
-    emit_progress(
-        emitter,
-        request_id,
-        "progress",
-        "activating NetworkManager connection",
-    )?;
-    let result = connect::connect_target_with_password_cancellable(
-        &nm,
-        &params.target,
-        params.password.as_deref(),
-        params.wep_key_type,
-        cancel_flag,
-    );
-
-    if daemon_state::is_cancelled(cancel_flag) {
-        return emit_cancelled(emitter, request_id, "connection attempt was cancelled");
-    }
-
-    match result {
-        Ok(result) => emit_connect_success(emitter, request_id, &result),
-        Err(err) => {
-            let reason = connect::connect_failure_reason(&err);
-            emit_connect_failure(
-                emitter,
-                request_id,
-                &format!("{err:#}"),
-                Some(serde_json::to_value(reason)?),
-            );
-            Ok(())
-        }
-    }
+    Application::new(nm)
+        .connect(&request, Some(cancel_flag), |event| {
+            emit_connect_event(emitter, request_id, event)
+        })
+        .map(|_| ())
 }
 
-fn emit_progress(
+fn emit_connect_event(
     emitter: &SignalEmitter<'static>,
     request_id: &str,
-    event: &str,
-    message: &str,
+    event: &ConnectEvent,
 ) -> Result<()> {
-    emit_json_event(
-        emitter,
-        STREAM,
-        Some(request_id),
-        event,
-        json!({ "request_id": request_id, "message": message }),
-    )
+    let (name, data) = match event {
+        ConnectEvent::Started { message } => (
+            "started",
+            json!({ "request_id": request_id, "message": message }),
+        ),
+        ConnectEvent::Progress { message } => (
+            "progress",
+            json!({ "request_id": request_id, "message": message }),
+        ),
+        ConnectEvent::Finished(ConnectOutcome::Succeeded(result)) => (
+            "succeeded",
+            json!({ "request_id": request_id, "result": result }),
+        ),
+        ConnectEvent::Finished(ConnectOutcome::Failed { result, error }) => (
+            "failed",
+            json!({
+                "request_id": request_id,
+                "reason": result.reason,
+                "message": result.message,
+                "code": error.code,
+                "details": error.api_details(),
+            }),
+        ),
+        ConnectEvent::Cancelled { message }
+        | ConnectEvent::Finished(ConnectOutcome::Cancelled { message }) => (
+            "cancelled",
+            json!({ "request_id": request_id, "message": message }),
+        ),
+    };
+    emit_json_event(emitter, STREAM, Some(request_id), name, data)
 }
 
-fn emit_connect_success(
-    emitter: &SignalEmitter<'static>,
-    request_id: &str,
-    result: &ConnectResult,
-) -> Result<()> {
-    emit_json_event(
-        emitter,
-        STREAM,
-        Some(request_id),
-        "succeeded",
-        json!({ "request_id": request_id, "result": result }),
-    )
-}
-
-fn emit_cancelled(emitter: &SignalEmitter<'static>, request_id: &str, message: &str) -> Result<()> {
-    emit_json_event(
-        emitter,
-        STREAM,
-        Some(request_id),
-        "cancelled",
-        json!({ "request_id": request_id, "message": message }),
-    )
-}
-
-fn emit_connect_failure(
-    emitter: &SignalEmitter<'static>,
-    request_id: &str,
-    message: &str,
-    reason: Option<Value>,
-) {
+fn emit_connect_failure(emitter: &SignalEmitter<'static>, request_id: &str, report: &ErrorReport) {
     emit_json_event_best_effort(
         emitter,
         STREAM,
@@ -193,8 +130,10 @@ fn emit_connect_failure(
         "failed",
         json!({
             "request_id": request_id,
-            "reason": reason,
-            "message": message,
+            "reason": report.code.connect_reason(),
+            "code": report.code,
+            "message": report.message,
+            "details": report.api_details(),
         }),
     );
 }

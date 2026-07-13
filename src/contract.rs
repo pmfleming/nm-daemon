@@ -1,14 +1,16 @@
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::model::{
     AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectResult, ConnectivityStatus,
-    EnterpriseAuth, Ip4Status, MeteredStatus, NetworkAuth, NetworkCapabilities,
-    NetworkConnectPrompt, NetworkEntry, NetworkPortalHint, NetworkShareHint, ProfilePrivacy,
-    SavedWifiConnection, WifiSharePayload, WifiStatus, WirelessStatus, security_flags_label,
+    Ip4Status, MeteredStatus, NetworkEntry, ProfilePrivacy, SavedWifiConnection, WifiSharePayload,
+    WifiStatus, WirelessStatus, network_entries_with_profile_matches, security_flags_label,
     security_label,
 };
+use crate::protocol::{Method, Stream};
 
 #[derive(Serialize)]
 struct ShelllistContractFixture {
@@ -38,91 +40,45 @@ pub(crate) fn print_method_contract_fixtures() -> Result<()> {
 
 fn method_contract_fixtures() -> Value {
     let combined = shelllist_contract_fixture();
-    let password_network = password_required_network();
-    let enterprise_network = enterprise_required_network();
+    let password_network = canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_PSK, false, false);
+    let enterprise_network =
+        canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_802_1X, false, false);
     json!({
-        "wifi-networks.saved": {
-            "networks": [combined.network],
+        "protocol-registry": {
+            "metadata": crate::protocol::contract_registry(),
+            "markdown": crate::protocol::markdown_reference(),
         },
-        "wifi-networks.password-required": {
-            "networks": [password_network],
-        },
-        "wifi-networks.enterprise-required": {
-            "networks": [enterprise_network],
-        },
-        "wifi-status.active": {
-            "status": combined.status,
-        },
-        "wifi-status.inactive": {
-            "status": inactive_status(),
-        },
-        "wifi-connect.success": {
-            "result": combined.connect_success,
-        },
-        "wifi-connect.secret-required": {
-            "result": combined.connect_error,
-        },
+        "wifi-networks.saved": response_fixture(Method::WifiNetworks, json!([combined.network])),
+        "wifi-networks.password-required": response_fixture(Method::WifiNetworks, json!([password_network])),
+        "wifi-networks.enterprise-required": response_fixture(Method::WifiNetworks, json!([enterprise_network])),
+        "wifi-status.active": response_fixture(Method::WifiStatus, json!(combined.status)),
+        "wifi-status.inactive": response_fixture(Method::WifiStatus, json!(inactive_status())),
+        "wifi-connect.success": response_fixture(Method::WifiConnectTarget, json!(combined.connect_success)),
+        "wifi-connect.secret-required": response_fixture(Method::WifiConnectTarget, json!(combined.connect_error)),
         "wifi-scan.stream": {
             "events": scan_stream_events(),
         },
         "wifi-profile.share": {
-            "payload": share_payload(),
+            "payload": WifiSharePayload::shareable(
+                &contract_profile(),
+                "WPA",
+                Some("correct horse battery staple"),
+                false,
+            ),
         },
     })
 }
 
+fn response_fixture(method: Method, value: Value) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert(method.spec().response_key.to_string(), value);
+    Value::Object(object)
+}
+
 fn shelllist_contract_fixture() -> ShelllistContractFixture {
-    let access_point = contract_access_point();
+    let access_point = canonical_access_point(crate::model::NM_AP_SEC_KEY_MGMT_PSK, true);
     let profile = contract_profile();
-    let network = NetworkEntry {
-        access_point: access_point.clone(),
-        key: access_point.path.clone(),
-        access_points: vec![access_point.clone()],
-        primary_profile: Some(profile.clone()),
-        profiles: vec![profile.clone()],
-        capabilities: NetworkCapabilities {
-            can_connect: true,
-            can_connect_now: true,
-            can_connect_with_password: false,
-            needs_password: false,
-            can_connect_with_credentials: false,
-            needs_credentials: false,
-            can_forget: true,
-            can_toggle_autoconnect: true,
-            can_set_mac_randomization: true,
-            can_set_send_hostname: true,
-            can_share_qr: true,
-            supported_auth: true,
-            unsupported_reason: None,
-        },
-        auth: NetworkAuth {
-            kind: "saved-profile".to_string(),
-            key_management: Vec::new(),
-            supported: true,
-            required_fields: Vec::new(),
-            optional_fields: Vec::new(),
-            note: Some("A compatible saved NetworkManager profile can be activated without collecting new credentials".to_string()),
-        },
-        connect_prompt: NetworkConnectPrompt {
-            kind: "none".to_string(),
-            required_fields: Vec::new(),
-            optional_fields: Vec::new(),
-            message: Some("A compatible saved NetworkManager profile can be activated without collecting new credentials".to_string()),
-            enterprise_defaults: None,
-        },
-        share: NetworkShareHint {
-            shareable: false,
-            reason: Some("Saved profile password availability must be checked before sharing".to_string()),
-            requires_profile_secret_check: true,
-            profile_path: Some(profile.path.clone()),
-            qr_payload: None,
-        },
-        portal_hint: NetworkPortalHint {
-            auto_open_on_connect: false,
-            reason: None,
-        },
-        last_connection: None,
-    };
+    let network = network_from_production(access_point.clone(), vec![profile.clone()]);
     ShelllistContractFixture {
         network: network.clone(),
         status: WifiStatus {
@@ -150,33 +106,25 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
             metered: Some(MeteredStatus::from_nm_code(4)),
             active_since_ms: Some(1_762_000_000_000),
         },
-        connect_success: ConnectResult {
-            status: "connected",
-            reason: None,
-            path: Some(ConnectEnginePath::Dbus),
-            ssid: "Example".to_string(),
-            message: "Connected to Example via D-Bus".to_string(),
-            connectivity: Some(ConnectivityStatus::from_nm_code(4)),
-            suggest_open_portal: false,
-        },
-        connect_error: ConnectResult {
-            status: "error",
-            reason: Some(ConnectFailureReason::SecretRequired),
-            path: None,
-            ssid: "Example".to_string(),
-            message: "password required for Example".to_string(),
-            connectivity: None,
-            suggest_open_portal: false,
-        },
+        connect_success: ConnectResult::connected(
+            "Example",
+            "Connected to Example via D-Bus",
+            ConnectEnginePath::Dbus,
+            Some(ConnectivityStatus::from_nm_code(4)),
+        ),
+        connect_error: ConnectResult::failed(
+            "Example",
+            ConnectFailureReason::SecretRequired,
+            "password required for Example",
+        ),
     }
 }
 
-fn contract_access_point() -> AccessPoint {
-    let rsn_flags = crate::model::NM_AP_SEC_KEY_MGMT_PSK;
+fn canonical_access_point(rsn_flags: u32, active: bool) -> AccessPoint {
     AccessPoint {
         ssid: "Example".to_string(),
         ssid_bytes: b"Example".to_vec(),
-        active: true,
+        active,
         security: security_label(crate::model::NM_AP_FLAGS_PRIVACY, 0, rsn_flags),
         strength: 82,
         frequency: 5180,
@@ -200,181 +148,56 @@ fn contract_access_point() -> AccessPoint {
     }
 }
 
-fn password_required_network() -> NetworkEntry {
-    let mut access_point = contract_access_point();
-    access_point.active = false;
-    NetworkEntry {
-        access_point: access_point.clone(),
-        key: access_point.path.clone(),
-        access_points: vec![access_point],
-        primary_profile: None,
-        profiles: Vec::new(),
-        capabilities: NetworkCapabilities {
-            can_connect: true,
-            can_connect_now: false,
-            can_connect_with_password: true,
-            needs_password: true,
-            can_connect_with_credentials: false,
-            needs_credentials: false,
-            can_forget: false,
-            can_toggle_autoconnect: false,
-            can_set_mac_randomization: false,
-            can_set_send_hostname: false,
-            can_share_qr: false,
-            supported_auth: true,
-            unsupported_reason: None,
-        },
-        auth: NetworkAuth {
-            kind: "password".to_string(),
-            key_management: vec!["wpa-psk".to_string()],
-            supported: true,
-            required_fields: vec!["password".to_string()],
-            optional_fields: Vec::new(),
-            note: Some("Provide a Wi-Fi password to connect".to_string()),
-        },
-        connect_prompt: NetworkConnectPrompt {
-            kind: "password".to_string(),
-            required_fields: vec!["password".to_string()],
-            optional_fields: Vec::new(),
-            message: Some("Provide a Wi-Fi password to connect".to_string()),
-            enterprise_defaults: None,
-        },
-        share: NetworkShareHint {
-            shareable: false,
-            reason: Some("Wi-Fi QR sharing requires an open network or a saved profile with a readable password.".to_string()),
-            requires_profile_secret_check: false,
-            profile_path: None,
-            qr_payload: None,
-        },
-        portal_hint: NetworkPortalHint {
-            auto_open_on_connect: false,
-            reason: None,
-        },
-        last_connection: None,
-    }
+fn canonical_network(rsn_flags: u32, active: bool, with_profile: bool) -> NetworkEntry {
+    let access_point = canonical_access_point(rsn_flags, active);
+    let profiles = with_profile.then(contract_profile).into_iter().collect();
+    network_from_production(access_point, profiles)
 }
 
-fn enterprise_required_network() -> NetworkEntry {
-    let mut access_point = contract_access_point();
-    access_point.active = false;
-    access_point.security = "Enterprise".to_string();
-    access_point.rsn_flags = crate::model::NM_AP_SEC_KEY_MGMT_802_1X;
-    access_point.rsn_flags_label = security_flags_label(access_point.rsn_flags);
-    NetworkEntry {
-        access_point: access_point.clone(),
-        key: access_point.path.clone(),
-        access_points: vec![access_point],
-        primary_profile: None,
-        profiles: Vec::new(),
-        capabilities: NetworkCapabilities {
-            can_connect: true,
-            can_connect_now: false,
-            can_connect_with_password: false,
-            needs_password: false,
-            can_connect_with_credentials: true,
-            needs_credentials: true,
-            can_forget: false,
-            can_toggle_autoconnect: false,
-            can_set_mac_randomization: false,
-            can_set_send_hostname: false,
-            can_share_qr: false,
-            supported_auth: true,
-            unsupported_reason: None,
-        },
-        auth: NetworkAuth {
-            kind: "enterprise".to_string(),
-            key_management: vec!["wpa-eap".to_string()],
-            supported: true,
-            required_fields: vec!["enterprise.identity".to_string(), "password".to_string()],
-            optional_fields: vec!["enterprise.anonymous_identity".to_string()],
-            note: Some("Provide enterprise credentials to connect".to_string()),
-        },
-        connect_prompt: NetworkConnectPrompt {
-            kind: "enterprise".to_string(),
-            required_fields: vec!["enterprise.identity".to_string(), "password".to_string()],
-            optional_fields: vec!["enterprise.anonymous_identity".to_string()],
-            message: Some("Provide enterprise credentials to connect".to_string()),
-            enterprise_defaults: Some(EnterpriseAuth {
-                eap: vec!["peap".to_string()],
-                phase2_auth: Some("mschapv2".to_string()),
-                key_mgmt: Some("wpa-eap".to_string()),
-                ..Default::default()
-            }),
-        },
-        share: NetworkShareHint {
-            shareable: false,
-            reason: Some("Wi-Fi QR sharing requires an open network or a saved profile with a readable password.".to_string()),
-            requires_profile_secret_check: false,
-            profile_path: None,
-            qr_payload: None,
-        },
-        portal_hint: NetworkPortalHint {
-            auto_open_on_connect: false,
-            reason: None,
-        },
-        last_connection: None,
+fn network_from_production(
+    access_point: AccessPoint,
+    profiles: Vec<SavedWifiConnection>,
+) -> NetworkEntry {
+    let mut profile_matches = BTreeMap::new();
+    if !profiles.is_empty() {
+        profile_matches.insert(access_point.path.clone(), profiles);
     }
+    network_entries_with_profile_matches(vec![access_point], &profile_matches)
+        .pop()
+        .expect("canonical access point produces one network")
 }
 
 fn inactive_status() -> WifiStatus {
-    WifiStatus {
-        active: false,
-        device_iface: Some("wlan0".to_string()),
-        active_connection_path: None,
-        access_point: None,
-        network: None,
-        profile: None,
-        connectivity: Some(ConnectivityStatus::from_nm_code(1)),
-        ip4: None,
-        wireless: None,
-        metered: None,
-        active_since_ms: None,
-    }
+    WifiStatus::inactive(
+        Some("wlan0".to_string()),
+        Some(ConnectivityStatus::from_nm_code(1)),
+    )
 }
 
 fn scan_stream_events() -> Vec<Value> {
-    json!([
-        {
-            "protocol": crate::output::API_PROTOCOL,
-            "version": crate::output::API_VERSION,
-            "stream": "wifi-scan",
-            "event": "status",
-            "message": "Scanning Wi-Fi networks"
-        },
-        {
-            "protocol": crate::output::API_PROTOCOL,
-            "version": crate::output::API_VERSION,
-            "stream": "wifi-scan",
-            "event": "snapshot",
-            "scanning": true,
-            "networks_found": 1,
-            "networks": [password_required_network()]
-        },
-        {
-            "protocol": crate::output::API_PROTOCOL,
-            "version": crate::output::API_VERSION,
-            "stream": "wifi-scan",
-            "event": "complete",
-            "timed_out": false,
-            "networks_found": 1
-        }
-    ])
-    .as_array()
-    .cloned()
-    .unwrap_or_default()
-}
-
-fn share_payload() -> WifiSharePayload {
-    WifiSharePayload {
-        status: "ok",
-        shareable: true,
-        reason: None,
-        path: "/org/freedesktop/NetworkManager/Settings/1".to_string(),
-        id: "Example".to_string(),
-        ssid: "Example".to_string(),
-        auth_type: Some("WPA".to_string()),
-        qr_payload: Some("WIFI:T:WPA;S:Example;P:correct horse battery staple;;".to_string()),
-    }
+    let network = canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_PSK, false, false);
+    [
+        ("status", json!({ "message": "Scanning Wi-Fi networks" })),
+        (
+            "snapshot",
+            json!({ "scanning": true, "networks_found": 1, "networks": [network] }),
+        ),
+        (
+            "complete",
+            json!({ "timed_out": false, "networks_found": 1 }),
+        ),
+    ]
+    .into_iter()
+    .map(|(event, data)| {
+        serde_json::from_str(&crate::daemon_event::event_json(
+            Stream::WifiScan,
+            Some("scan-contract"),
+            event,
+            data,
+        ))
+        .expect("canonical scan event JSON")
+    })
+    .collect()
 }
 
 fn contract_profile() -> SavedWifiConnection {
@@ -393,38 +216,100 @@ fn contract_profile() -> SavedWifiConnection {
 }
 
 #[cfg(test)]
+fn serialized_boundary_snapshot() -> Value {
+    let shell = serde_json::to_value(shelllist_contract_fixture()).expect("shell fixture JSON");
+    let methods = method_contract_fixtures();
+    json!({
+        "saved_network": {
+            "capabilities": shell["network"]["capabilities"],
+            "auth": shell["network"]["auth"],
+            "connect_prompt": shell["network"]["connect_prompt"],
+            "share": shell["network"]["share"],
+        },
+        "password_network": {
+            "capabilities": methods["wifi-networks.password-required"]["networks"][0]["capabilities"],
+            "auth": methods["wifi-networks.password-required"]["networks"][0]["auth"],
+            "connect_prompt": methods["wifi-networks.password-required"]["networks"][0]["connect_prompt"],
+        },
+        "enterprise_network": {
+            "capabilities": methods["wifi-networks.enterprise-required"]["networks"][0]["capabilities"],
+            "auth": methods["wifi-networks.enterprise-required"]["networks"][0]["auth"],
+            "connect_prompt": methods["wifi-networks.enterprise-required"]["networks"][0]["connect_prompt"],
+        },
+        "status": {
+            "connectivity": shell["status"]["connectivity"],
+            "metered": shell["status"]["metered"],
+            "wireless": shell["status"]["wireless"],
+        },
+        "connect_success": shell["connect_success"],
+        "connect_error": shell["connect_error"],
+        "scan_status_event": methods["wifi-scan.stream"]["events"][0],
+        "profile_share": methods["wifi-profile.share"]["payload"],
+    })
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{method_contract_fixtures, shelllist_contract_fixture};
+    use serde_json::Value;
+
+    use super::{
+        method_contract_fixtures, serialized_boundary_snapshot, shelllist_contract_fixture,
+    };
 
     #[test]
-    fn shelllist_contract_fixture_contains_qml_boundary_fields() {
-        let value = serde_json::to_value(shelllist_contract_fixture()).expect("fixture JSON");
+    fn serialized_v1_boundary_matches_checked_in_snapshot() {
+        let actual = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serialized_boundary_snapshot()).unwrap()
+        );
+        assert_eq!(actual, include_str!("../test_support/contract-v1.json"));
+    }
 
-        assert_eq!(value["network"]["capabilities"]["can_connect"], true);
-        assert_eq!(value["network"]["capabilities"]["needs_password"], false);
-        assert_eq!(value["network"]["capabilities"]["needs_credentials"], false);
-        assert!(value["network"]["auth"]["note"].is_string());
-        assert_eq!(value["network"]["connect_prompt"]["kind"], "none");
-        assert_eq!(
-            value["network"]["share"]["requires_profile_secret_check"],
-            true
+    #[test]
+    fn serialized_shelllist_contract_satisfies_boundary_schema() {
+        let value = serde_json::to_value(shelllist_contract_fixture()).expect("fixture JSON");
+        for pointer in [
+            "/network/capabilities/can_connect",
+            "/network/capabilities/needs_password",
+            "/network/capabilities/needs_credentials",
+            "/network/share/requires_profile_secret_check",
+            "/network/portal_hint/auto_open_on_connect",
+            "/connect_success/suggest_open_portal",
+        ] {
+            assert!(
+                value.pointer(pointer).is_some_and(Value::is_boolean),
+                "{pointer}"
+            );
+        }
+        for pointer in [
+            "/network/auth/kind",
+            "/network/auth/note",
+            "/network/connect_prompt/kind",
+            "/status/connectivity/state",
+            "/status/metered/state",
+            "/connect_success/path",
+            "/connect_error/reason",
+        ] {
+            assert!(
+                value.pointer(pointer).is_some_and(Value::is_string),
+                "{pointer}"
+            );
+        }
+        assert!(
+            value
+                .pointer("/status/wireless/tx_bitrate_mbps")
+                .is_some_and(Value::is_number)
         );
-        assert_eq!(
-            value["network"]["portal_hint"]["auto_open_on_connect"],
-            false
-        );
-        assert_eq!(value["status"]["connectivity"]["state"], "portal");
-        assert_eq!(value["status"]["metered"]["state"], "guess-no");
-        assert_eq!(value["status"]["wireless"]["tx_bitrate_mbps"], 130.0);
-        assert_eq!(value["connect_success"]["suggest_open_portal"], false);
-        assert_eq!(value["connect_success"]["path"], "dbus");
-        assert_eq!(value["connect_error"]["reason"], "secret-required");
     }
 
     #[test]
     fn method_contract_fixtures_cover_frontend_api_shapes() {
         let value = method_contract_fixtures();
 
+        assert_eq!(
+            value["protocol-registry"]["metadata"]["methods"][0]["name"],
+            "wifi.status"
+        );
         assert!(value["wifi-networks.saved"]["networks"].is_array());
         assert_eq!(
             value["wifi-networks.password-required"]["networks"][0]["capabilities"]["needs_password"],

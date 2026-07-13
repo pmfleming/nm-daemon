@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{
     ConnectionSettings, DEVICE_IFACE, Nm, SETTINGS_CONNECTION_IFACE, SETTINGS_IFACE, SETTINGS_PATH,
     owned_value,
 };
+use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     AccessPoint, NetworkEntry, ProfilePrivacy, SavedWifiConnection, WifiConnectTarget, WifiDevice,
     WifiSharePayload, ap_supports_enterprise, ap_supports_psk, ap_uses_wep, display_ssid,
@@ -42,7 +43,11 @@ impl Nm {
             return Ok(None);
         };
         let Some(device) = self.wifi_devices_for_target(target)?.into_iter().next() else {
-            bail!("no matching Wi-Fi device found");
+            return Err(DomainError::not_found(
+                ErrorOperation::Connect,
+                "no matching Wi-Fi device found",
+            )
+            .into());
         };
         Ok(Some((connection_path, device.path, root_object_path()?)))
     }
@@ -158,7 +163,12 @@ impl Nm {
         let path = OwnedObjectPath::try_from(path).context("parse connection path")?;
         let settings = self.connection_settings(&path)?;
         let Some(profile) = saved_wifi_connection_from_settings(&path, &settings) else {
-            bail!("connection is not a saved Wi-Fi profile: {path}");
+            return Err(DomainError::not_found(
+                ErrorOperation::ProfileOperation,
+                format!("connection is not a saved Wi-Fi profile: {path}"),
+            )
+            .with_detail("path", path.to_string())
+            .into());
         };
 
         let secrets = self
@@ -488,16 +498,7 @@ fn shareable_payload(
     password: Option<&str>,
     hidden: bool,
 ) -> WifiSharePayload {
-    WifiSharePayload {
-        status: "ok",
-        shareable: true,
-        reason: None,
-        path: profile.path.clone(),
-        id: profile.id.clone(),
-        ssid: profile.ssid.clone(),
-        auth_type: Some(auth_type.to_string()),
-        qr_payload: Some(wifi_qr_payload(auth_type, &profile.ssid, password, hidden)),
-    }
+    WifiSharePayload::shareable(profile, auth_type, password, hidden)
 }
 
 fn unshareable_payload(profile: &SavedWifiConnection, reason: &str) -> WifiSharePayload {
@@ -608,30 +609,6 @@ fn section_has_key(settings: &ConnectionSettings, section: &str, key: &str) -> b
     settings
         .get(section)
         .is_some_and(|settings| settings.contains_key(key))
-}
-
-fn wifi_qr_payload(auth_type: &str, ssid: &str, password: Option<&str>, hidden: bool) -> String {
-    let password = password
-        .map(|password| format!(";P:{}", wifi_qr_escape(password)))
-        .unwrap_or_default();
-    let hidden = if hidden { ";H:true" } else { "" };
-    format!(
-        "WIFI:T:{};S:{}{}{};;",
-        auth_type,
-        wifi_qr_escape(ssid),
-        password,
-        hidden
-    )
-}
-
-fn wifi_qr_escape(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|ch| match ch {
-            '\\' | ';' | ',' | ':' | '"' => vec!['\\', ch],
-            ch => vec![ch],
-        })
-        .collect()
 }
 
 fn privacy_from_settings(settings: &ConnectionSettings) -> ProfilePrivacy {

@@ -1,0 +1,220 @@
+{
+  "connect_error": {
+    "connectivity": null,
+    "message": "password required for Example",
+    "reason": "secret-required",
+    "ssid": "Example",
+    "status": "error",
+    "suggest_open_portal": false
+  },
+  "connect_success": {
+    "connectivity": {
+      "captive_portal": false,
+      "code": 4,
+      "full": true,
+      "state": "full"
+    },
+    "message": "Connected to Example via D-Bus",
+    "path": "dbus",
+    "ssid": "Example",
+    "status": "connected",
+    "suggest_open_portal": false
+  },
+  "enterprise_network": {
+    "auth": {
+      "key_management": [
+        "wpa-eap"
+      ],
+      "kind": "wpa-enterprise",
+      "note": "Provide an enterprise credential object to connect-target; password may be supplied with --password-stdin",
+      "optional_fields": [
+        "password",
+        "enterprise.anonymous_identity",
+        "enterprise.phase2_auth",
+        "enterprise.ca_cert",
+        "enterprise.domain_suffix_match",
+        "enterprise.client_cert",
+        "enterprise.private_key",
+        "enterprise.private_key_password"
+      ],
+      "required_fields": [
+        "enterprise.eap",
+        "enterprise.identity"
+      ],
+      "supported": true
+    },
+    "capabilities": {
+      "can_connect": true,
+      "can_connect_now": false,
+      "can_connect_with_credentials": true,
+      "can_connect_with_password": false,
+      "can_forget": false,
+      "can_set_mac_randomization": false,
+      "can_set_send_hostname": false,
+      "can_share_qr": false,
+      "can_toggle_autoconnect": false,
+      "needs_credentials": true,
+      "needs_password": false,
+      "supported_auth": true,
+      "unsupported_reason": null
+    },
+    "connect_prompt": {
+      "enterprise_defaults": {
+        "altsubject_matches": [],
+        "anonymous_identity": null,
+        "ca_cert": null,
+        "ca_path": null,
+        "client_cert": null,
+        "domain_suffix_match": null,
+        "eap": [
+          "peap"
+        ],
+        "identity": null,
+        "key_mgmt": "wpa-eap",
+        "openssl_ciphers": null,
+        "pac_file": null,
+        "password": null,
+        "password_flags": null,
+        "phase1_fast_provisioning": null,
+        "phase1_peaplabel": null,
+        "phase1_peapver": null,
+        "phase2_auth": "mschapv2",
+        "pin": null,
+        "pin_flags": null,
+        "private_key": null,
+        "private_key_password": null,
+        "private_key_password_flags": null,
+        "subject_match": null,
+        "system_ca_certs": null
+      },
+      "kind": "enterprise",
+      "message": "Provide an enterprise credential object to connect-target; password may be supplied with --password-stdin",
+      "optional_fields": [
+        "password",
+        "enterprise.anonymous_identity",
+        "enterprise.phase2_auth",
+        "enterprise.ca_cert",
+        "enterprise.domain_suffix_match",
+        "enterprise.client_cert",
+        "enterprise.private_key",
+        "enterprise.private_key_password"
+      ],
+      "required_fields": [
+        "enterprise.eap",
+        "enterprise.identity"
+      ]
+    }
+  },
+  "password_network": {
+    "auth": {
+      "key_management": [
+        "wpa-psk"
+      ],
+      "kind": "wpa-personal",
+      "note": null,
+      "optional_fields": [],
+      "required_fields": [
+        "password"
+      ],
+      "supported": true
+    },
+    "capabilities": {
+      "can_connect": true,
+      "can_connect_now": false,
+      "can_connect_with_credentials": false,
+      "can_connect_with_password": true,
+      "can_forget": false,
+      "can_set_mac_randomization": false,
+      "can_set_send_hostname": false,
+      "can_share_qr": false,
+      "can_toggle_autoconnect": false,
+      "needs_credentials": false,
+      "needs_password": true,
+      "supported_auth": true,
+      "unsupported_reason": null
+    },
+    "connect_prompt": {
+      "kind": "password",
+      "message": "Enter the Wi-Fi password, then press Enter.",
+      "optional_fields": [],
+      "required_fields": [
+        "password"
+      ]
+    }
+  },
+  "profile_share": {
+    "auth_type": "WPA",
+    "id": "Example",
+    "path": "/org/freedesktop/NetworkManager/Settings/1",
+    "qr_payload": "WIFI:T:WPA;S:Example;P:correct horse battery staple;;",
+    "reason": null,
+    "shareable": true,
+    "ssid": "Example",
+    "status": "ok"
+  },
+  "saved_network": {
+    "auth": {
+      "key_management": [],
+      "kind": "saved-profile",
+      "note": "A compatible saved NetworkManager profile can be activated without collecting new credentials",
+      "optional_fields": [],
+      "required_fields": [],
+      "supported": true
+    },
+    "capabilities": {
+      "can_connect": true,
+      "can_connect_now": true,
+      "can_connect_with_credentials": false,
+      "can_connect_with_password": false,
+      "can_forget": true,
+      "can_set_mac_randomization": true,
+      "can_set_send_hostname": true,
+      "can_share_qr": true,
+      "can_toggle_autoconnect": true,
+      "needs_credentials": false,
+      "needs_password": false,
+      "supported_auth": true,
+      "unsupported_reason": null
+    },
+    "connect_prompt": {
+      "kind": "none",
+      "message": "A compatible saved NetworkManager profile can be activated without collecting new credentials",
+      "optional_fields": [],
+      "required_fields": []
+    },
+    "share": {
+      "profile_path": "/org/freedesktop/NetworkManager/Settings/1",
+      "reason": "Saved profile password availability must be checked before sharing",
+      "requires_profile_secret_check": true,
+      "shareable": false
+    }
+  },
+  "scan_status_event": {
+    "event": "status",
+    "message": "Scanning Wi-Fi networks",
+    "protocol": "nm-api",
+    "request_id": "scan-contract",
+    "stream": "wifi.scan",
+    "version": 1
+  },
+  "status": {
+    "connectivity": {
+      "captive_portal": true,
+      "code": 2,
+      "full": false,
+      "state": "portal"
+    },
+    "metered": {
+      "code": 4,
+      "guessed": true,
+      "metered": false,
+      "state": "guess-no"
+    },
+    "wireless": {
+      "bitrate_mbps": 144,
+      "mac_address": "02:00:00:00:00:01",
+      "rx_bitrate_mbps": 144.4,
+      "tx_bitrate_mbps": 130.0
+    }
+  }
+}
