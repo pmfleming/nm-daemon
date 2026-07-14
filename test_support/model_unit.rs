@@ -1,22 +1,11 @@
-use std::time::Duration;
-
 use super::{
     AccessPoint, AuthKind, ConnectionReadiness, ConnectivityStatus, MeteredStatus,
     NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_802_1X, NM_AP_SEC_KEY_MGMT_OWE,
     NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, NetworkAuth, NetworkCapabilities,
     ProfilePrivacy, SavedWifiConnection, Security, WifiConnectTarget, ap_is_passwordless,
     ap_supports_enterprise, ap_supports_psk, ap_uses_wep, network_entries_with_profile_matches,
-    retry_delay, security_flags_label, security_label,
+    security_flags_label, security_label,
 };
-
-#[test]
-fn retry_delay_uses_bounded_exponential_backoff() {
-    assert_eq!(retry_delay(1), Duration::from_secs(1));
-    assert_eq!(retry_delay(2), Duration::from_secs(2));
-    assert_eq!(retry_delay(3), Duration::from_secs(4));
-    assert_eq!(retry_delay(4), Duration::from_secs(8));
-    assert_eq!(retry_delay(99), Duration::from_secs(8));
-}
 
 #[test]
 fn security_label_identifies_open_networks() {

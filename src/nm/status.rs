@@ -8,11 +8,11 @@ use super::{
     ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_IFACE, NM_PATH, Nm,
     SETTINGS_CONNECTION_IFACE, WIFI_IFACE,
 };
-use crate::command::iw::Iw;
 use crate::command::nmcli::Nmcli;
 use crate::error::ErrorOperation;
 use crate::model::{
-    DisconnectResult, Ip4Status, MeteredStatus, SavedWifiConnection, WifiStatus, WirelessStatus,
+    DisconnectResult, Ip4Status, MeteredStatus, SavedWifiConnection, WifiDevice, WifiStatus,
+    WirelessStatus,
 };
 
 const IP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.IP4Config";
@@ -23,61 +23,80 @@ impl Nm {
         let connectivity = self.connectivity_check().ok();
 
         for device in self.wifi_devices()? {
-            let Some(active_connection_path) = self.device_active_connection_path(&device.path)?
-            else {
-                continue;
-            };
-            let Some(active_ap_path) = self.active_access_point(&device)? else {
-                continue;
-            };
-            let access_point = self.access_point(&device, &active_ap_path, true)?;
-            let entry = self
-                .network_entries_for_access_points(vec![access_point.clone()])?
-                .into_iter()
-                .next();
-            let active_profile_path = self.active_connection_profile_path(&active_connection_path);
-            let profile = active_profile_path
-                .as_ref()
-                .and_then(|path| active_connection_profile(path, &profiles))
-                .or_else(|| {
-                    entry
-                        .as_ref()
-                        .and_then(|entry| entry.primary_profile.clone())
-                });
-            let active_since_ms = active_profile_path
-                .as_ref()
-                .and_then(|path| self.connection_timestamp_ms(path));
-
-            let dbus_ip4 = self.ip4_status(&device.path).ok().flatten();
-            let ip4 = if ip4_status_needs_nmcli_fill(&dbus_ip4) {
-                let nmcli_ip4 = Nmcli::new(self.command_runner())
-                    .device_ip4(&device.iface, ErrorOperation::Status)
-                    .inspect_err(|error| {
-                        tracing::debug!(error = %format_args!("{error:#}"), "nmcli IPv4 enrichment unavailable")
-                    })
-                    .ok()
-                    .flatten();
-                merged_ip4_status(dbus_ip4, nmcli_ip4)
-            } else {
-                dbus_ip4
-            };
-
-            return Ok(WifiStatus {
-                active: true,
-                device_iface: Some(device.iface.clone()),
-                active_connection_path: Some(active_connection_path.to_string()),
-                access_point: Some(access_point),
-                network: entry,
-                profile,
-                connectivity,
-                ip4,
-                wireless: self.wireless_status(&device).ok(),
-                metered: self.metered_status(&device.path).ok(),
-                active_since_ms,
-            });
+            if let Some(status) =
+                self.wifi_status_for_device(&device, &profiles, connectivity.clone())?
+            {
+                return Ok(status);
+            }
         }
 
         Ok(WifiStatus::inactive(None, connectivity))
+    }
+
+    fn wifi_status_for_device(
+        &self,
+        device: &WifiDevice,
+        profiles: &[SavedWifiConnection],
+        connectivity: Option<crate::model::ConnectivityStatus>,
+    ) -> Result<Option<WifiStatus>> {
+        let Some(active_connection_path) = self.device_active_connection_path(&device.path)? else {
+            return Ok(None);
+        };
+        self.active_wifi_status(device, active_connection_path, profiles, connectivity)
+    }
+
+    fn active_wifi_status(
+        &self,
+        device: &WifiDevice,
+        active_connection_path: OwnedObjectPath,
+        profiles: &[SavedWifiConnection],
+        connectivity: Option<crate::model::ConnectivityStatus>,
+    ) -> Result<Option<WifiStatus>> {
+        let Some(active_ap_path) = self.active_access_point(device)? else {
+            return Ok(None);
+        };
+        let access_point = self.access_point(device, &active_ap_path, true)?;
+        let entry = self
+            .network_entries_for_access_points(vec![access_point.clone()])?
+            .into_iter()
+            .next();
+        let active_profile_path = self.active_connection_profile_path(&active_connection_path);
+        let profile = active_profile_path
+            .as_ref()
+            .and_then(|path| active_connection_profile(path, profiles))
+            .or_else(|| entry.as_ref()?.primary_profile.clone());
+        let active_since_ms = active_profile_path
+            .as_ref()
+            .and_then(|path| self.connection_timestamp_ms(path));
+
+        Ok(Some(WifiStatus {
+            active: true,
+            device_iface: Some(device.iface.clone()),
+            active_connection_path: Some(active_connection_path.to_string()),
+            access_point: Some(access_point),
+            network: entry,
+            profile,
+            connectivity,
+            ip4: self.enriched_ip4_status(device),
+            wireless: self.wireless_status(device).ok(),
+            metered: self.metered_status(&device.path).ok(),
+            active_since_ms,
+        }))
+    }
+
+    fn enriched_ip4_status(&self, device: &WifiDevice) -> Option<Ip4Status> {
+        let dbus_ip4 = self.ip4_status(&device.path).ok().flatten();
+        if !ip4_status_needs_nmcli_fill(&dbus_ip4) {
+            return dbus_ip4;
+        }
+        let nmcli_ip4 = Nmcli::new(self.command_runner())
+            .device_ip4(&device.iface, ErrorOperation::Status)
+            .inspect_err(|error| {
+                tracing::debug!(error = %crate::error::err_chain(&error), "nmcli IPv4 enrichment unavailable")
+            })
+            .ok()
+            .flatten();
+        merged_ip4_status(dbus_ip4, nmcli_ip4)
     }
 
     pub(crate) fn disconnect_wifi(&self) -> Result<DisconnectResult> {
@@ -189,10 +208,11 @@ impl Nm {
     fn wireless_status(&self, device: &crate::model::WifiDevice) -> Result<WirelessStatus> {
         let wifi = self.proxy_path(&device.path, WIFI_IFACE)?;
         let bitrate_kbps: Option<u32> = wifi.get_property("Bitrate").ok();
-        let directional_bitrates = Iw::new(self.command_runner())
-            .link_bitrates(&device.iface, ErrorOperation::Status)
+        let directional_bitrates = self
+            .wireless_telemetry()
+            .link_bitrates(&device.iface)
             .inspect_err(|error| {
-                tracing::debug!(error = %format_args!("{error:#}"), "iw bitrate enrichment unavailable")
+                tracing::debug!(error = %crate::error::err_chain(&error), "nl80211 bitrate enrichment unavailable")
             })
             .unwrap_or_default();
         Ok(WirelessStatus {
@@ -266,23 +286,27 @@ fn ip4_status_needs_nmcli_fill(status: &Option<Ip4Status>) -> bool {
 }
 
 fn merged_ip4_status(dbus: Option<Ip4Status>, nmcli: Option<Ip4Status>) -> Option<Ip4Status> {
-    match (dbus, nmcli) {
-        (Some(mut dbus), Some(nmcli)) => {
-            if dbus.address.as_deref().is_none_or(str::is_empty) {
-                dbus.address = nmcli.address;
-                dbus.prefix = nmcli.prefix;
-            }
-            if dbus.gateway.as_deref().is_none_or(str::is_empty) {
-                dbus.gateway = nmcli.gateway;
-            }
-            if dbus.dns.is_empty() {
-                dbus.dns = nmcli.dns;
+    match dbus {
+        Some(mut dbus) => {
+            if let Some(nmcli) = nmcli {
+                fill_missing_ip4_fields(&mut dbus, nmcli);
             }
             Some(dbus)
         }
-        (Some(dbus), None) => Some(dbus),
-        (None, Some(nmcli)) => Some(nmcli),
-        (None, None) => None,
+        None => nmcli,
+    }
+}
+
+fn fill_missing_ip4_fields(dbus: &mut Ip4Status, mut fallback: Ip4Status) {
+    if dbus.address.as_deref().is_none_or(str::is_empty) {
+        dbus.address = fallback.address.take();
+        dbus.prefix = fallback.prefix;
+    }
+    if dbus.gateway.as_deref().is_none_or(str::is_empty) {
+        dbus.gateway = fallback.gateway.take();
+    }
+    if dbus.dns.is_empty() {
+        dbus.dns = fallback.dns;
     }
 }
 

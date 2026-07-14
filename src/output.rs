@@ -1,9 +1,7 @@
-use std::fmt;
-use std::io::{self, Write};
-
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use std::fmt;
 
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport, ErrorSource};
 use crate::model::{
@@ -31,26 +29,6 @@ pub(crate) fn reported_error() -> anyhow::Error {
 
 pub(crate) fn is_reported_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<ApiErrorAlreadyReported>().is_some()
-}
-
-#[derive(Serialize)]
-#[serde(tag = "event", rename_all = "kebab-case")]
-pub(crate) enum StreamOutput<'a> {
-    Status {
-        message: String,
-    },
-    Warning {
-        message: String,
-    },
-    Snapshot {
-        scanning: bool,
-        networks_found: usize,
-        networks: &'a [NetworkEntry],
-    },
-    Complete {
-        timed_out: bool,
-        networks_found: usize,
-    },
 }
 
 macro_rules! print_api_data_fns {
@@ -226,46 +204,4 @@ fn print_pretty_json<T: Serialize + ?Sized>(value: &T, context: &'static str) ->
     })?;
     println!("{text}");
     Ok(())
-}
-
-pub(crate) fn emit_stream_event(event: &StreamOutput<'_>) -> Result<()> {
-    let mut value = serde_json::to_value(event).map_err(|error| {
-        DomainError::new(
-            ErrorCode::InternalError,
-            ErrorOperation::EmitEvent,
-            ErrorSource::Serialization,
-            format!("serialize JSON stream event: {error}"),
-        )
-        .with_cause(error.into())
-    })?;
-    if let Value::Object(object) = &mut value {
-        object.insert("protocol".to_string(), json!(API_PROTOCOL));
-        object.insert("version".to_string(), json!(API_VERSION));
-        object.insert("stream".to_string(), json!("wifi-scan"));
-    }
-
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-    serde_json::to_writer(&mut stdout, &value).map_err(|error| {
-        DomainError::new(
-            ErrorCode::InternalError,
-            ErrorOperation::EmitEvent,
-            ErrorSource::Serialization,
-            format!("write JSON event: {error}"),
-        )
-        .with_cause(error.into())
-    })?;
-    stdout.write_all(b"\n").map_err(event_io_error)?;
-    stdout.flush().map_err(event_io_error)?;
-    Ok(())
-}
-
-fn event_io_error(error: io::Error) -> DomainError {
-    DomainError::new(
-        ErrorCode::InternalError,
-        ErrorOperation::EmitEvent,
-        ErrorSource::Io,
-        format!("write JSON event: {error}"),
-    )
-    .with_cause(error.into())
 }

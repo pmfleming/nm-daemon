@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use zbus::blocking::{Connection, Proxy};
-use zvariant::{DynamicType, OwnedObjectPath, OwnedValue, Value};
+use zvariant::{OwnedObjectPath, OwnedValue};
 
 use crate::command::{CommandRunner, default_runner};
 use crate::error::{ErrorOperation, ensure_domain};
+use crate::nl80211::{KernelWirelessTelemetry, WirelessTelemetry};
 
 mod activate;
 mod connectivity;
@@ -20,7 +21,6 @@ mod wifi_settings;
 
 pub(crate) const NM_DEST: &str = "org.freedesktop.NetworkManager";
 pub(crate) const WIFI_IFACE: &str = "org.freedesktop.NetworkManager.Device.Wireless";
-pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub(super) const NM_PATH: &str = "/org/freedesktop/NetworkManager";
 pub(super) const NM_IFACE: &str = "org.freedesktop.NetworkManager";
@@ -37,13 +37,7 @@ pub(super) const NM_DEVICE_STATE_ACTIVATED: u32 = 100;
 pub(super) const NM_ACTIVE_CONNECTION_STATE_ACTIVATED: u32 = 2;
 
 pub(crate) type ConnectionSettings = HashMap<String, HashMap<String, OwnedValue>>;
-
-pub(super) fn owned_value<T>(value: T) -> Result<OwnedValue>
-where
-    T: Into<Value<'static>> + DynamicType,
-{
-    OwnedValue::try_from(Value::new(value)).context("create D-Bus variant value")
-}
+pub(super) use crate::variant::owned_value;
 
 #[derive(Debug, Clone)]
 pub(crate) struct WifiActivationStatus {
@@ -72,6 +66,7 @@ pub(crate) struct Nm {
     destination: String,
     commands: Arc<dyn CommandRunner>,
     events: Arc<events::NetworkEvents>,
+    wireless_telemetry: Arc<dyn WirelessTelemetry>,
 }
 
 impl Nm {
@@ -97,11 +92,26 @@ impl Nm {
         commands: Arc<dyn CommandRunner>,
         destination: impl Into<String>,
     ) -> Self {
+        Self::with_connection_runner_destination_and_telemetry(
+            conn,
+            commands,
+            destination,
+            Arc::new(KernelWirelessTelemetry),
+        )
+    }
+
+    pub(crate) fn with_connection_runner_destination_and_telemetry(
+        conn: Connection,
+        commands: Arc<dyn CommandRunner>,
+        destination: impl Into<String>,
+        wireless_telemetry: Arc<dyn WirelessTelemetry>,
+    ) -> Self {
         Self {
             events: events::NetworkEvents::start(conn.clone()),
             conn,
             destination: destination.into(),
             commands,
+            wireless_telemetry,
         }
     }
 
@@ -111,6 +121,10 @@ impl Nm {
 
     pub(crate) fn command_runner(&self) -> &dyn CommandRunner {
         self.commands.as_ref()
+    }
+
+    pub(crate) fn wireless_telemetry(&self) -> &dyn WirelessTelemetry {
+        self.wireless_telemetry.as_ref()
     }
 
     pub(crate) fn event_generation(&self) -> u64 {

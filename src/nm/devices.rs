@@ -38,6 +38,32 @@ impl Nm {
         Ok(Some(WifiDevice { path, iface }))
     }
 
+    pub(crate) fn active_target_matches(&self, target: &WifiConnectTarget) -> Result<bool> {
+        for device in self.wifi_devices_for_target(target)? {
+            if self.active_target_matches_on_device(&device, target)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn active_target_matches_on_device(
+        &self,
+        device: &WifiDevice,
+        target: &WifiConnectTarget,
+    ) -> Result<bool> {
+        let Some(active_path) = self.active_access_point(device)? else {
+            return Ok(false);
+        };
+        let ap = self.access_point(device, &active_path, true)?;
+        Ok(access_point_matches(
+            &ap,
+            target.ssid_bytes(),
+            target.ap_path.as_deref(),
+            target.bssid.as_deref(),
+        ))
+    }
+
     pub(crate) fn active_ssid_matches(&self, target: &WifiConnectTarget) -> Result<bool> {
         for device in self.wifi_devices_for_target(target)? {
             if self.active_ssid_matches_on_device(&device, target)? {
@@ -56,15 +82,17 @@ impl Nm {
             return Ok(false);
         };
         let ap = self.access_point(device, &active_path, true)?;
-        let target_ssid = target.ssid_bytes();
-        let matches = access_point_matches(
-            &ap,
-            target_ssid,
-            target.ap_path.as_deref(),
-            target.bssid.as_deref(),
-        );
+        let matches = ap.ssid_bytes == target.ssid_bytes();
         if matches {
-            tracing::debug!(ssid = %target.ssid, iface = %device.iface, bssid = %ap.bssid, ap_path = %ap.path, "target access point is active");
+            tracing::debug!(
+                ssid = %target.ssid,
+                iface = %device.iface,
+                active_bssid = %ap.bssid,
+                requested_bssid = ?target.bssid,
+                active_ap_path = %ap.path,
+                requested_ap_path = ?target.ap_path,
+                "target SSID is active; BSSID and AP path were activation hints"
+            );
         }
         Ok(matches)
     }

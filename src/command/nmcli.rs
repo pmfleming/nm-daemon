@@ -1,16 +1,13 @@
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::Result;
 use serde::Serialize;
 
-use super::{CommandFailure, CommandFailureKind, CommandRequest, CommandRunner};
-use crate::error::{ErrorCode, ErrorOperation, ErrorSource};
+use super::{CommandRequest, CommandRunner};
+use crate::error::ErrorOperation;
 use crate::model::Ip4Status;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(95);
-const NMCLI_CONNECT_WAIT_SECS: &str = "90";
 
 pub(crate) struct Nmcli<'a> {
     runner: &'a dyn CommandRunner,
@@ -19,29 +16,6 @@ pub(crate) struct Nmcli<'a> {
 impl<'a> Nmcli<'a> {
     pub(crate) fn new(runner: &'a dyn CommandRunner) -> Self {
         Self { runner }
-    }
-
-    pub(crate) fn connect(
-        &self,
-        args: &[&str],
-        cancellation: Option<&AtomicBool>,
-    ) -> Result<String> {
-        let mut request = CommandRequest::new("nmcli", ErrorOperation::RunNmcli, CONNECT_TIMEOUT)
-            .args(["--wait", NMCLI_CONNECT_WAIT_SECS]);
-        let mut sensitive = false;
-        for arg in args {
-            request = if sensitive {
-                sensitive = false;
-                request.sensitive_arg(*arg)
-            } else {
-                sensitive = *arg == "password";
-                request.arg(*arg)
-            };
-        }
-        self.runner
-            .run(&request, cancellation)
-            .map(|output| output.stdout)
-            .map_err(|failure| nmcli_failure(failure).into())
     }
 
     pub(crate) fn device_ip4(
@@ -160,30 +134,10 @@ fn parse_cidr(value: &str) -> (Option<String>, Option<u32>) {
     (Some(address.to_string()), prefix.parse().ok())
 }
 
-fn nmcli_failure(failure: CommandFailure) -> crate::error::DomainError {
-    if matches!(
-        failure.kind(),
-        CommandFailureKind::Timeout | CommandFailureKind::Cancelled
-    ) {
-        return failure.into_domain();
-    }
-    let code = match failure.exit_code() {
-        Some(3) => ErrorCode::Timeout,
-        Some(10) => ErrorCode::NotFound,
-        Some(4) => ErrorCode::ActivationFailed,
-        _ => ErrorCode::SubprocessFailed,
-    };
-    failure.into_domain_with_code(code, ErrorSource::Subprocess)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
-
     use super::*;
-    use crate::command::SystemCommandRunner;
     use crate::command::tests::FakeRunner;
-    use crate::error::{ErrorCode, ErrorReport};
 
     #[test]
     fn parses_escaped_active_wifi_rows() {
@@ -205,39 +159,5 @@ mod tests {
         assert_eq!(ip4.address.as_deref(), Some("192.168.178.119"));
         assert_eq!(ip4.prefix, Some(24));
         assert_eq!(ip4.dns.len(), 2);
-    }
-
-    #[test]
-    fn connect_password_is_redacted_by_the_gateway_request() {
-        let runner = FakeRunner::success("");
-        Nmcli::new(&runner)
-            .connect(
-                &["device", "wifi", "connect", "Cafe", "password", "secret"],
-                None,
-            )
-            .unwrap();
-        assert_eq!(
-            runner.redacted_args(),
-            [
-                "--wait",
-                "90",
-                "device",
-                "wifi",
-                "connect",
-                "Cafe",
-                "password",
-                "<redacted>"
-            ]
-        );
-    }
-
-    #[test]
-    fn connect_preserves_gateway_cancellation() {
-        let cancellation = AtomicBool::new(true);
-        let error = Nmcli::new(&SystemCommandRunner)
-            .connect(&["connection", "up", "id", "Cafe"], Some(&cancellation))
-            .unwrap_err();
-        let report = ErrorReport::from_error(&error, ErrorOperation::Connect);
-        assert_eq!(report.code, ErrorCode::Cancelled);
     }
 }

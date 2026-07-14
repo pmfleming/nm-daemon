@@ -7,6 +7,37 @@ use serde_json::{Map, Value, json};
 
 use crate::model::ConnectFailureReason;
 
+pub(crate) struct ErrorChain<'a, E: ?Sized>(&'a E);
+
+impl<E> fmt::Display for ErrorChain<'_, E>
+where
+    E: fmt::Display + ?Sized,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:#}", self.0)
+    }
+}
+
+pub(crate) fn err_chain<E>(error: &E) -> ErrorChain<'_, E>
+where
+    E: fmt::Display + ?Sized,
+{
+    ErrorChain(error)
+}
+
+pub(crate) fn best_effort<T>(
+    context: impl fmt::Display,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> Option<T> {
+    match operation() {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(error = %err_chain(&error), "{context}");
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ErrorCode {
@@ -81,7 +112,6 @@ pub(crate) enum ErrorOperation {
     ProfileOperation,
     Subscribe,
     SecretOperation,
-    RunNmcli,
     SerializeResponse,
     EmitEvent,
     Unknown,
@@ -324,16 +354,6 @@ impl ErrorReport {
         details.insert("source".to_string(), json!(self.source));
         Value::Object(details)
     }
-
-    pub(crate) fn detail_value(&self) -> Value {
-        json!({
-            "code": self.code,
-            "operation": self.operation,
-            "source": self.source,
-            "message": self.message,
-            "details": self.details,
-        })
-    }
 }
 
 pub(crate) fn find_domain_error(error: &Error) -> Option<&DomainError> {
@@ -361,92 +381,95 @@ pub(crate) fn operation_result<T>(
 }
 
 fn classify_concrete_source(error: &Error, operation: ErrorOperation) -> (ErrorCode, ErrorSource) {
-    if let Some(zbus_error) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<zbus::Error>())
-    {
-        return (zbus_error_code(zbus_error, operation), ErrorSource::Dbus);
+    if let Some(classification) = classify_zbus_source(error, operation) {
+        return classification;
     }
-    if let Some(io_error) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<io::Error>())
-    {
-        let code = if io_error.kind() == io::ErrorKind::TimedOut {
-            ErrorCode::Timeout
-        } else {
-            ErrorCode::InternalError
-        };
-        return (code, ErrorSource::Io);
+    if let Some(classification) = classify_io_source(error) {
+        return classification;
     }
-    if error
-        .chain()
-        .any(|cause| cause.downcast_ref::<serde_json::Error>().is_some())
-    {
-        let code = if operation == ErrorOperation::ParseRequest {
-            ErrorCode::ValidationError
-        } else {
-            ErrorCode::InternalError
-        };
-        let source = if operation == ErrorOperation::ParseRequest {
-            ErrorSource::Validation
-        } else {
-            ErrorSource::Serialization
-        };
-        return (code, source);
+    if contains_json_error(error) {
+        return json_source_classification(operation);
     }
     (ErrorCode::InternalError, ErrorSource::Internal)
 }
 
+fn classify_zbus_source(
+    error: &Error,
+    operation: ErrorOperation,
+) -> Option<(ErrorCode, ErrorSource)> {
+    let error = find_cause::<zbus::Error>(error)?;
+    Some((zbus_error_code(error, operation), ErrorSource::Dbus))
+}
+
+fn classify_io_source(error: &Error) -> Option<(ErrorCode, ErrorSource)> {
+    let error = find_cause::<io::Error>(error)?;
+    let code = if error.kind() == io::ErrorKind::TimedOut {
+        ErrorCode::Timeout
+    } else {
+        ErrorCode::InternalError
+    };
+    Some((code, ErrorSource::Io))
+}
+
+fn contains_json_error(error: &Error) -> bool {
+    find_cause::<serde_json::Error>(error).is_some()
+}
+
+fn json_source_classification(operation: ErrorOperation) -> (ErrorCode, ErrorSource) {
+    if operation == ErrorOperation::ParseRequest {
+        (ErrorCode::ValidationError, ErrorSource::Validation)
+    } else {
+        (ErrorCode::InternalError, ErrorSource::Serialization)
+    }
+}
+
+fn find_cause<E>(error: &Error) -> Option<&E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    error.chain().find_map(|cause| cause.downcast_ref::<E>())
+}
+
 fn concrete_source_details(error: &Error) -> Map<String, Value> {
-    let mut details = Map::new();
-    if let Some(zbus_error) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<zbus::Error>())
-    {
-        match zbus_error {
-            zbus::Error::MethodError(name, _, _) => {
-                details.insert("dbus_error_name".to_string(), json!(name.as_str()));
-            }
-            zbus::Error::InputOutput(error) => {
-                details.insert("io_kind".to_string(), json!(format!("{:?}", error.kind())));
-                if let Some(code) = error.raw_os_error() {
-                    details.insert("os_error".to_string(), json!(code));
-                }
-            }
-            _ => {
-                details.insert(
-                    "dbus_error_kind".to_string(),
-                    json!(format!("{zbus_error:?}")),
-                );
-            }
-        }
-        return details;
+    if let Some(error) = find_cause::<zbus::Error>(error) {
+        return zbus_source_details(error);
     }
-    if let Some(io_error) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<io::Error>())
-    {
-        details.insert(
-            "io_kind".to_string(),
-            json!(format!("{:?}", io_error.kind())),
-        );
-        if let Some(code) = io_error.raw_os_error() {
-            details.insert("os_error".to_string(), json!(code));
-        }
-        return details;
+    if let Some(error) = find_cause::<io::Error>(error) {
+        return io_source_details(error);
     }
-    if let Some(json_error) = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<serde_json::Error>())
-    {
-        details.insert("line".to_string(), json!(json_error.line()));
-        details.insert("column".to_string(), json!(json_error.column()));
-        details.insert(
-            "json_error_category".to_string(),
-            json!(format!("{:?}", json_error.classify()).to_lowercase()),
-        );
+    find_cause::<serde_json::Error>(error)
+        .map(json_source_details)
+        .unwrap_or_default()
+}
+
+fn zbus_source_details(error: &zbus::Error) -> Map<String, Value> {
+    match error {
+        zbus::Error::MethodError(name, _, _) => {
+            Map::from_iter([("dbus_error_name".to_string(), json!(name.as_str()))])
+        }
+        zbus::Error::InputOutput(error) => io_source_details(error),
+        _ => Map::from_iter([("dbus_error_kind".to_string(), json!(format!("{error:?}")))]),
+    }
+}
+
+fn io_source_details(error: &io::Error) -> Map<String, Value> {
+    let mut details =
+        Map::from_iter([("io_kind".to_string(), json!(format!("{:?}", error.kind())))]);
+    if let Some(code) = error.raw_os_error() {
+        details.insert("os_error".to_string(), json!(code));
     }
     details
+}
+
+fn json_source_details(error: &serde_json::Error) -> Map<String, Value> {
+    Map::from_iter([
+        ("line".to_string(), json!(error.line())),
+        ("column".to_string(), json!(error.column())),
+        (
+            "json_error_category".to_string(),
+            json!(format!("{:?}", error.classify()).to_lowercase()),
+        ),
+    ])
 }
 
 fn zbus_error_code(error: &zbus::Error, operation: ErrorOperation) -> ErrorCode {

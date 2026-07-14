@@ -5,12 +5,12 @@ use anyhow::Result;
 
 use crate::application::{
     Application, ConnectOutcome, ConnectRequest, NetworksRequest, ProfileOperation,
-    ProfileOperationResult, ScanRequest, validated_ssids,
+    ProfileOperationResult, ScanRequest,
 };
 use crate::background_scan::InlineBackgroundScan;
 use crate::cli::{ConnectOptions, ConnectTargetOptions, ProfileCommand, ScanOptions};
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
-use crate::model::{ScanStreamOptions, Ssid, WepKeyType, WifiConnectTarget};
+use crate::model::{Ssid, WepKeyType, WifiConnectTarget};
 use crate::nm::Nm;
 use crate::output::{
     print_access_points_json, print_api_message, print_connect_failure, print_connect_result,
@@ -86,40 +86,24 @@ fn resolve_password(password_stdin: bool) -> Result<Option<String>> {
 }
 
 pub(crate) fn run_scan(nm: &Nm, options: ScanOptions) -> Result<()> {
+    log_scan_options(&options);
+    let timeout = Duration::from_secs(options.timeout);
+    run_single_scan(nm, options, timeout)
+}
+
+fn log_scan_options(options: &ScanOptions) {
     tracing::info!(
         options.timeout,
-        options.stream,
         options.strict,
-        options.retries,
         options.cache,
         options.quiet,
         ifname = ?options.ifname,
         ssid_count = options.ssids.len(),
         "running Wi-Fi scan"
     );
-    if options.stream && options.quiet {
-        return Err(DomainError::validation(
-            ErrorOperation::Scan,
-            "--quiet cannot be used with --stream",
-        )
-        .with_detail("field", "quiet")
-        .into());
-    }
-    let timeout = Duration::from_secs(options.timeout);
-    if options.stream {
-        return nm.scan_stream(ScanStreamOptions {
-            timeout,
-            retries: options.retries,
-            cache: options.cache,
-            ifname: options.ifname,
-            ssid_bytes: validated_ssids(options.ssids).map_err(|error| {
-                DomainError::validation(ErrorOperation::Scan, &error)
-                    .with_detail("field", "ssid")
-                    .with_cause(error)
-            })?,
-        });
-    }
+}
 
+fn run_single_scan(nm: &Nm, options: ScanOptions, timeout: Duration) -> Result<()> {
     let result = Application::new(nm).scan(
         ScanRequest {
             timeout,
@@ -128,19 +112,24 @@ pub(crate) fn run_scan(nm: &Nm, options: ScanOptions) -> Result<()> {
             ifname: options.ifname,
             ssids: options.ssids,
         },
+        None,
         |_| Ok(()),
     )?;
-    if let Some(warning) = result.warning.as_ref() {
+    report_scan_warning(result.warning.as_ref());
+    if options.quiet {
+        return Ok(());
+    }
+    print_access_points_json(&result.access_points)
+}
+
+fn report_scan_warning(warning: Option<&crate::error::ErrorReport>) {
+    if let Some(warning) = warning {
         tracing::warn!(error = %warning.message, code = ?warning.code, "scan failed");
         eprintln!(
             "warning: scan failed: {}; showing cached NetworkManager results",
             warning.message
         );
     }
-    if options.quiet {
-        return Ok(());
-    }
-    print_access_points_json(&result.access_points)
 }
 
 pub(crate) fn print_saved_profiles(nm: &Nm) -> Result<()> {
@@ -231,6 +220,11 @@ struct ConnectTargetStdinRequest {
 }
 
 fn connect_target_request(options: ConnectTargetOptions) -> Result<ConnectRequest> {
+    let request_json = read_connect_target_json()?;
+    parse_connect_target_request(&request_json, options.wep_key_type)
+}
+
+fn read_connect_target_json() -> Result<String> {
     let mut request_json = String::new();
     io::stdin()
         .read_to_string(&mut request_json)
@@ -244,7 +238,7 @@ fn connect_target_request(options: ConnectTargetOptions) -> Result<ConnectReques
             .with_detail("transport", "stdin")
             .with_cause(error.into())
         })?;
-    let request_json = request_json.trim();
+    let request_json = request_json.trim().to_string();
     if request_json.is_empty() {
         return Err(DomainError::validation(
             ErrorOperation::ParseRequest,
@@ -253,28 +247,42 @@ fn connect_target_request(options: ConnectTargetOptions) -> Result<ConnectReques
         .with_detail("transport", "stdin")
         .into());
     }
+    Ok(request_json)
+}
 
+fn parse_connect_target_request(
+    request_json: &str,
+    wep_key_type: Option<WepKeyType>,
+) -> Result<ConnectRequest> {
     match serde_json::from_str::<ConnectTargetStdinRequest>(request_json) {
         Ok(request) => Ok(ConnectRequest {
             target: request.target,
             password: request.password,
-            wep_key_type: request.wep_key_type.or(options.wep_key_type),
+            wep_key_type: request.wep_key_type.or(wep_key_type),
         }),
-        Err(request_err) => match serde_json::from_str::<WifiConnectTarget>(request_json) {
-            Ok(target) => Ok(ConnectRequest {
-                target,
-                password: None,
-                wep_key_type: options.wep_key_type,
-            }),
-            Err(target_err) => Err(DomainError::validation(
+        Err(request_error) => parse_bare_connect_target(request_json, wep_key_type, request_error),
+    }
+}
+
+fn parse_bare_connect_target(
+    request_json: &str,
+    wep_key_type: Option<WepKeyType>,
+    request_error: serde_json::Error,
+) -> Result<ConnectRequest> {
+    let target =
+        serde_json::from_str::<WifiConnectTarget>(request_json).map_err(|target_error| {
+            DomainError::validation(
                 ErrorOperation::ParseRequest,
                 "invalid Wi-Fi connect target request JSON",
             )
             .with_detail("transport", "stdin")
-            .with_detail("request_error", request_err.to_string())
-            .with_detail("target_error", target_err.to_string())
-            .with_cause(target_err.into())
-            .into()),
-        },
-    }
+            .with_detail("request_error", request_error.to_string())
+            .with_detail("target_error", target_error.to_string())
+            .with_cause(target_error.into())
+        })?;
+    Ok(ConnectRequest {
+        target,
+        password: None,
+        wep_key_type,
+    })
 }

@@ -1,6 +1,7 @@
 mod actions;
 mod app;
 mod application;
+mod auth;
 mod background_scan;
 mod cache;
 mod cli;
@@ -23,16 +24,16 @@ mod daemon_status;
 mod deadline;
 mod diagnose;
 mod error;
+mod forget;
 mod keyring;
 mod logging;
 mod model;
+mod nl80211;
 mod nm;
 mod output;
 mod protocol;
 mod qr;
-mod stream;
-mod stream_emit;
-mod stream_watch;
+mod variant;
 
 #[cfg(test)]
 mod test_support;

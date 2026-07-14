@@ -32,79 +32,115 @@ pub(crate) fn wait_for_active_target(
         tracing::debug!(ssid = %target.ssid, iface = %device.iface, device = %device.path, "cached activation device for signal-assisted wait loop");
     }
     let deadline = Deadline::from_now(ACTIVATION_TIMEOUT);
-    let mut saw_progress = false;
-    let mut possible_failure_since = None;
-    let mut last_status = None;
+    let mut wait = ActivationWait::default();
     let mut event_generation = nm.event_generation();
     while !deadline.expired() {
         check_cancelled_and_abort(nm, cancellation)?;
-        let target_matches = active_target_matches(nm, activation_device.as_ref(), target)?;
-        if let Some(status) = activation_status(nm, activation_device.as_ref(), target)? {
-            saw_progress |= status.device_state > 30;
-            if target_matches && status.activated() {
-                tracing::info!(ssid = %target.ssid, iface = %status.iface, "target Wi-Fi network is fully activated");
-                return Ok(());
-            }
-            log_activation_progress(target, &status, target_matches);
-            if saw_progress && status.terminal_failure_after_progress() {
-                let failure_since = possible_failure_since.get_or_insert_with(Instant::now);
-                if failure_since.elapsed() >= ACTIVATION_FAILURE_GRACE {
-                    let reason = activation_failure_reason(target, &status);
-                    return Err(connect_failure(
-                        reason,
-                        activation_failure_message(target, &status, reason),
-                    ));
-                }
-            } else {
-                possible_failure_since = None;
-            }
-            tracing::debug!(
-                ssid = %target.ssid,
-                iface = %status.iface,
-                device_state = status.device_state,
-                device_state_reason = ?status.device_state_reason,
-                active_connection_state = ?status.active_connection_state,
-                "activation status update"
-            );
-            last_status = Some(status);
-        } else if target_matches {
-            tracing::info!(ssid = %target.ssid, "target Wi-Fi network is active; activation status unavailable");
+        let ssid_matches = active_ssid_matches(nm, activation_device.as_ref(), target)?;
+        let status = activation_status(nm, activation_device.as_ref(), target)?;
+        if wait.observe(target, status, ssid_matches)? {
             return Ok(());
         }
         check_cancelled_and_abort(nm, cancellation)?;
         event_generation = nm.wait_for_event(event_generation, deadline.wait(Duration::MAX));
     }
-    if let Some(status) = last_status {
-        let reason = timeout_failure_reason(target, &status);
-        return Err(connect_failure(
-            reason,
-            activation_timeout_message(target, &status, reason),
-        ));
+    Err(wait.timeout_error(target))
+}
+
+#[derive(Default)]
+struct ActivationWait {
+    saw_progress: bool,
+    possible_failure_since: Option<Instant>,
+    last_status: Option<crate::nm::WifiActivationStatus>,
+}
+
+impl ActivationWait {
+    fn observe(
+        &mut self,
+        target: &WifiConnectTarget,
+        status: Option<crate::nm::WifiActivationStatus>,
+        ssid_matches: bool,
+    ) -> Result<bool> {
+        let Some(status) = status else {
+            if ssid_matches {
+                tracing::info!(ssid = %target.ssid, requested_bssid = ?target.bssid, "target SSID is active; activation status unavailable");
+            }
+            return Ok(ssid_matches);
+        };
+
+        self.saw_progress |= status.device_state > 30;
+        if ssid_matches && status.activated() {
+            tracing::info!(ssid = %target.ssid, iface = %status.iface, requested_bssid = ?target.bssid, "target SSID is fully activated");
+            return Ok(true);
+        }
+        log_activation_progress(target, &status, ssid_matches);
+        self.check_terminal_failure(target, &status)?;
+        log_activation_status(target, &status);
+        self.last_status = Some(status);
+        Ok(false)
     }
-    Err(connect_failure(
-        ConnectFailureReason::Timeout,
-        format!("timed out waiting for {} to become active", target.ssid),
-    ))
+
+    fn check_terminal_failure(
+        &mut self,
+        target: &WifiConnectTarget,
+        status: &crate::nm::WifiActivationStatus,
+    ) -> Result<()> {
+        if !(self.saw_progress && status.terminal_failure_after_progress()) {
+            self.possible_failure_since = None;
+            return Ok(());
+        }
+        let failure_since = self.possible_failure_since.get_or_insert_with(Instant::now);
+        if failure_since.elapsed() < ACTIVATION_FAILURE_GRACE {
+            return Ok(());
+        }
+        let reason = activation_failure_reason(target, status);
+        Err(connect_failure(
+            reason,
+            activation_failure_message(target, status, reason),
+        ))
+    }
+
+    fn timeout_error(self, target: &WifiConnectTarget) -> anyhow::Error {
+        let Some(status) = self.last_status else {
+            return connect_failure(
+                ConnectFailureReason::Timeout,
+                format!("timed out waiting for {} to become active", target.ssid),
+            );
+        };
+        let reason = timeout_failure_reason(target, &status);
+        connect_failure(reason, activation_timeout_message(target, &status, reason))
+    }
+}
+
+fn log_activation_status(target: &WifiConnectTarget, status: &crate::nm::WifiActivationStatus) {
+    tracing::debug!(
+        ssid = %target.ssid,
+        iface = %status.iface,
+        device_state = status.device_state,
+        device_state_reason = ?status.device_state_reason,
+        active_connection_state = ?status.active_connection_state,
+        "activation status update"
+    );
 }
 
 fn log_activation_progress(
     target: &WifiConnectTarget,
     status: &crate::nm::WifiActivationStatus,
-    target_matches: bool,
+    ssid_matches: bool,
 ) {
-    if target_matches {
+    if ssid_matches {
         tracing::debug!(
             ssid = %target.ssid,
             iface = %status.iface,
             device_state = status.device_state,
             active_connection_state = ?status.active_connection_state,
-            "target access point is selected; waiting for NetworkManager activation to finish"
+            "target SSID is selected; waiting for NetworkManager activation to finish"
         );
     } else if status.activated() {
         tracing::debug!(
             ssid = %target.ssid,
             iface = %status.iface,
-            "device reports activation complete, waiting for active AP identity to match target"
+            "device reports activation complete, waiting for active SSID identity to match target"
         );
     }
 }
@@ -208,7 +244,7 @@ fn target_radio_details(target: &WifiConnectTarget) -> String {
         .unwrap_or_default()
 }
 
-fn active_target_matches(
+fn active_ssid_matches(
     nm: &Nm,
     activation_device: Option<&crate::model::WifiDevice>,
     target: &WifiConnectTarget,

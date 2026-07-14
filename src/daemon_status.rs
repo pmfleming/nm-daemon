@@ -2,7 +2,7 @@ use serde_json::{Map, Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::Application;
-use crate::daemon::emit_json_event_best_effort;
+use crate::daemon::emit_json_event_nonfatal;
 use crate::daemon_runtime::SharedPayloads;
 use crate::nm::Nm;
 use crate::protocol::{Method, Stream, StreamDelivery};
@@ -105,7 +105,7 @@ fn log_typed_refresh_error<T>(result: anyhow::Result<T>) -> Option<T> {
     match result {
         Ok(value) => Some(value),
         Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "shared subscription refresh failed");
+            tracing::warn!(error = %crate::error::err_chain(&error), "shared subscription refresh failed");
             None
         }
     }
@@ -115,7 +115,7 @@ fn log_refresh_error(result: anyhow::Result<Value>) -> Option<Value> {
     match result {
         Ok(value) => Some(value),
         Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "shared subscription refresh failed");
+            tracing::warn!(error = %crate::error::err_chain(&error), "shared subscription refresh failed");
             None
         }
     }
@@ -136,7 +136,7 @@ fn emit_on_change(
     let mut payload = Map::new();
     payload.insert("subscription_id".to_string(), json!(subscription_id));
     payload.insert(method.spec().response_key.to_string(), value.clone());
-    emit_json_event_best_effort(
+    emit_json_event_nonfatal(
         emitter,
         stream,
         Some(subscription_id),

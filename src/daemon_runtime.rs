@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::Value;
@@ -40,6 +40,7 @@ impl CancelOutcome {
 
 struct TaskHandle {
     kind: TaskKind,
+    target_ssid: Option<Vec<u8>>,
     cancellation: Arc<AtomicBool>,
 }
 
@@ -48,6 +49,7 @@ pub(crate) struct DaemonRuntime {
     work: SyncSender<Job>,
     control: SyncSender<Control>,
     tasks: Mutex<HashMap<String, TaskHandle>>,
+    tasks_changed: Condvar,
     cache_refresh_pending: AtomicBool,
 }
 
@@ -63,6 +65,7 @@ impl DaemonRuntime {
             work: work_tx,
             control: control_tx,
             tasks: Mutex::new(HashMap::new()),
+            tasks_changed: Condvar::new(),
             cache_refresh_pending: AtomicBool::new(false),
         });
         start_event_loop(Arc::downgrade(&runtime), control_rx);
@@ -99,6 +102,7 @@ impl DaemonRuntime {
         self: &Arc<Self>,
         request_id: String,
         kind: TaskKind,
+        target_ssid: Option<Vec<u8>>,
         task: impl FnOnce(&Nm, &AtomicBool) + Send + 'static,
     ) -> Result<()> {
         let cancellation = Arc::new(AtomicBool::new(false));
@@ -106,6 +110,7 @@ impl DaemonRuntime {
             request_id.clone(),
             TaskHandle {
                 kind,
+                target_ssid,
                 cancellation: Arc::clone(&cancellation),
             },
         );
@@ -122,6 +127,7 @@ impl DaemonRuntime {
                         .lock()
                         .expect("daemon task map poisoned")
                         .remove(&request_id);
+                    runtime.tasks_changed.notify_all();
                 }
             }),
         );
@@ -130,8 +136,64 @@ impl DaemonRuntime {
                 .lock()
                 .expect("daemon task map poisoned")
                 .retain(|_, handle| !Arc::ptr_eq(&handle.cancellation, &cancellation));
+            self.tasks_changed.notify_all();
         }
         submit
+    }
+
+    pub(crate) fn cancel_connects_for_ssid(
+        &self,
+        forget_request_id: &str,
+        ssid: &[u8],
+    ) -> Vec<String> {
+        let mut tasks = self.tasks.lock().expect("daemon task map poisoned");
+        let mut request_ids = tasks
+            .iter_mut()
+            .filter_map(|(request_id, handle)| {
+                (handle.kind == TaskKind::Connect && handle.target_ssid.as_deref() == Some(ssid))
+                    .then(|| {
+                        handle.cancellation.store(true, Ordering::Relaxed);
+                        request_id.clone()
+                    })
+            })
+            .collect::<Vec<_>>();
+        request_ids.sort();
+        drop(tasks);
+        if !request_ids.is_empty() {
+            tracing::info!(
+                request_id = forget_request_id,
+                connect_request_ids = ?request_ids,
+                requests = request_ids.len(),
+                "cancelling in-flight Wi-Fi connections before forget"
+            );
+            self.nm.wake_waiters();
+        }
+        request_ids
+    }
+
+    pub(crate) fn wait_for_tasks(&self, request_ids: &[String], timeout: Duration) -> Vec<String> {
+        if request_ids.is_empty() {
+            return Vec::new();
+        }
+        let deadline = Instant::now() + timeout;
+        let mut tasks = self.tasks.lock().expect("daemon task map poisoned");
+        loop {
+            let mut pending = request_ids
+                .iter()
+                .filter(|request_id| tasks.contains_key(*request_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            pending.sort();
+            if pending.is_empty() || Instant::now() >= deadline {
+                return pending;
+            }
+            let wait = deadline.saturating_duration_since(Instant::now());
+            let (next_tasks, _) = self
+                .tasks_changed
+                .wait_timeout(tasks, wait)
+                .expect("daemon task map poisoned while waiting for cancellation");
+            tasks = next_tasks;
+        }
     }
 
     pub(crate) fn subscribe(
@@ -154,55 +216,58 @@ impl DaemonRuntime {
     }
 
     pub(crate) fn cancel(&self, request_id: &str) -> CancelOutcome {
-        let task_kind = self
-            .tasks
+        let task_kind = self.cancel_task(request_id);
+        self.nm.wake_waiters();
+        self.abort_cancelled_connect(request_id, task_kind);
+        self.cancel_subscription(request_id, task_kind.is_some())
+    }
+
+    fn cancel_task(&self, request_id: &str) -> Option<TaskKind> {
+        self.tasks
             .lock()
             .expect("daemon task map poisoned")
             .get(request_id)
             .map(|task| {
                 task.cancellation.store(true, Ordering::Relaxed);
                 task.kind
-            });
-        self.nm.wake_waiters();
+            })
+    }
 
-        if task_kind == Some(TaskKind::Connect) {
-            let request_id = request_id.to_string();
-            if let Err(error) = self.submit(
-                ErrorOperation::Disconnect,
-                Box::new(move |nm| match Application::new(nm).disconnect() {
-                    Ok(result) => tracing::info!(
-                        %request_id,
-                        message = %result.message,
-                        "aborted NetworkManager activation after cancellation"
-                    ),
-                    Err(error) => tracing::warn!(
-                        %request_id,
-                        error = %format_args!("{error:#}"),
-                        "failed to abort NetworkManager activation after cancellation"
-                    ),
-                }),
-            ) {
-                tracing::warn!(error = %format_args!("{error:#}"), "could not queue activation abort");
-            }
+    fn abort_cancelled_connect(&self, request_id: &str, task_kind: Option<TaskKind>) {
+        if task_kind == Some(TaskKind::Connect)
+            && let Err(error) = self.submit_activation_abort(request_id.to_string())
+        {
+            tracing::warn!(error = %crate::error::err_chain(&error), "could not queue activation abort");
         }
+    }
 
+    fn submit_activation_abort(&self, request_id: String) -> Result<()> {
+        self.submit(
+            ErrorOperation::Disconnect,
+            Box::new(move |nm| {
+                log_activation_abort(&request_id, Application::new(nm).disconnect())
+            }),
+        )
+    }
+
+    fn cancel_subscription(&self, request_id: &str, task_found: bool) -> CancelOutcome {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         if self
             .control
             .try_send(Control::CancelSubscription {
                 id: request_id.to_string(),
-                task_found: task_kind.is_some(),
+                task_found,
                 reply: reply_tx,
             })
             .is_err()
         {
             return CancelOutcome {
-                task: task_kind.is_some(),
+                task: task_found,
                 subscription: false,
             };
         }
         reply_rx.recv().unwrap_or(CancelOutcome {
-            task: task_kind.is_some(),
+            task: task_found,
             subscription: false,
         })
     }
@@ -240,10 +305,11 @@ impl DaemonRuntime {
                         ifname: None,
                         ssids: Vec::new(),
                     },
+                    None,
                     |_| Ok(()),
                 );
                 if let Err(error) = result {
-                    tracing::warn!(error = %format_args!("{error:#}"), "daemon cache refresh failed");
+                    tracing::warn!(error = %crate::error::err_chain(&error), "daemon cache refresh failed");
                 }
                 if let Some(runtime) = runtime.upgrade() {
                     runtime
@@ -254,7 +320,7 @@ impl DaemonRuntime {
         );
         if let Err(error) = submit {
             self.cache_refresh_pending.store(false, Ordering::Release);
-            tracing::warn!(error = %format_args!("{error:#}"), "could not queue daemon cache refresh");
+            tracing::warn!(error = %crate::error::err_chain(&error), "could not queue daemon cache refresh");
         }
     }
 
@@ -330,53 +396,95 @@ fn start_workers(nm: Arc<Nm>, receiver: Receiver<Job>) {
 fn start_event_loop(runtime: Weak<DaemonRuntime>, receiver: Receiver<Control>) {
     std::thread::Builder::new()
         .name("nm-runtime".to_string())
-        .spawn(move || {
-            let mut subscriptions = HashMap::<String, SubscriptionState>::new();
-            let mut refresh = RefreshGate::default();
-            while let Ok(control) = receiver.recv() {
-                let Some(runtime) = runtime.upgrade() else {
-                    break;
-                };
-                match control {
-                    Control::Subscribe {
-                        subscription,
-                        reply,
-                    } => {
-                        subscriptions.insert(subscription.id().to_string(), subscription);
-                        let _ = reply.send(());
-                        request_shared_refresh(&runtime, &subscriptions, &mut refresh);
-                    }
-                    Control::CancelSubscription {
-                        id,
-                        task_found,
-                        reply,
-                    } => {
-                        let subscription = subscriptions.remove(&id);
-                        let subscription_found = subscription.is_some();
-                        let _ = reply.send(CancelOutcome {
-                            task: task_found,
-                            subscription: subscription_found,
-                        });
-                    }
-                    Control::DropOwner(owner) => {
-                        subscriptions.retain(|_, subscription| !subscription.owned_by(&owner));
-                    }
-                    Control::NetworkChanged => {
-                        request_shared_refresh(&runtime, &subscriptions, &mut refresh)
-                    }
-                    Control::Refreshed(payloads) => {
-                        let refresh_again = refresh.complete();
-                        for subscription in subscriptions.values_mut() {
-                            subscription.emit_changes(&payloads);
-                        }
-                        if refresh_again {
-                            request_shared_refresh(&runtime, &subscriptions, &mut refresh);
-                        }
-                    }
-                }
-            }
-        })
+        .spawn(move || run_event_loop(runtime, receiver))
         .expect("spawn daemon event runtime");
+}
+
+fn run_event_loop(runtime: Weak<DaemonRuntime>, receiver: Receiver<Control>) {
+    let mut subscriptions = HashMap::<String, SubscriptionState>::new();
+    let mut refresh = RefreshGate::default();
+    while let Some((runtime, control)) = next_control(&runtime, &receiver) {
+        handle_control(control, &runtime, &mut subscriptions, &mut refresh);
+    }
+}
+
+fn next_control(
+    runtime: &Weak<DaemonRuntime>,
+    receiver: &Receiver<Control>,
+) -> Option<(Arc<DaemonRuntime>, Control)> {
+    let control = receiver.recv().ok()?;
+    Some((runtime.upgrade()?, control))
+}
+
+fn handle_control(
+    control: Control,
+    runtime: &Arc<DaemonRuntime>,
+    subscriptions: &mut HashMap<String, SubscriptionState>,
+    refresh: &mut RefreshGate,
+) {
+    match control {
+        Control::Subscribe {
+            subscription,
+            reply,
+        } => add_subscription(subscription, reply, runtime, subscriptions, refresh),
+        Control::CancelSubscription {
+            id,
+            task_found,
+            reply,
+        } => remove_subscription(id, task_found, reply, subscriptions),
+        Control::DropOwner(owner) => drop_subscriptions_for_owner(&owner, subscriptions),
+        Control::NetworkChanged => request_shared_refresh(runtime, subscriptions, refresh),
+        Control::Refreshed(payloads) => {
+            complete_shared_refresh(payloads, runtime, subscriptions, refresh)
+        }
+    }
+}
+
+fn add_subscription(
+    subscription: SubscriptionState,
+    reply: SyncSender<()>,
+    runtime: &Arc<DaemonRuntime>,
+    subscriptions: &mut HashMap<String, SubscriptionState>,
+    refresh: &mut RefreshGate,
+) {
+    subscriptions.insert(subscription.id().to_string(), subscription);
+    let _ = reply.send(());
+    request_shared_refresh(runtime, subscriptions, refresh);
+}
+
+fn remove_subscription(
+    id: String,
+    task_found: bool,
+    reply: SyncSender<CancelOutcome>,
+    subscriptions: &mut HashMap<String, SubscriptionState>,
+) {
+    let subscription = subscriptions.remove(&id);
+    let _ = reply.send(CancelOutcome {
+        task: task_found,
+        subscription: subscription.is_some(),
+    });
+}
+
+fn drop_subscriptions_for_owner(
+    owner: &str,
+    subscriptions: &mut HashMap<String, SubscriptionState>,
+) {
+    subscriptions.retain(|_, subscription| !subscription.owned_by(owner));
+}
+
+fn complete_shared_refresh(
+    payloads: SharedPayloads,
+    runtime: &Arc<DaemonRuntime>,
+    subscriptions: &mut HashMap<String, SubscriptionState>,
+    refresh: &mut RefreshGate,
+) {
+    let refresh_again = refresh.complete();
+    subscriptions
+        .values_mut()
+        .for_each(|subscription| subscription.emit_changes(&payloads));
+    if refresh_again {
+        request_shared_refresh(runtime, subscriptions, refresh);
+    }
 }
 
 fn request_shared_refresh(
@@ -387,15 +495,31 @@ fn request_shared_refresh(
     if !refresh.invalidate() || subscriptions.is_empty() {
         return;
     }
-    let need_status = subscriptions
-        .values()
-        .any(|subscription| subscription.watches(Stream::WifiStatus));
-    let need_connectivity = subscriptions
-        .values()
-        .any(|subscription| subscription.watches(Stream::NetworkConnectivity));
+    let (need_status, need_connectivity) = required_shared_payloads(subscriptions);
     if !need_status && !need_connectivity {
         return;
     }
+    submit_shared_refresh(runtime, refresh, need_status, need_connectivity);
+}
+
+fn required_shared_payloads(subscriptions: &HashMap<String, SubscriptionState>) -> (bool, bool) {
+    let watches = |stream| {
+        subscriptions
+            .values()
+            .any(|subscription| subscription.watches(stream))
+    };
+    (
+        watches(Stream::WifiStatus),
+        watches(Stream::NetworkConnectivity),
+    )
+}
+
+fn submit_shared_refresh(
+    runtime: &Arc<DaemonRuntime>,
+    refresh: &mut RefreshGate,
+    need_status: bool,
+    need_connectivity: bool,
+) {
     let control = runtime.control.clone();
     match runtime.submit(
         ErrorOperation::Status,
@@ -406,7 +530,18 @@ fn request_shared_refresh(
     ) {
         Ok(()) => refresh.started(),
         Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "could not queue shared status refresh");
+            tracing::warn!(error = %crate::error::err_chain(&error), "could not queue shared status refresh");
+        }
+    }
+}
+
+fn log_activation_abort(request_id: &str, result: Result<crate::model::DisconnectResult>) {
+    match result {
+        Ok(result) => {
+            tracing::info!(%request_id, message = %result.message, "aborted NetworkManager activation after cancellation")
+        }
+        Err(error) => {
+            tracing::warn!(%request_id, error = %crate::error::err_chain(&error), "failed to abort NetworkManager activation after cancellation")
         }
     }
 }

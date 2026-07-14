@@ -16,9 +16,8 @@
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
-            nativeBuildInputs = with pkgs; [ makeWrapper pkg-config ];
+            nativeBuildInputs = with pkgs; [ pkg-config ];
             postInstall = ''
-              wrapProgram $out/bin/nm-daemon --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.iw ]}
               install -Dm644 ${./packaging/systemd/nm-daemon.service} $out/share/systemd/user/nm-daemon.service
               substituteInPlace $out/share/systemd/user/nm-daemon.service --replace-fail @out@ $out
             '';
@@ -73,7 +72,6 @@
             cargo
             clippy
             gcc
-            iw
             just
             pkg-config
             rust-analyzer

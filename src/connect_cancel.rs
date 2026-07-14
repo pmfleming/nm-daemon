@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::error::DomainError;
+use crate::error::{DomainError, best_effort};
 use crate::nm::Nm;
 
 pub(crate) fn cancellation_is_set(cancellation: Option<&AtomicBool>) -> bool {
@@ -20,7 +20,7 @@ pub(crate) fn check_cancelled_and_abort(nm: &Nm, cancellation: Option<&AtomicBoo
     if !cancellation_is_set(cancellation) {
         return Ok(());
     }
-    abort_activation_best_effort(nm);
+    abort_activation(nm);
     cancelled_error()
 }
 
@@ -28,13 +28,11 @@ pub(crate) fn cancelled_error<T>() -> Result<T> {
     Err(DomainError::cancelled("connection attempt cancelled").into())
 }
 
-pub(crate) fn abort_activation_best_effort(nm: &Nm) {
-    match nm.disconnect_wifi() {
-        Ok(result) => {
-            tracing::info!(message = %result.message, "aborted Wi-Fi activation after cancellation")
-        }
-        Err(err) => {
-            tracing::warn!(error = %format_args!("{err:#}"), "failed to abort Wi-Fi activation after cancellation")
-        }
+pub(crate) fn abort_activation(nm: &Nm) {
+    if let Some(result) = best_effort(
+        "failed to abort Wi-Fi activation after cancellation",
+        || nm.disconnect_wifi(),
+    ) {
+        tracing::info!(message = %result.message, "aborted Wi-Fi activation after cancellation");
     }
 }

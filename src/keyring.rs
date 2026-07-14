@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use zbus::blocking::{Connection, Proxy};
-use zvariant::{DynamicType, OwnedObjectPath, OwnedValue, Value};
+use zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::nm::ConnectionSettings;
+use crate::variant::{owned_value, value_string};
 
 const SECRET_DEST: &str = "org.freedesktop.secrets";
 const SECRET_SERVICE_PATH: &str = "/org/freedesktop/secrets";
@@ -61,25 +62,39 @@ pub(crate) fn lookup_secret(
 ) -> Result<KeyringOutcome<Option<KeyringSecret>>> {
     let client = SecretServiceClient::new()?;
     for key in keys {
-        for attrs in secret_attribute_sets(connection_path, settings, setting_name, key) {
-            match client.lookup(&attrs)? {
-                KeyringOutcome::Completed(Some(password)) => {
-                    return Ok(KeyringOutcome::Completed(Some(KeyringSecret {
-                        key: key.clone(),
-                        password,
-                    })));
-                }
-                KeyringOutcome::Completed(None) => {}
-                KeyringOutcome::PromptUnsupported {
-                    operation, prompt, ..
-                } => {
-                    return Ok(KeyringOutcome::PromptUnsupported {
-                        operation,
-                        prompt,
-                        completed: None,
-                    });
-                }
+        match lookup_key(&client, connection_path, settings, setting_name, key)? {
+            KeyringOutcome::Completed(Some(password)) => {
+                return Ok(KeyringOutcome::Completed(Some(KeyringSecret {
+                    key: key.clone(),
+                    password,
+                })));
             }
+            KeyringOutcome::Completed(None) => {}
+            KeyringOutcome::PromptUnsupported {
+                operation, prompt, ..
+            } => {
+                return Ok(KeyringOutcome::PromptUnsupported {
+                    operation,
+                    prompt,
+                    completed: None,
+                });
+            }
+        }
+    }
+    Ok(KeyringOutcome::Completed(None))
+}
+
+fn lookup_key(
+    client: &SecretServiceClient,
+    connection_path: &str,
+    settings: &ConnectionSettings,
+    setting_name: &str,
+    key: &str,
+) -> Result<KeyringOutcome<Option<String>>> {
+    for attrs in secret_attribute_sets(connection_path, settings, setting_name, key) {
+        let outcome = client.lookup(&attrs)?;
+        if !matches!(outcome, KeyringOutcome::Completed(None)) {
+            return Ok(outcome);
         }
     }
     Ok(KeyringOutcome::Completed(None))
@@ -151,23 +166,52 @@ impl SecretServiceClient {
 
     fn lookup(&self, attrs: &HashMap<String, String>) -> Result<KeyringOutcome<Option<String>>> {
         let service = self.service_proxy()?;
-        let (mut unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = service
+        let (unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = service
             .call("SearchItems", &(attrs,))
             .context("search Secret Service items")?;
-        if !locked.is_empty() {
-            match self.unlock(locked)? {
-                KeyringOutcome::Completed(items) => unlocked.extend(items),
-                KeyringOutcome::PromptUnsupported {
-                    operation, prompt, ..
-                } => {
-                    return Ok(KeyringOutcome::PromptUnsupported {
-                        operation,
-                        prompt,
-                        completed: None,
-                    });
-                }
+        let unlocked = match self.unlock_items(unlocked, locked)? {
+            KeyringOutcome::Completed(items) => items,
+            KeyringOutcome::PromptUnsupported {
+                operation, prompt, ..
+            } => {
+                return Ok(KeyringOutcome::PromptUnsupported {
+                    operation,
+                    prompt,
+                    completed: None,
+                });
             }
+        };
+        self.read_first_secret(&service, unlocked)
+    }
+
+    fn unlock_items(
+        &self,
+        mut unlocked: Vec<OwnedObjectPath>,
+        locked: Vec<OwnedObjectPath>,
+    ) -> Result<KeyringOutcome<Vec<OwnedObjectPath>>> {
+        if locked.is_empty() {
+            return Ok(KeyringOutcome::Completed(unlocked));
         }
+        match self.unlock(locked)? {
+            KeyringOutcome::Completed(items) => {
+                unlocked.extend(items);
+                Ok(KeyringOutcome::Completed(unlocked))
+            }
+            KeyringOutcome::PromptUnsupported {
+                operation, prompt, ..
+            } => Ok(KeyringOutcome::PromptUnsupported {
+                operation,
+                prompt,
+                completed: unlocked,
+            }),
+        }
+    }
+
+    fn read_first_secret(
+        &self,
+        service: &Proxy<'_>,
+        unlocked: Vec<OwnedObjectPath>,
+    ) -> Result<KeyringOutcome<Option<String>>> {
         let Some(item) = unlocked.into_iter().next() else {
             return Ok(KeyringOutcome::Completed(None));
         };
@@ -215,35 +259,28 @@ impl SecretServiceClient {
 
     fn delete(&self, attrs: &HashMap<String, String>) -> Result<KeyringOutcome<usize>> {
         let service = self.service_proxy()?;
-        let (mut unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = service
+        let (unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) = service
             .call("SearchItems", &(attrs,))
             .context("search Secret Service items for delete")?;
-        if !locked.is_empty() {
-            match self.unlock(locked)? {
-                KeyringOutcome::Completed(items) => unlocked.extend(items),
-                KeyringOutcome::PromptUnsupported {
-                    operation, prompt, ..
-                } => {
-                    return Ok(KeyringOutcome::PromptUnsupported {
-                        operation,
-                        prompt,
-                        completed: 0,
-                    });
-                }
+        let unlocked = match self.unlock_items(unlocked, locked)? {
+            KeyringOutcome::Completed(items) => items,
+            KeyringOutcome::PromptUnsupported {
+                operation, prompt, ..
+            } => {
+                return Ok(KeyringOutcome::PromptUnsupported {
+                    operation,
+                    prompt,
+                    completed: 0,
+                });
             }
-        }
+        };
+        self.delete_items(unlocked)
+    }
+
+    fn delete_items(&self, items: Vec<OwnedObjectPath>) -> Result<KeyringOutcome<usize>> {
         let mut deleted = 0;
-        for item in unlocked {
-            let item_proxy = Proxy::new(
-                &self.connection,
-                self.destination.as_str(),
-                item.as_str(),
-                "org.freedesktop.Secret.Item",
-            )
-            .context("create Secret Service item proxy")?;
-            let prompt: OwnedObjectPath = item_proxy
-                .call("Delete", &())
-                .context("delete Secret Service item")?;
+        for item in items {
+            let prompt = self.delete_item(&item)?;
             if prompt.as_str() == NULL_PROMPT {
                 deleted += 1;
             } else {
@@ -251,6 +288,19 @@ impl SecretServiceClient {
             }
         }
         Ok(KeyringOutcome::Completed(deleted))
+    }
+
+    fn delete_item(&self, item: &OwnedObjectPath) -> Result<OwnedObjectPath> {
+        let item_proxy = Proxy::new(
+            &self.connection,
+            self.destination.as_str(),
+            item.as_str(),
+            "org.freedesktop.Secret.Item",
+        )
+        .context("create Secret Service item proxy")?;
+        item_proxy
+            .call("Delete", &())
+            .context("delete Secret Service item")
     }
 
     fn collection(&self) -> Result<OwnedObjectPath> {
@@ -385,17 +435,6 @@ fn secret_label(settings: &ConnectionSettings, setting_name: &str, key: &str) ->
         .and_then(value_string)
         .unwrap_or_else(|| "Wi-Fi network".to_string());
     format!("nm-daemon {connection_id} {setting_name}.{key}")
-}
-
-fn value_string(value: &OwnedValue) -> Option<String> {
-    String::try_from(value.clone()).ok()
-}
-
-fn owned_value<T>(value: T) -> Result<OwnedValue>
-where
-    T: Into<Value<'static>> + DynamicType,
-{
-    OwnedValue::try_from(Value::new(value)).context("create Secret Service variant")
 }
 
 #[cfg(test)]

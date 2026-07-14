@@ -9,12 +9,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use zbus::blocking::{Connection, Proxy};
 use zbus::object_server::SignalEmitter;
-use zvariant::{OwnedObjectPath, OwnedValue, Value as ZValue};
+use zvariant::{OwnedObjectPath, OwnedValue};
 
-use crate::daemon::{DBUS_OBJECT_PATH, emit_json_event_best_effort};
+use crate::daemon::{DBUS_OBJECT_PATH, emit_json_event_nonfatal};
+use crate::error::best_effort;
 use crate::nm::{ConnectionSettings, NM_DEST};
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
+use crate::variant::value_string;
 
 pub(crate) const SECRET_AGENT_OBJECT_PATH: &str = "/org/laufan/NmDaemon/SecretAgent";
 
@@ -78,24 +80,10 @@ impl SecretAgentInterface {
         flags: u32,
     ) -> zbus::fdo::Result<ConnectionSettings> {
         let request = PendingSecretRequest::new(connection_path, setting_name, hints, flags);
-        if let Some(stored) = lookup_stored_secret(&request, &connection) {
-            apply_password(&mut connection, setting_name, &stored.key, stored.password)?;
+        if apply_stored_secret(&request, &mut connection)? {
             return Ok(connection);
         }
-
-        let (registration, displaced_request_id) = register_pending(&request);
-        if let Some(displaced_request_id) = displaced_request_id {
-            emit_secret_cancelled(&self.event_connection, &displaced_request_id);
-        }
-        emit_secret_requested(&self.event_connection, &request);
-
-        let response = registration.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
-            zbus::fdo::Error::NoReply(format!("timed out waiting for secret {}", request.id))
-        })?;
-        if let Some(persistence) = apply_secret_response(&mut connection, &request, response)? {
-            emit_secret_persistence(&self.event_connection, &request.id, persistence);
-        }
-        Ok(connection)
+        wait_for_secret_response(&self.event_connection, request, connection)
     }
 
     fn cancel_get_secrets(&self, connection_path: OwnedObjectPath, setting_name: &str) {
@@ -108,12 +96,48 @@ impl SecretAgentInterface {
     }
 
     fn save_secrets(&self, connection: ConnectionSettings, connection_path: OwnedObjectPath) {
-        save_connection_secrets_best_effort(&connection_path, &connection);
+        save_connection_secrets(&connection_path, &connection);
     }
 
     fn delete_secrets(&self, connection: ConnectionSettings, connection_path: OwnedObjectPath) {
-        delete_connection_secrets_best_effort(&connection_path, &connection);
+        delete_connection_secrets(&connection_path, &connection);
     }
+}
+
+fn apply_stored_secret(
+    request: &PendingSecretRequest,
+    connection: &mut ConnectionSettings,
+) -> zbus::fdo::Result<bool> {
+    let Some(stored) = lookup_stored_secret(request, connection) else {
+        return Ok(false);
+    };
+    apply_password(
+        connection,
+        &request.setting_name,
+        &stored.key,
+        stored.password,
+    )?;
+    Ok(true)
+}
+
+fn wait_for_secret_response(
+    event_connection: &zbus::Connection,
+    request: PendingSecretRequest,
+    mut connection: ConnectionSettings,
+) -> zbus::fdo::Result<ConnectionSettings> {
+    let (registration, displaced_request_id) = register_pending(&request);
+    if let Some(displaced_request_id) = displaced_request_id {
+        emit_secret_cancelled(event_connection, &displaced_request_id);
+    }
+    emit_secret_requested(event_connection, &request);
+
+    let response = registration.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
+        zbus::fdo::Error::NoReply(format!("timed out waiting for secret {}", request.id))
+    })?;
+    if let Some(persistence) = apply_secret_response(&mut connection, &request, response)? {
+        emit_secret_persistence(event_connection, &request.id, persistence);
+    }
+    Ok(connection)
 }
 
 #[derive(Default, Deserialize)]
@@ -299,7 +323,7 @@ fn emit_secret_event(bus: &zbus::Connection, request_id: &str, event: &str, data
         );
         return;
     };
-    emit_json_event_best_effort(&emitter, Stream::WifiSecret, Some(request_id), event, data);
+    emit_json_event_nonfatal(&emitter, Stream::WifiSecret, Some(request_id), event, data);
 }
 
 fn lookup_stored_secret(
@@ -320,7 +344,7 @@ fn lookup_stored_secret(
             None
         }
         Err(err) => {
-            tracing::debug!(request_id = %request.id, error = %format_args!("{err:#}"), "keyring lookup failed");
+            tracing::debug!(request_id = %request.id, error = %crate::error::err_chain(&err), "keyring lookup failed");
             None
         }
     }
@@ -331,33 +355,62 @@ fn apply_secret_response(
     request: &PendingSecretRequest,
     response: SecretResponse,
 ) -> zbus::fdo::Result<Option<SecretPersistenceOutcome>> {
-    if response.cancelled {
-        return Err(zbus::fdo::Error::Failed(
-            "secret request cancelled by frontend".to_string(),
-        ));
-    }
-    let mut values = response.values;
-    if let Some(password) = response.password.filter(|password| !password.is_empty()) {
-        values
-            .entry(request.primary_secret_key().to_string())
-            .or_insert(password);
-    }
+    reject_cancelled_response(response.cancelled)?;
+    let mut values = response_values(request, response.password, response.values);
     values.retain(|key, value| request.secret_keys.contains(key) && !value.is_empty());
     if values.is_empty() {
         return Err(zbus::fdo::Error::Failed(
             "secret request contained no requested values".to_string(),
         ));
     }
-    for (key, value) in &values {
-        apply_password(connection, &request.setting_name, key, value.to_string())?;
+    apply_response_values(connection, request, &values)?;
+    Ok(response
+        .save
+        .then(|| persistence_outcome(request, connection, &values)))
+}
+
+fn reject_cancelled_response(cancelled: bool) -> zbus::fdo::Result<()> {
+    if cancelled {
+        return Err(zbus::fdo::Error::Failed(
+            "secret request cancelled by frontend".to_string(),
+        ));
     }
-    Ok(response.save.then(|| {
+    Ok(())
+}
+
+fn response_values(
+    request: &PendingSecretRequest,
+    password: Option<String>,
+    mut values: HashMap<String, String>,
+) -> HashMap<String, String> {
+    if let Some(password) = password.filter(|password| !password.is_empty()) {
         values
-            .iter()
-            .map(|(key, value)| store_secret_outcome(request, connection, key, value))
-            .find(|outcome| !matches!(outcome, SecretPersistenceOutcome::Stored))
-            .unwrap_or(SecretPersistenceOutcome::Stored)
-    }))
+            .entry(request.primary_secret_key().to_string())
+            .or_insert(password);
+    }
+    values
+}
+
+fn apply_response_values(
+    connection: &mut ConnectionSettings,
+    request: &PendingSecretRequest,
+    values: &HashMap<String, String>,
+) -> zbus::fdo::Result<()> {
+    values.iter().try_for_each(|(key, value)| {
+        apply_password(connection, &request.setting_name, key, value.to_string())
+    })
+}
+
+fn persistence_outcome(
+    request: &PendingSecretRequest,
+    connection: &ConnectionSettings,
+    values: &HashMap<String, String>,
+) -> SecretPersistenceOutcome {
+    values
+        .iter()
+        .map(|(key, value)| store_secret_outcome(request, connection, key, value))
+        .find(|outcome| !matches!(outcome, SecretPersistenceOutcome::Stored))
+        .unwrap_or(SecretPersistenceOutcome::Stored)
 }
 
 fn apply_password(
@@ -394,66 +447,90 @@ fn store_secret_outcome(
             SecretPersistenceOutcome::PromptUnsupported { operation, prompt }
         }
         Err(err) => {
-            tracing::warn!(request_id = %request.id, error = %format_args!("{err:#}"), "failed to store secret in keyring");
+            tracing::warn!(request_id = %request.id, error = %crate::error::err_chain(&err), "failed to store secret in keyring");
             SecretPersistenceOutcome::Failed(format!("{err:#}"))
         }
     }
 }
 
-fn save_connection_secrets_best_effort(
-    connection_path: &OwnedObjectPath,
-    connection: &ConnectionSettings,
-) {
-    for (setting_name, secrets) in connection_secret_values(connection) {
-        for (key, password) in secrets {
-            match crate::keyring::store_secret(
-                connection_path.as_str(),
-                connection,
-                &setting_name,
-                &key,
-                &password,
-            ) {
-                Ok(crate::keyring::KeyringOutcome::Completed(())) => {}
-                Ok(crate::keyring::KeyringOutcome::PromptUnsupported {
-                    operation, prompt, ..
-                }) => {
-                    tracing::warn!(%connection_path, setting_name, key, %operation, %prompt, "NetworkManager secret was not saved because the keyring requires an unsupported desktop prompt");
-                }
-                Err(err) => {
-                    tracing::warn!(%connection_path, setting_name, key, error = %format_args!("{err:#}"), "failed to save NetworkManager secret to keyring");
-                }
-            }
-        }
-    }
+fn save_connection_secrets(connection_path: &OwnedObjectPath, connection: &ConnectionSettings) {
+    connection_secret_values(connection)
+        .into_iter()
+        .flat_map(|(setting, secrets)| {
+            secrets
+                .into_iter()
+                .map(move |(key, password)| (setting.clone(), key, password))
+        })
+        .for_each(|(setting, key, password)| {
+            save_connection_secret(connection_path, connection, &setting, &key, &password)
+        });
 }
 
-fn delete_connection_secrets_best_effort(
+fn save_connection_secret(
     connection_path: &OwnedObjectPath,
     connection: &ConnectionSettings,
+    setting_name: &str,
+    key: &str,
+    password: &str,
 ) {
-    for setting_name in connection.keys() {
-        for key in known_secret_keys(setting_name) {
-            match crate::keyring::delete_secret(
+    let outcome = best_effort(
+        format!("failed to save NetworkManager secret {setting_name}.{key} for {connection_path}"),
+        || {
+            crate::keyring::store_secret(
                 connection_path.as_str(),
                 connection,
                 setting_name,
                 key,
-            ) {
-                Ok(crate::keyring::KeyringOutcome::Completed(deleted)) => {
-                    tracing::debug!(%connection_path, setting_name, key, deleted, "deleted NetworkManager secrets from keyring");
-                }
-                Ok(crate::keyring::KeyringOutcome::PromptUnsupported {
-                    operation,
-                    prompt,
-                    completed,
-                }) => {
-                    tracing::warn!(%connection_path, setting_name, key, %operation, %prompt, deleted = completed, "keyring delete stopped because it requires an unsupported desktop prompt");
-                }
-                Err(err) => {
-                    tracing::warn!(%connection_path, setting_name, key, error = %format_args!("{err:#}"), "failed to delete NetworkManager secret from keyring");
-                }
-            }
+                password,
+            )
+        },
+    );
+    if let Some(crate::keyring::KeyringOutcome::PromptUnsupported {
+        operation, prompt, ..
+    }) = outcome
+    {
+        tracing::warn!(%connection_path, setting_name, key, %operation, %prompt, "NetworkManager secret was not saved because the keyring requires an unsupported desktop prompt");
+    }
+}
+
+fn delete_connection_secrets(connection_path: &OwnedObjectPath, connection: &ConnectionSettings) {
+    connection
+        .keys()
+        .flat_map(|setting| {
+            known_secret_keys(setting)
+                .iter()
+                .copied()
+                .map(move |key| (setting.as_str(), key))
+        })
+        .for_each(|(setting, key)| {
+            delete_connection_secret(connection_path, connection, setting, key)
+        });
+}
+
+fn delete_connection_secret(
+    connection_path: &OwnedObjectPath,
+    connection: &ConnectionSettings,
+    setting_name: &str,
+    key: &str,
+) {
+    let outcome = best_effort(
+        format!(
+            "failed to delete NetworkManager secret {setting_name}.{key} for {connection_path}"
+        ),
+        || crate::keyring::delete_secret(connection_path.as_str(), connection, setting_name, key),
+    );
+    match outcome {
+        Some(crate::keyring::KeyringOutcome::Completed(deleted)) => {
+            tracing::debug!(%connection_path, setting_name, key, deleted, "deleted NetworkManager secrets from keyring");
         }
+        Some(crate::keyring::KeyringOutcome::PromptUnsupported {
+            operation,
+            prompt,
+            completed,
+        }) => {
+            tracing::warn!(%connection_path, setting_name, key, %operation, %prompt, deleted = completed, "keyring delete stopped because it requires an unsupported desktop prompt");
+        }
+        None => {}
     }
 }
 
@@ -478,13 +555,9 @@ fn connection_secret_values(
         .collect()
 }
 
-fn value_string(value: &OwnedValue) -> Option<String> {
-    String::try_from(value.clone()).ok()
-}
-
 fn owned_value(value: String) -> zbus::fdo::Result<OwnedValue> {
-    OwnedValue::try_from(ZValue::new(value))
-        .map_err(|err| zbus::fdo::Error::Failed(format!("create D-Bus secret variant: {err}")))
+    crate::variant::owned_value(value)
+        .map_err(|err| zbus::fdo::Error::Failed(format!("create D-Bus secret variant: {err:#}")))
 }
 
 struct PendingSecretRequest {

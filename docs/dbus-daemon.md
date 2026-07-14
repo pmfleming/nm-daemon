@@ -38,17 +38,17 @@ signal Event(s stream, s event_json)
 <!-- BEGIN GENERATED PROTOCOL REGISTRY -->
 ### Method registry
 
-| Method | Aliases | Parameters | Response key | Stream | Description |
-| --- | --- | --- | --- | --- | --- |
-| `wifi.status` | `—` | `{}` (`Empty`) | `status` | `wifi.status` | Current active Wi-Fi status and connection details. |
-| `network.connectivity` | `—` | `{}` (`Empty`) | `connectivity` | `network.connectivity` | NetworkManager connectivity and captive-portal state. |
-| `wifi.networks` | `—` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `—` | Visible networks enriched with saved-profile and capability details. |
-| `wifi.scan` | `—` | `{"timeout":12,"strict":false,"cache":false,"ifname":null,"ssids":[]}` (`Scan`) | `result` | `wifi.scan` | Starts an event-driven scan and returns its request id. |
-| `wifi.connectTarget` | `wifi.connect-target` | `{"target":{"ssid":"Example"},"password":null,"wep_key_type":null}` (`ConnectTarget`) | `result` | `wifi.connect` | Starts an event-driven Wi-Fi connection and returns its request id. |
-| `wifi.disconnect` | `—` | `{}` (`Empty`) | `result` | `—` | Disconnects the active Wi-Fi connection. |
-| `wifi.profile.operation` | `—` | `{"operation":"set-autoconnect","path":"/org/freedesktop/NetworkManager/Settings/1","enabled":true}` (`ProfileOperation`) | `result` | `—` | Mutates or builds a share payload for one saved Wi-Fi profile. |
-| `wifi.secret.capabilities` | `—` | `{}` (`SecretCapabilities`) | `secret_agent` | `wifi.secret` | Reports SecretAgent and keyring capabilities. |
-| `wifi.secret.provide` | `—` | `{"request_id":"...","values":{"psk":"..."},"save":false,"cancel":false}` (`SecretProvide`) | `result` | `wifi.secret` | Answers a pending SecretAgent request. |
+| Method | Parameters | Response key | Stream | Description |
+| --- | --- | --- | --- | --- |
+| `wifi.status` | `{}` (`Empty`) | `status` | `wifi.status` | Current active Wi-Fi status and connection details. |
+| `network.connectivity` | `{}` (`Empty`) | `connectivity` | `network.connectivity` | NetworkManager connectivity and captive-portal state. |
+| `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `—` | Visible networks enriched with saved-profile and capability details. |
+| `wifi.scan` | `{"timeout":12,"strict":false,"cache":false,"ifname":null,"ssids":[]}` (`Scan`) | `result` | `wifi.scan` | Starts an event-driven scan and returns its request id. |
+| `wifi.connectTarget` | `{"target":{"ssid":"Example"},"password":null,"wep_key_type":null}` (`ConnectTarget`) | `result` | `wifi.connect` | Starts an event-driven Wi-Fi connection and returns its request id. |
+| `wifi.disconnect` | `{}` (`Empty`) | `result` | `—` | Disconnects the active Wi-Fi connection. |
+| `wifi.profile.operation` | `{"operation":"set-autoconnect","path":"/org/freedesktop/NetworkManager/Settings/1","enabled":true}` (`ProfileOperation`) | `result` | `—` | Mutates or builds a share payload for one saved Wi-Fi profile. |
+| `wifi.secret.capabilities` | `{}` (`SecretCapabilities`) | `secret_agent` | `wifi.secret` | Reports SecretAgent and keyring capabilities. |
+| `wifi.secret.provide` | `{"request_id":"...","values":{"psk":"..."},"save":false,"cancel":false}` (`SecretProvide`) | `result` | `wifi.secret` | Answers a pending SecretAgent request. |
 
 ### Stream registry
 
@@ -65,7 +65,7 @@ signal Event(s stream, s event_json)
 
 Unknown method keys and unsupported subscription streams return an `ok: false` envelope with `error.code = "validation-error"`. Invalid JSON/params use the same typed error shape. `Subscribe([])` selects the streams marked as defaults above; explicit subscriptions are deduplicated and rejected as a whole if any name is unsupported.
 
-`src/protocol.rs` is the source of truth for this registry. Dispatch parsing, aliases, defaults, event sets, contract metadata, and the generated tables above all consume it. A test fails if this generated block drifts from the registry.
+`src/protocol.rs` is the source of truth for this registry. Dispatch parsing, defaults, event sets, contract metadata, and the generated tables above all consume it. A test fails if this generated block drifts from the registry.
 
 ## Example Shelllist call shape
 
@@ -140,9 +140,9 @@ Events:
 - `failed`
 - `cancelled`
 
-Cancellation is deep and best-effort for the connect task: the daemon sets its cancellation flag, wakes activation waits, kills an in-flight `nmcli` fallback through the command gateway, and queues a NetworkManager disconnect to abort an in-flight activation. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call, but transitions check cancellation before and after those calls. Cancellation is coordinated by the shared runtime; it does not add a watcher thread per connection.
+Cancellation is deep and best-effort for the connect task: the daemon sets its cancellation flag, wakes activation waits, and queues a NetworkManager disconnect to abort an in-flight activation. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call, but transitions check cancellation before and after those calls. Cancellation is coordinated by the shared runtime; it does not add a watcher thread per connection.
 
-The underlying connection workflow is the canonical `AlreadyActive → SavedProfile → CreateProfile → Rescan → Fallback → Verify` state machine. Terminal authentication/authorization errors do not enter subprocess fallback, one targeted rescan is allowed for not-found cases, and a failed profile created by the attempt is cleaned up centrally.
+The underlying connection workflow is the canonical `AlreadyActive → SavedProfile → CreateProfile → Rescan → Verify` NetworkManager D-Bus state machine. One targeted rescan is allowed for missing visible targets, terminal authentication/authorization failures remain terminal, and a failed profile created by the attempt is cleaned up centrally. Activation success requires exact SSID bytes; requested BSSID and AP object path are selection hints and are logged rather than enforced after NetworkManager may roam.
 
 ### `wifi.secret`
 
@@ -180,7 +180,7 @@ nm-daemon wifi disconnect
 nm-daemon wifi profile delete|autoconnect|mac-randomization|share|send-hostname ...
 ```
 
-If the session bus/service is unavailable, those commands fall back to the direct in-process implementation. Use `--direct` or `NM_DAEMON_DIRECT=1` to force direct mode. CLI scan streaming, connect, and debug fixtures still run directly.
+If the session bus/service is unavailable, those commands fall back to the direct in-process implementation. Use `--direct` or `NM_DAEMON_DIRECT=1` to force direct mode. One-shot CLI scans, connects, and debug fixtures still run directly; continuous scan events are provided by the daemon subscription API.
 
 ## Startup/install status
 
@@ -206,7 +206,7 @@ Implemented here:
 2. D-Bus `Call`, `Subscribe`, `Cancel`, and `Event`.
 3. Typed method/stream registry validation and generated contract documentation.
 4. Method keys for status, connectivity, networks, disconnect, and saved-profile operations.
-5. Event-driven `wifi.scan` and `wifi.connectTarget` / `wifi.connect-target`.
+5. Event-driven `wifi.scan` and `wifi.connectTarget`.
 6. Signal-driven `wifi.status` and `network.connectivity` subscription events.
 7. Deep best-effort connect/scan cancellation through the shared runtime and command gateway.
 8. Real NetworkManager SecretAgent registration on the system bus.

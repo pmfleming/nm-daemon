@@ -24,7 +24,7 @@ impl NetworkEvents {
             .spawn(move || {
                 loop {
                     if let Err(error) = monitor_signals(connection.clone(), &monitor_events) {
-                        tracing::warn!(error = %format_args!("{error:#}"), "NetworkManager event monitor interrupted; retrying");
+                        tracing::warn!(error = %crate::error::err_chain(&error), "NetworkManager event monitor interrupted; retrying");
                     }
                     std::thread::sleep(Duration::from_secs(1));
                 }

@@ -11,19 +11,7 @@ use crate::error::{DomainError, ErrorOperation};
 use crate::model::{ScanRequestOptions, WifiDevice};
 
 impl Nm {
-    pub(crate) fn scan(&self, timeout: Duration) -> Result<()> {
-        self.scan_with_options(ScanRequestOptions {
-            timeout,
-            ifname: None,
-            ssid_bytes: Vec::new(),
-        })
-    }
-
-    pub(crate) fn scan_with_options(&self, options: ScanRequestOptions) -> Result<()> {
-        self.scan_with_options_cancellable(options, None)
-    }
-
-    pub(crate) fn scan_with_options_cancellable(
+    pub(crate) fn scan_with_options(
         &self,
         options: ScanRequestOptions,
         cancellation: Option<&AtomicBool>,
@@ -62,13 +50,7 @@ impl Nm {
             if !devices.is_empty() {
                 return Ok(devices);
             }
-            if deadline.expired() {
-                return Err(DomainError::timeout(
-                    ErrorOperation::Scan,
-                    "timed out waiting for a matching Wi-Fi device",
-                )
-                .into());
-            }
+            ensure_scan_deadline(deadline, "timed out waiting for a matching Wi-Fi device")?;
             tracing::debug!(ifname, "waiting for NetworkManager Wi-Fi device");
             event_generation = self.wait_for_event(event_generation, deadline.wait(Duration::MAX));
         }
@@ -90,17 +72,21 @@ impl Nm {
         cancellation: Option<&AtomicBool>,
     ) -> Result<()> {
         check_scan_cancelled(cancellation)?;
-        if deadline.expired() {
-            return Err(DomainError::timeout(
-                ErrorOperation::Scan,
-                "timed out waiting for LastScan to change",
-            )
-            .into());
-        }
+        ensure_scan_deadline(deadline, "timed out waiting for LastScan to change")?;
         let before = self.last_scan(device);
-        let mut event_generation = self.event_generation();
         tracing::debug!(iface = %device.iface, before, ssid_count = ssids.len(), "requesting blocking scan for device");
         self.request_scan_for_ssids(device, ssids)?;
+        self.wait_for_scan_completion(device, before, deadline, cancellation)
+    }
+
+    fn wait_for_scan_completion(
+        &self,
+        device: &WifiDevice,
+        before: i64,
+        deadline: Deadline,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<()> {
+        let mut event_generation = self.event_generation();
         while !deadline.expired() {
             check_scan_cancelled(cancellation)?;
             if self.last_scan_completed(device, before) {
@@ -147,6 +133,13 @@ impl Nm {
         let after = self.last_scan(device);
         after != before && after >= 0
     }
+}
+
+fn ensure_scan_deadline(deadline: Deadline, message: &str) -> Result<()> {
+    if deadline.expired() {
+        return Err(DomainError::timeout(ErrorOperation::Scan, message).into());
+    }
+    Ok(())
 }
 
 fn check_scan_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {

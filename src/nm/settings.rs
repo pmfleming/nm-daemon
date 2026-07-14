@@ -18,25 +18,46 @@ const NM_SECRET_FLAG_AGENT_OWNED: u32 = 0x1;
 const NM_SECRET_FLAG_NOT_SAVED: u32 = 0x2;
 const NM_SECRET_FLAG_NOT_REQUIRED: u32 = 0x4;
 
+type ActivationTarget = (OwnedObjectPath, OwnedObjectPath, OwnedObjectPath);
+
 impl Nm {
     pub(super) fn saved_wifi_activation_target_for(
         &self,
         target: &WifiConnectTarget,
-    ) -> Result<Option<(OwnedObjectPath, OwnedObjectPath, OwnedObjectPath)>> {
-        if !target.hidden
-            && let Some((device, ap_path, ap)) = self.visible_access_point_for(target)?
-            && let Some(connection_path) =
-                self.saved_wifi_connection_for_ap_on_device(&ap, &device)?
-        {
-            tracing::info!(ssid = %target.ssid, iface = %device.iface, "using saved Wi-Fi profile for selected access point");
-            return Ok(Some((connection_path, device.path, ap_path)));
+    ) -> Result<Option<ActivationTarget>> {
+        if let Some(activation) = self.visible_saved_activation_target(target)? {
+            return Ok(Some(activation));
         }
-
         if target.has_specific_ap() {
             tracing::info!(ssid = %target.ssid, ap_path = ?target.ap_path, bssid = ?target.bssid, "not using generic saved-profile fallback for specific AP target");
             return Ok(None);
         }
 
+        self.generic_saved_activation_target(target)
+    }
+
+    fn visible_saved_activation_target(
+        &self,
+        target: &WifiConnectTarget,
+    ) -> Result<Option<ActivationTarget>> {
+        if target.hidden {
+            return Ok(None);
+        }
+        let Some((device, ap_path, ap)) = self.visible_access_point_for(target)? else {
+            return Ok(None);
+        };
+        let Some(connection_path) = self.saved_wifi_connection_for_ap_on_device(&ap, &device)?
+        else {
+            return Ok(None);
+        };
+        tracing::info!(ssid = %target.ssid, iface = %device.iface, "using saved Wi-Fi profile for selected access point");
+        Ok(Some((connection_path, device.path, ap_path)))
+    }
+
+    fn generic_saved_activation_target(
+        &self,
+        target: &WifiConnectTarget,
+    ) -> Result<Option<ActivationTarget>> {
         let target_ssid = target.ssid_bytes();
         let Some(connection_path) = self.saved_wifi_connection_for_ssid(target_ssid.as_ref())?
         else {
@@ -232,37 +253,39 @@ impl Nm {
         available_by_device_path: &mut HashMap<String, Vec<OwnedObjectPath>>,
         matches: &mut std::collections::BTreeMap<String, Vec<SavedWifiConnection>>,
     ) {
-        let Ok(device_path) = OwnedObjectPath::try_from(access_point.device_path.as_str()) else {
-            tracing::warn!(device_path = %access_point.device_path, ap_path = %access_point.path, "skipping AP profile compatibility check with invalid device path");
+        let Some(device) = wifi_device_for_access_point(access_point) else {
             return;
         };
-        let device = WifiDevice {
-            path: device_path,
-            iface: access_point.device_iface.clone(),
-        };
-        if !available_by_device_path.contains_key(&access_point.device_path) {
-            let available = match self.available_connections(&device) {
-                Ok(available) => available,
-                Err(err) => {
-                    tracing::warn!(iface = %device.iface, error = %format_args!("{err:#}"), "could not read AvailableConnections for AP profile compatibility");
-                    return;
-                }
-            };
-            available_by_device_path.insert(access_point.device_path.clone(), available);
-        }
-        let Some(available) = available_by_device_path.get(&access_point.device_path) else {
+        let Some(available) =
+            self.available_connections_cached(access_point, &device, available_by_device_path)
+        else {
             return;
         };
-        for path in available {
-            if let Some(candidate) = profiles_by_path.get(&path.to_string())
-                && candidate.matches_access_point(access_point)
-            {
-                matches
-                    .entry(access_point.path.clone())
-                    .or_default()
-                    .push(candidate.profile.clone());
-            }
+        let compatible = available.iter().filter_map(|path| {
+            profiles_by_path
+                .get(&path.to_string())
+                .filter(|candidate| candidate.matches_access_point(access_point))
+                .map(|candidate| candidate.profile.clone())
+        });
+        matches
+            .entry(access_point.path.clone())
+            .or_default()
+            .extend(compatible);
+    }
+
+    fn available_connections_cached<'a>(
+        &self,
+        access_point: &AccessPoint,
+        device: &WifiDevice,
+        cache: &'a mut HashMap<String, Vec<OwnedObjectPath>>,
+    ) -> Option<&'a [OwnedObjectPath]> {
+        if !cache.contains_key(&access_point.device_path) {
+            let available = self.available_connections(device).map_err(|err| {
+                tracing::warn!(iface = %device.iface, error = %crate::error::err_chain(&err), "could not read AvailableConnections for AP profile compatibility");
+            }).ok()?;
+            cache.insert(access_point.device_path.clone(), available);
         }
+        cache.get(&access_point.device_path).map(Vec::as_slice)
     }
 
     pub(super) fn saved_wifi_connection_settings_for_ap_on_device(
@@ -423,21 +446,27 @@ fn wifi_share_payload_for_settings(
     settings: &ConnectionSettings,
     secrets: Option<&ConnectionSettings>,
 ) -> WifiSharePayload {
-    let hidden = settings
-        .get("802-11-wireless")
-        .and_then(|wireless| wireless.get("hidden"))
-        .and_then(setting_bool)
-        .unwrap_or(false);
+    let hidden = hidden_from_settings(settings);
     let security = settings.get("802-11-wireless-security");
     let key_mgmt = security
         .and_then(|section| setting_string(section, "key-mgmt"))
         .unwrap_or_default();
-
     if security.is_none() || (key_mgmt.is_empty() && !has_wep_settings(settings, secrets)) {
         return shareable_payload(profile, "nopass", None, hidden);
     }
 
-    match key_mgmt.as_str() {
+    share_payload_for_key_mgmt(profile, settings, secrets, hidden, security, &key_mgmt)
+}
+
+fn share_payload_for_key_mgmt(
+    profile: &SavedWifiConnection,
+    settings: &ConnectionSettings,
+    secrets: Option<&ConnectionSettings>,
+    hidden: bool,
+    security: Option<&HashMap<String, OwnedValue>>,
+    key_mgmt: &str,
+) -> WifiSharePayload {
+    match key_mgmt {
         "wpa-psk" | "sae" => secret_payload(profile, "WPA", "psk", settings, secrets, hidden),
         "none" | "" if has_wep_settings(settings, secrets) => {
             let key_index = security
@@ -460,6 +489,14 @@ fn wifi_share_payload_for_settings(
             &format!("unsupported Wi-Fi security type: {value}"),
         ),
     }
+}
+
+fn hidden_from_settings(settings: &ConnectionSettings) -> bool {
+    settings
+        .get("802-11-wireless")
+        .and_then(|wireless| wireless.get("hidden"))
+        .and_then(setting_bool)
+        .unwrap_or(false)
 }
 
 fn has_wep_settings(settings: &ConnectionSettings, secrets: Option<&ConnectionSettings>) -> bool {
@@ -543,42 +580,70 @@ fn wifi_settings_need_secret_agent(
         return false;
     }
 
-    if key_mgmt == "wpa-psk"
-        || key_mgmt == "sae"
-        || ap.is_some_and(|ap| ap_supports_psk(ap.wpa_flags, ap.rsn_flags))
-    {
+    if personal_security(&key_mgmt, ap) {
         return required_secret_needs_agent(settings, secrets, "psk", "psk-flags");
     }
-
-    if key_mgmt == "none"
-        || key_mgmt.is_empty()
-        || ap.is_some_and(|ap| ap_uses_wep(ap.flags, ap.wpa_flags, ap.rsn_flags))
-    {
-        let key_index = security
-            .get("wep-tx-keyidx")
-            .and_then(setting_u32)
-            .unwrap_or(0)
-            .min(3);
-        let key = format!("wep-key{key_index}");
-        let flags_key = format!("{key}-flags");
-        return required_secret_needs_agent(settings, secrets, &key, &flags_key);
+    if wep_security(&key_mgmt, ap) {
+        return wep_secret_needs_agent(settings, secrets, security);
     }
-
-    if key_mgmt.contains("eap")
-        || ap.is_some_and(|ap| ap_supports_enterprise(ap.wpa_flags, ap.rsn_flags))
-    {
-        return [
-            ("password", "password-flags"),
-            ("private-key-password", "private-key-password-flags"),
-            ("pin", "pin-flags"),
-        ]
-        .into_iter()
-        .any(|(secret_key, flags_key)| {
-            required_secret_needs_agent(settings, secrets, secret_key, flags_key)
-        });
+    if enterprise_security(&key_mgmt, ap) {
+        return enterprise_secret_needs_agent(settings, secrets);
     }
-
     false
+}
+
+fn personal_security(key_mgmt: &str, ap: Option<&AccessPoint>) -> bool {
+    matches!(key_mgmt, "wpa-psk" | "sae")
+        || ap.is_some_and(|ap| ap_supports_psk(ap.wpa_flags, ap.rsn_flags))
+}
+
+fn wep_security(key_mgmt: &str, ap: Option<&AccessPoint>) -> bool {
+    matches!(key_mgmt, "none" | "")
+        || ap.is_some_and(|ap| ap_uses_wep(ap.flags, ap.wpa_flags, ap.rsn_flags))
+}
+
+fn enterprise_security(key_mgmt: &str, ap: Option<&AccessPoint>) -> bool {
+    key_mgmt.contains("eap")
+        || ap.is_some_and(|ap| ap_supports_enterprise(ap.wpa_flags, ap.rsn_flags))
+}
+
+fn wep_secret_needs_agent(
+    settings: &ConnectionSettings,
+    secrets: Option<&ConnectionSettings>,
+    security: &HashMap<String, OwnedValue>,
+) -> bool {
+    let key_index = security
+        .get("wep-tx-keyidx")
+        .and_then(setting_u32)
+        .unwrap_or(0)
+        .min(3);
+    let key = format!("wep-key{key_index}");
+    required_secret_needs_agent(settings, secrets, &key, &format!("{key}-flags"))
+}
+
+fn enterprise_secret_needs_agent(
+    settings: &ConnectionSettings,
+    secrets: Option<&ConnectionSettings>,
+) -> bool {
+    [
+        ("password", "password-flags"),
+        ("private-key-password", "private-key-password-flags"),
+        ("pin", "pin-flags"),
+    ]
+    .into_iter()
+    .any(|(secret_key, flags_key)| {
+        required_secret_needs_agent(settings, secrets, secret_key, flags_key)
+    })
+}
+
+fn wifi_device_for_access_point(access_point: &AccessPoint) -> Option<WifiDevice> {
+    let device_path = OwnedObjectPath::try_from(access_point.device_path.as_str()).map_err(|_| {
+        tracing::warn!(device_path = %access_point.device_path, ap_path = %access_point.path, "skipping AP profile compatibility check with invalid device path");
+    }).ok()?;
+    Some(WifiDevice {
+        path: device_path,
+        iface: access_point.device_iface.clone(),
+    })
 }
 
 fn required_secret_needs_agent(

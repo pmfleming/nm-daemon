@@ -4,8 +4,8 @@ use zvariant::OwnedValue;
 
 use super::{
     cloned_wifi_connection_settings, enterprise_wifi_connection_settings,
-    hidden_wifi_connection_settings, owe_wifi_connection_settings, psk_key_mgmt,
-    psk_wifi_connection_settings, validate_wep_key, validate_wpa_psk,
+    hidden_wifi_connection_settings, owe_wifi_connection_settings, psk_wifi_connection_settings,
+    validate_wep_key, validate_wpa_psk,
 };
 use crate::model::{
     AccessPoint, EnterpriseAuth, NM_AP_SEC_KEY_MGMT_802_1X, NM_AP_SEC_KEY_MGMT_PSK,
@@ -36,9 +36,12 @@ fn psk_wifi_settings_include_password_and_key_mgmt() {
 
 #[test]
 fn sae_only_networks_use_sae_key_mgmt() {
-    assert_eq!(psk_key_mgmt(&test_ap(NM_AP_SEC_KEY_MGMT_SAE)), "sae");
     assert_eq!(
-        psk_key_mgmt(&test_ap(NM_AP_SEC_KEY_MGMT_SAE | NM_AP_SEC_KEY_MGMT_PSK)),
+        crate::auth::personal_key_management(0, NM_AP_SEC_KEY_MGMT_SAE),
+        "sae"
+    );
+    assert_eq!(
+        crate::auth::personal_key_management(0, NM_AP_SEC_KEY_MGMT_SAE | NM_AP_SEC_KEY_MGMT_PSK),
         "wpa-psk"
     );
 }

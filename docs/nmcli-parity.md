@@ -45,14 +45,15 @@ just connect-parity-probe --execute --order alternate --skip-needs-secret
 - Connect waits are signal-assisted by NetworkManager property changes and retain a bounded poll fallback for missed signals.
 - Connect caching waits briefly for DHCP/IP details before remembering the connection.
 - Enriched network JSON carries `last_connection` so Shelllist can show cached details for previously connected networks.
-- Connect cancellation is deep and best-effort: in-flight `nmcli` fallback is killed, activation waits are interrupted, and NetworkManager is asked to abort active Wi-Fi activation.
+- Connect cancellation is deep and best-effort: activation waits are interrupted and NetworkManager is asked to abort active Wi-Fi activation.
+- Successful activation verification uses exact SSID bytes; requested BSSID/AP paths are logged as selection hints and do not cause false post-roaming timeouts.
 
 ## Subprocess boundary
 
-`nmcli` and `iw` are deliberately isolated behind the injectable command gateway in `src/command.rs`. The gateway applies common timeout and cancellation behavior, redacts sensitive arguments in logs, captures stdout/stderr and exit codes, and converts failures to typed domain errors. Typed adapters in `src/command/nmcli.rs` and `src/command/iw.rs` own parsing; status enrichment and diagnosis share the same nmcli device/IP parser.
+`nmcli` is isolated behind the injectable command gateway in `src/command.rs`. The gateway applies common timeout and cancellation behavior, captures stdout/stderr and exit codes, and converts failures to typed domain errors. The typed adapter in `src/command/nmcli.rs` is query-only; status enrichment and diagnosis share the same nmcli device/IP parser. Directional link rates no longer use an `iw` subprocess: `src/nl80211.rs` reads station bitrate attributes directly from the kernel's generic-netlink interface.
 
-The connection state machine decides whether an `nmcli` fallback is eligible. The gateway does not classify authentication failures or choose fallbacks. Terminal SecretAgent, password, authorization, unsupported-authentication, and cancellation failures remain terminal; eligible D-Bus activation gaps can proceed to the fallback state after at most one targeted rescan.
+The connection state machine uses NetworkManager D-Bus exclusively and performs at most one targeted rescan. Authentication, authorization, unsupported-authentication, and cancellation failures remain terminal.
 
-Secrets are never passed through a documented argv option. CLI secrets arrive through stdin, D-Bus secrets arrive inside the request payload, and command arguments marked sensitive are redacted if a remaining fallback needs them.
+Secrets are never passed to subprocess argv. CLI secrets arrive through stdin and D-Bus secrets arrive inside the request payload.
 
 The intended direction is to remove individual subprocess uses as equivalent NetworkManager D-Bus coverage becomes reliable. `rg 'Command::new' src` should continue to show process creation only in the command gateway.

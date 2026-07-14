@@ -5,17 +5,13 @@ use anyhow::Result;
 use zvariant::OwnedObjectPath;
 
 use crate::cache;
-use crate::command::CommandRunner;
-use crate::command::nmcli::Nmcli;
 use crate::connect_cancel::check_cancelled;
 use crate::connect_error::{
-    combined_connect_failure, connect_failure, connect_failure_from_error,
-    connect_failure_from_error_with_message, fallback_failure_reason,
-    should_return_secret_agent_error, terminal_before_fallback,
+    connect_failure, connect_failure_from_error, should_return_secret_agent_error,
 };
 use crate::connect_wait::wait_for_active_target;
 use crate::deadline::Deadline;
-use crate::error::{ErrorOperation, ensure_domain};
+use crate::error::{ErrorOperation, best_effort, ensure_domain};
 use crate::model::{
     ConnectEnginePath, ConnectFailureReason, ConnectResult, ScanRequestOptions, WepKeyType,
     WifiConnectTarget, WifiStatus,
@@ -50,7 +46,6 @@ enum ConnectionState {
     SavedProfile,
     CreateProfile,
     Rescan,
-    Fallback,
     Verify(VerificationKind),
 }
 
@@ -58,7 +53,6 @@ enum ConnectionState {
 enum VerificationKind {
     SavedProfile,
     CreatedProfile,
-    Fallback,
 }
 
 enum StateTransition {
@@ -75,15 +69,6 @@ enum DbusAttempt {
 }
 
 impl DbusAttempt {
-    fn success_note(self) -> &'static str {
-        match self {
-            Self::SavedProfile => "D-Bus activation failed",
-            Self::CreateProfile => "D-Bus add/activate failed",
-            Self::SavedProfileAfterRescan => "D-Bus activation after rescan failed",
-            Self::CreateProfileAfterRescan => "D-Bus add/activate after rescan failed",
-        }
-    }
-
     fn failure_subject(self) -> &'static str {
         match self {
             Self::SavedProfile => "D-Bus saved profile activation failed",
@@ -94,11 +79,6 @@ impl DbusAttempt {
     }
 }
 
-struct DbusFallbackCause {
-    attempt: DbusAttempt,
-    error: anyhow::Error,
-}
-
 struct ConnectionMachine<'a> {
     nm: &'a Nm,
     target: &'a WifiConnectTarget,
@@ -107,8 +87,6 @@ struct ConnectionMachine<'a> {
     cancellation: Option<&'a AtomicBool>,
     rescanned: bool,
     created_connection: Option<OwnedObjectPath>,
-    pending_outcome: Option<ActivationOutcome>,
-    fallback_cause: Option<DbusFallbackCause>,
 }
 
 impl<'a> ConnectionMachine<'a> {
@@ -127,8 +105,6 @@ impl<'a> ConnectionMachine<'a> {
             cancellation,
             rescanned: false,
             created_connection: None,
-            pending_outcome: None,
-            fallback_cause: None,
         }
     }
 
@@ -138,16 +114,15 @@ impl<'a> ConnectionMachine<'a> {
             connect_failure_from_error(ConnectFailureReason::ValidationError, err)
         })?;
         self.log_start();
-        write_cache_status_best_effort(
-            "connecting",
-            format!("Connecting to {}…", self.target.ssid),
-        );
+        best_effort("failed to write Wi-Fi cache status", || {
+            cache::write_status("connecting", format!("Connecting to {}…", self.target.ssid))
+        });
         let started_at = Instant::now();
 
         match self.run_states() {
             Ok(outcome) => self.finish_success(outcome, started_at),
             Err(err) => {
-                self.cleanup_created_connection_best_effort();
+                self.cleanup_created_connection();
                 self.finish_failure(err, started_at)
             }
         }
@@ -173,13 +148,12 @@ impl<'a> ConnectionMachine<'a> {
             ConnectionState::SavedProfile => self.activate_saved_profile(),
             ConnectionState::CreateProfile => self.create_profile(),
             ConnectionState::Rescan => self.rescan(),
-            ConnectionState::Fallback => self.activate_fallback(),
             ConnectionState::Verify(kind) => self.verify(kind),
         }
     }
 
     fn check_already_active(&self) -> Result<StateTransition> {
-        match self.nm.active_ssid_matches(self.target) {
+        match self.nm.active_target_matches(self.target) {
             Ok(true) => {
                 tracing::info!(ssid = %self.target.ssid, "target Wi-Fi network is already active; skipping reactivation");
                 Ok(StateTransition::Connected(ActivationOutcome::new(
@@ -189,7 +163,7 @@ impl<'a> ConnectionMachine<'a> {
             }
             Ok(false) => Ok(StateTransition::Next(ConnectionState::SavedProfile)),
             Err(err) => {
-                tracing::debug!(ssid = %self.target.ssid, error = %format_args!("{err:#}"), "could not check active Wi-Fi target before activation");
+                tracing::debug!(ssid = %self.target.ssid, error = %crate::error::err_chain(&err), "could not check active Wi-Fi target before activation");
                 Ok(StateTransition::Next(ConnectionState::SavedProfile))
             }
         }
@@ -213,7 +187,7 @@ impl<'a> ConnectionMachine<'a> {
                 )))
             }
             Ok(false) => Ok(StateTransition::Next(ConnectionState::CreateProfile)),
-            Err(err) => self.transition_after_dbus_failure(attempt, err),
+            Err(err) => self.finish_dbus_failure(attempt, err),
         }
     }
 
@@ -237,8 +211,8 @@ impl<'a> ConnectionMachine<'a> {
                 )))
             }
             Ok(None) if self.should_rescan() => Ok(StateTransition::Next(ConnectionState::Rescan)),
-            Ok(None) => Ok(StateTransition::Next(ConnectionState::Fallback)),
-            Err(err) => self.transition_after_dbus_failure(attempt, err),
+            Ok(None) => Err(self.unavailable_activation_error()),
+            Err(err) => self.finish_dbus_failure(attempt, err),
         }
     }
 
@@ -249,7 +223,7 @@ impl<'a> ConnectionMachine<'a> {
         match self.nm.target_access_point_visible(self.target) {
             Ok(visible) => !visible,
             Err(err) => {
-                tracing::debug!(ssid = %self.target.ssid, error = %format_args!("{err:#}"), "could not verify target AP visibility before rescan");
+                tracing::debug!(ssid = %self.target.ssid, error = %crate::error::err_chain(&err), "could not verify target AP visibility before rescan");
                 true
             }
         }
@@ -257,82 +231,55 @@ impl<'a> ConnectionMachine<'a> {
 
     fn rescan(&mut self) -> Result<StateTransition> {
         self.rescanned = true;
-        tracing::info!(ssid = %self.target.ssid, bssid = ?self.target.bssid, ifname = ?self.target.ifname, "target AP is not visible; rescanning once before nmcli fallback");
-        let result = self.nm.scan_with_options(ScanRequestOptions {
-            timeout: NOT_FOUND_RESCAN_TIMEOUT,
-            ifname: self.target.ifname.clone(),
-            ssid_bytes: vec![self.target.ssid_bytes().to_vec()],
-        });
-        match result {
-            Ok(()) => Ok(StateTransition::Next(ConnectionState::SavedProfile)),
-            Err(err) => {
-                tracing::warn!(ssid = %self.target.ssid, error = %format_args!("{err:#}"), "targeted rescan before connect fallback failed");
-                Ok(StateTransition::Next(ConnectionState::Fallback))
-            }
-        }
+        tracing::info!(ssid = %self.target.ssid, bssid = ?self.target.bssid, ifname = ?self.target.ifname, "target AP is not visible; rescanning once before the final D-Bus activation attempt");
+        let result = self.nm.scan_with_options(
+            ScanRequestOptions {
+                timeout: NOT_FOUND_RESCAN_TIMEOUT,
+                ifname: self.target.ifname.clone(),
+                ssid_bytes: vec![self.target.ssid_bytes().to_vec()],
+            },
+            self.cancellation,
+        );
+        result?;
+        Ok(StateTransition::Next(ConnectionState::SavedProfile))
     }
 
-    fn transition_after_dbus_failure(
-        &mut self,
+    fn finish_dbus_failure(
+        &self,
         attempt: DbusAttempt,
         error: anyhow::Error,
     ) -> Result<StateTransition> {
+        tracing::warn!(
+            ssid = %self.target.ssid,
+            error = %crate::error::err_chain(&error),
+            failure = attempt.failure_subject(),
+            "D-Bus activation path failed"
+        );
         if should_return_secret_agent_error(self.password, &error) {
             return Err(connect_failure_from_error(
                 ConnectFailureReason::PasswordUnavailable,
                 error,
             ));
         }
-        if terminal_before_fallback(&error) {
-            return Err(error);
-        }
-        tracing::warn!(
-            ssid = %self.target.ssid,
-            error = %format_args!("{error:#}"),
-            failure = attempt.failure_subject(),
-            "D-Bus activation path failed; trying nmcli fallback"
-        );
-        self.fallback_cause = Some(DbusFallbackCause { attempt, error });
-        Ok(StateTransition::Next(ConnectionState::Fallback))
+        Err(error)
     }
 
-    fn activate_fallback(&mut self) -> Result<StateTransition> {
-        tracing::info!(ssid = %self.target.ssid, "trying nmcli connection fallback");
-        let fallback = activate_with_nmcli_fallback(
-            self.nm.command_runner(),
-            self.target,
-            self.password,
-            self.wep_key_type,
-            self.cancellation,
-        );
-        let outcome = match (fallback, self.fallback_cause.take()) {
-            (Ok(mut outcome), Some(cause)) => {
-                outcome.message = format!(
-                    "{} ({}: {:#})",
-                    outcome.message,
-                    cause.attempt.success_note(),
-                    cause.error
-                );
-                outcome
+    fn unavailable_activation_error(&self) -> anyhow::Error {
+        let reason = if self.target.hidden {
+            ConnectFailureReason::NotFound
+        } else {
+            match self.nm.target_access_point_visible(self.target) {
+                Ok(true) => ConnectFailureReason::UnsupportedAuth,
+                Ok(false) | Err(_) => ConnectFailureReason::NotFound,
             }
-            (Ok(outcome), None) => outcome,
-            (Err(fallback_err), Some(cause)) => {
-                return Err(combined_connect_failure(
-                    &cause.error,
-                    &fallback_err,
-                    format!(
-                        "{}: {:#}; nmcli fallback failed: {fallback_err:#}",
-                        cause.attempt.failure_subject(),
-                        cause.error
-                    ),
-                ));
-            }
-            (Err(fallback_err), None) => return Err(fallback_err),
         };
-        self.pending_outcome = Some(outcome);
-        Ok(StateTransition::Next(ConnectionState::Verify(
-            VerificationKind::Fallback,
-        )))
+        connect_failure(
+            reason,
+            format!(
+                "no supported D-Bus activation path is available for {}",
+                self.target.ssid
+            ),
+        )
     }
 
     fn verify(&mut self, kind: VerificationKind) -> Result<StateTransition> {
@@ -352,21 +299,17 @@ impl<'a> ConnectionMachine<'a> {
                     ConnectEnginePath::Dbus,
                 )
             }
-            // `nmcli --wait` performs fallback activation verification itself.
-            VerificationKind::Fallback => self.pending_outcome.take().ok_or_else(|| {
-                anyhow::anyhow!("fallback verification has no activation outcome")
-            })?,
         };
         Ok(StateTransition::Connected(outcome))
     }
 
-    fn cleanup_created_connection_best_effort(&mut self) {
+    fn cleanup_created_connection(&mut self) {
         let Some(created_connection) = self.created_connection.take() else {
             return;
         };
         tracing::warn!(ssid = %self.target.ssid, connection = %created_connection, "newly-created connection failed to activate; deleting it");
         if let Err(err) = self.nm.delete_connection(&created_connection) {
-            tracing::warn!(connection = %created_connection, error = %format_args!("{err:#}"), "failed to delete failed newly-created connection");
+            tracing::warn!(connection = %created_connection, error = %crate::error::err_chain(&err), "failed to delete failed newly-created connection");
             eprintln!("warning: failed to delete failed connection {created_connection}: {err:#}");
         }
     }
@@ -377,10 +320,14 @@ impl<'a> ConnectionMachine<'a> {
         started_at: Instant,
     ) -> Result<ConnectResult> {
         tracing::info!(ssid = %self.target.ssid, message = %outcome.message, path = ?outcome.path, "Wi-Fi connection succeeded");
-        write_cache_status_best_effort("connected", &outcome.message);
-        refresh_cached_networks_best_effort(self.nm);
+        best_effort("failed to write Wi-Fi cache status", || {
+            cache::write_status("connected", &outcome.message)
+        });
+        best_effort("failed to refresh Wi-Fi cache after connect", || {
+            refresh_cached_networks(self.nm)
+        });
         check_cancelled(self.cancellation)?;
-        let active_status = cache_active_status_best_effort(self.nm, self.cancellation);
+        let active_status = cache_active_status(self.nm, self.cancellation);
         let connectivity = active_status
             .as_ref()
             .and_then(|status| status.connectivity.clone())
@@ -391,23 +338,41 @@ impl<'a> ConnectionMachine<'a> {
             outcome.path,
             connectivity,
         );
-        append_connect_history_best_effort(self.target, &result, started_at);
+        if let Some(status) = &result.connectivity {
+            tracing::info!(
+                ssid = %self.target.ssid,
+                connectivity_code = status.code,
+                connectivity_state = status.state,
+                captive_portal = status.captive_portal,
+                suggest_open_portal = result.suggest_open_portal,
+                "classified connectivity after successful Wi-Fi activation"
+            );
+        } else {
+            tracing::warn!(
+                ssid = %self.target.ssid,
+                suggest_open_portal = result.suggest_open_portal,
+                "successful Wi-Fi activation had no connectivity result"
+            );
+        }
+        record_connect_attempt(self.target, &result, started_at);
         Ok(result)
     }
 
     fn finish_failure(self, error: anyhow::Error, started_at: Instant) -> Result<ConnectResult> {
         let error = ensure_domain(ErrorOperation::Connect, error);
-        tracing::error!(ssid = %self.target.ssid, error = %format_args!("{error:#}"), "Wi-Fi connection failed");
-        write_cache_status_best_effort(
-            "error",
-            format!("Connection failed for {}: {error:#}", self.target.ssid),
-        );
+        tracing::error!(ssid = %self.target.ssid, error = %crate::error::err_chain(&error), "Wi-Fi connection failed");
+        best_effort("failed to write Wi-Fi cache status", || {
+            cache::write_status(
+                "error",
+                format!("Connection failed for {}: {error:#}", self.target.ssid),
+            )
+        });
         let result = ConnectResult::failed(
             self.target.ssid.to_string(),
             connect_failure_reason(&error),
             format!("{error:#}"),
         );
-        append_connect_history_best_effort(self.target, &result, started_at);
+        record_connect_attempt(self.target, &result, started_at);
         Err(error)
     }
 
@@ -432,189 +397,12 @@ pub(crate) fn connect_target_with_password(
     target: &WifiConnectTarget,
     password: Option<&str>,
     wep_key_type: Option<WepKeyType>,
-) -> Result<ConnectResult> {
-    ConnectionMachine::new(nm, target, password, wep_key_type, None).run()
-}
-
-pub(crate) fn connect_target_with_password_cancellable(
-    nm: &Nm,
-    target: &WifiConnectTarget,
-    password: Option<&str>,
-    wep_key_type: Option<WepKeyType>,
-    cancellation: &AtomicBool,
-) -> Result<ConnectResult> {
-    ConnectionMachine::new(nm, target, password, wep_key_type, Some(cancellation)).run()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WifiFallbackEligibility {
-    Eligible,
-    SelectedApNeedsBssid,
-    PasswordWouldUseArgv,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FallbackPolicy {
-    try_saved_profile: bool,
-    wifi_connect: WifiFallbackEligibility,
-}
-
-impl FallbackPolicy {
-    fn for_request(target: &WifiConnectTarget, password: Option<&str>) -> Self {
-        let try_saved_profile = !target.has_specific_ap() && password.is_none();
-        let wifi_connect = if selected_ap_requires_unrepresentable_bssid(target) {
-            WifiFallbackEligibility::SelectedApNeedsBssid
-        } else if password.is_some() {
-            WifiFallbackEligibility::PasswordWouldUseArgv
-        } else {
-            WifiFallbackEligibility::Eligible
-        };
-        Self {
-            try_saved_profile,
-            wifi_connect,
-        }
-    }
-}
-
-fn activate_with_nmcli_fallback(
-    commands: &dyn CommandRunner,
-    target: &WifiConnectTarget,
-    password: Option<&str>,
-    wep_key_type: Option<WepKeyType>,
     cancellation: Option<&AtomicBool>,
-) -> Result<ActivationOutcome> {
-    check_cancelled(cancellation)?;
-    let policy = FallbackPolicy::for_request(target, password);
-    let saved_err = if policy.try_saved_profile {
-        tracing::info!(ssid = %target.ssid, "trying nmcli saved-profile activation fallback");
-        match Nmcli::new(commands).connect(
-            &["connection", "up", "id", target.ssid.as_str()],
-            cancellation,
-        ) {
-            Ok(_) => {
-                return Ok(ActivationOutcome::new(
-                    format!(
-                        "Connected to saved network {} via nmcli fallback",
-                        target.ssid
-                    ),
-                    ConnectEnginePath::NmcliFallback,
-                ));
-            }
-            Err(err) => err,
-        }
-    } else if target.has_specific_ap() {
-        tracing::info!(ssid = %target.ssid, ap_path = ?target.ap_path, bssid = ?target.bssid, "skipping generic nmcli saved-profile activation for specific AP target");
-        anyhow::anyhow!("skipped generic saved-profile activation for specific AP target")
-    } else {
-        tracing::info!(ssid = %target.ssid, "skipping nmcli saved-profile activation because caller supplied a password");
-        anyhow::anyhow!("skipped saved-profile activation because caller supplied a password")
-    };
-
-    match policy.wifi_connect {
-        WifiFallbackEligibility::Eligible => nmcli_wifi_connect(
-            commands,
-            target,
-            password,
-            wep_key_type,
-            cancellation,
-            &saved_err,
-        ),
-        WifiFallbackEligibility::SelectedApNeedsBssid => {
-            tracing::warn!(ssid = %target.ssid, ap_path = ?target.ap_path, "not running generic nmcli Wi-Fi connect because selected AP cannot be represented without BSSID");
-            Err(connect_failure(
-                ConnectFailureReason::UnsupportedAuth,
-                format!(
-                    "saved profile activation failed: {saved_err:#}; nmcli fallback cannot preserve selected AP path without a BSSID"
-                ),
-            ))
-        }
-        WifiFallbackEligibility::PasswordWouldUseArgv => {
-            tracing::warn!(ssid = %target.ssid, "not running nmcli Wi-Fi connect fallback because it would expose the secret in process arguments");
-            Err(connect_failure(
-                ConnectFailureReason::ActivationFailed,
-                format!(
-                    "saved profile activation failed: {saved_err:#}; nmcli password fallback is disabled because secrets must not be passed through argv"
-                ),
-            ))
-        }
-    }
+) -> Result<ConnectResult> {
+    ConnectionMachine::new(nm, target, password, wep_key_type, cancellation).run()
 }
 
-fn nmcli_wifi_connect(
-    commands: &dyn CommandRunner,
-    target: &WifiConnectTarget,
-    password: Option<&str>,
-    wep_key_type: Option<WepKeyType>,
-    cancellation: Option<&AtomicBool>,
-    saved_err: &anyhow::Error,
-) -> Result<ActivationOutcome> {
-    check_cancelled(cancellation)?;
-    let args = nmcli_wifi_connect_args(target, password, wep_key_type);
-    Nmcli::new(commands)
-        .connect(&args, cancellation)
-        .map(|_| {
-            ActivationOutcome::new(
-                format!("Connected to {} via nmcli fallback", target.ssid),
-                ConnectEnginePath::NmcliFallback,
-            )
-        })
-        .map_err(|connect_err| {
-            let reason = fallback_failure_reason(target, password, &connect_err);
-            connect_failure_from_error_with_message(
-                reason,
-                format!(
-                    "saved profile activation failed: {saved_err:#}; wifi connect failed: {connect_err:#}"
-                ),
-                connect_err,
-            )
-        })
-}
-
-fn selected_ap_requires_unrepresentable_bssid(target: &WifiConnectTarget) -> bool {
-    target.ap_path.is_some() && target.bssid.is_none()
-}
-
-fn nmcli_wifi_connect_args<'a>(
-    target: &'a WifiConnectTarget,
-    password: Option<&'a str>,
-    wep_key_type: Option<WepKeyType>,
-) -> Vec<&'a str> {
-    let mut args = vec!["device", "wifi", "connect", target.ssid.as_str()];
-    if let Some(password) = password {
-        args.extend(["password", password]);
-    }
-    if let Some(wep_key_type) = wep_key_type {
-        args.extend(["wep-key-type", wep_key_type.nmcli_value()]);
-    }
-    if let Some(bssid) = target.bssid.as_deref() {
-        args.extend(["bssid", bssid]);
-    }
-    if let Some(ifname) = target.ifname.as_deref() {
-        args.extend(["ifname", ifname]);
-    }
-    if target.hidden {
-        args.extend(["hidden", "yes"]);
-    }
-    if let Some(name) = target.connection_name.as_deref() {
-        args.extend(["name", name]);
-    }
-    if target.private {
-        args.extend(["private", "yes"]);
-    }
-    args
-}
-
-fn write_cache_status_best_effort(state: impl Into<String>, message: impl Into<String>) {
-    if let Err(err) = cache::write_status(state, message) {
-        tracing::warn!(error = %format_args!("{err:#}"), "failed to write Wi-Fi cache status");
-    }
-}
-
-fn append_connect_history_best_effort(
-    target: &WifiConnectTarget,
-    result: &ConnectResult,
-    started_at: Instant,
-) {
+fn record_connect_attempt(target: &WifiConnectTarget, result: &ConnectResult, started_at: Instant) {
     let record = cache::ConnectAttemptRecord::new(
         target,
         result.status,
@@ -623,27 +411,19 @@ fn append_connect_history_best_effort(
         &result.message,
         started_at.elapsed().as_millis(),
     );
-    if let Err(err) = cache::append_connect_attempt(&record) {
-        tracing::warn!(error = %format_args!("{err:#}"), "failed to append persistent connect history");
-    }
+    best_effort("failed to append persistent connect history", || {
+        cache::append_connect_attempt(&record)
+    });
 }
 
-fn cache_active_status_best_effort(
-    nm: &Nm,
-    cancellation: Option<&AtomicBool>,
-) -> Option<WifiStatus> {
-    match read_active_status_after_connect(nm, cancellation) {
-        Ok(status) => {
-            if let Err(err) = cache::cache_connected_network_status(&status) {
-                tracing::warn!(error = %format_args!("{err:#}"), "failed to cache active Wi-Fi details after connect");
-            }
-            Some(status)
-        }
-        Err(err) => {
-            tracing::warn!(error = %format_args!("{err:#}"), "failed to read active Wi-Fi details after connect");
-            None
-        }
-    }
+fn cache_active_status(nm: &Nm, cancellation: Option<&AtomicBool>) -> Option<WifiStatus> {
+    let status = best_effort("failed to read active Wi-Fi details after connect", || {
+        read_active_status_after_connect(nm, cancellation)
+    })?;
+    best_effort("failed to cache active Wi-Fi details after connect", || {
+        cache::cache_connected_network_status(&status)
+    });
+    Some(status)
 }
 
 fn read_active_status_after_connect(
@@ -670,77 +450,8 @@ fn status_has_network_details(status: &WifiStatus) -> bool {
     })
 }
 
-fn refresh_cached_networks_best_effort(nm: &Nm) {
-    if let Err(err) = refresh_cached_networks(nm) {
-        tracing::warn!(error = %format_args!("{err:#}"), "failed to refresh Wi-Fi cache after connect");
-    }
-}
-
 fn refresh_cached_networks(nm: &Nm) -> Result<()> {
     let networks = nm.list_access_points()?;
     cache::write_snapshot(false, &networks)?;
     cache::write_complete(false, networks.len())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        ConnectEnginePath, FallbackPolicy, WifiFallbackEligibility, activate_with_nmcli_fallback,
-    };
-    use crate::command::tests::FakeRunner;
-    use crate::model::example_connect_target;
-
-    #[test]
-    fn fallback_policy_centralizes_target_and_secret_constraints() {
-        let target = example_connect_target(false);
-        assert_eq!(
-            FallbackPolicy::for_request(&target, None),
-            FallbackPolicy {
-                try_saved_profile: true,
-                wifi_connect: WifiFallbackEligibility::Eligible,
-            }
-        );
-
-        let mut selected_ap = example_connect_target(false);
-        selected_ap.ap_path = Some(
-            crate::model::NmObjectPath::parse(
-                "/org/freedesktop/NetworkManager/AccessPoint/1".to_string(),
-            )
-            .unwrap(),
-        );
-        assert_eq!(
-            FallbackPolicy::for_request(&selected_ap, None),
-            FallbackPolicy {
-                try_saved_profile: false,
-                wifi_connect: WifiFallbackEligibility::SelectedApNeedsBssid,
-            }
-        );
-
-        assert_eq!(
-            FallbackPolicy::for_request(&target, Some("secret")),
-            FallbackPolicy {
-                try_saved_profile: false,
-                wifi_connect: WifiFallbackEligibility::PasswordWouldUseArgv,
-            }
-        );
-    }
-
-    #[test]
-    fn command_fallback_orchestration_tries_saved_profile_then_wifi_connect() {
-        let runner = FakeRunner::nmcli_failure_then_success(10, "saved profile not found");
-        let target = example_connect_target(false);
-
-        let outcome = activate_with_nmcli_fallback(&runner, &target, None, None, None).unwrap();
-
-        assert_eq!(outcome.path, ConnectEnginePath::NmcliFallback);
-        let requests = runner.all_redacted_args();
-        assert_eq!(
-            requests[0],
-            ["--wait", "90", "connection", "up", "id", "Example"]
-        );
-        assert_eq!(
-            requests[1],
-            ["--wait", "90", "device", "wifi", "connect", "Example"]
-        );
-    }
 }

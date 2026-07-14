@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::application::{Application, NetworksRequest, ProfileOperation, ProfileOperationResult};
 use crate::daemon_runtime::DaemonRuntime;
 use crate::error::ErrorOperation;
-use crate::model::NmObjectPath;
+use crate::model::{NmObjectPath, WifiConnectTarget};
 use crate::output::api_data_value;
 use crate::protocol::Method;
 
@@ -67,20 +67,49 @@ pub(crate) fn call_profile_operation(
     runtime: &Arc<DaemonRuntime>,
     params: ProfileOperationParams,
 ) -> Result<Value> {
+    let operation = match params {
+        ProfileOperationParams::Delete { path } => ProfileOperation::Delete { path },
+        ProfileOperationParams::Forget { request_id, target } => {
+            let result = crate::forget::execute(runtime, request_id, target)?;
+            return serialize_forget_result(&result);
+        }
+        ProfileOperationParams::SetAutoconnect { path, enabled } => {
+            ProfileOperation::SetAutoconnect { path, enabled }
+        }
+        ProfileOperationParams::SetMacRandomization { path, randomized } => {
+            ProfileOperation::SetMacRandomization { path, randomized }
+        }
+        ProfileOperationParams::Share { path } => ProfileOperation::Share { path },
+        ProfileOperationParams::SetSendHostname { path, enabled } => {
+            ProfileOperation::SetSendHostname { path, enabled }
+        }
+    };
     runtime.call(ErrorOperation::ProfileOperation, move |nm| {
-        let result = Application::new(nm).profile_operation(params.into())?;
-        let result = match result {
-            ProfileOperationResult::Updated { message } => {
-                json!({ "status": "ok", "message": message })
-            }
-            ProfileOperationResult::Share(payload) => serde_json::to_value(payload)?,
-        };
-        api_data_value(
-            Method::WifiProfileOperation.spec().response_key,
-            &result,
-            "serialize profile operation response JSON",
-        )
+        serialize_profile_result(Application::new(nm).profile_operation(operation)?)
     })
+}
+
+fn serialize_forget_result(result: &crate::forget::ForgetResult) -> Result<Value> {
+    let result = serde_json::to_value(result)?;
+    api_data_value(
+        Method::WifiProfileOperation.spec().response_key,
+        &result,
+        "serialize forget response JSON",
+    )
+}
+
+fn serialize_profile_result(result: ProfileOperationResult) -> Result<Value> {
+    let result = match result {
+        ProfileOperationResult::Updated { message } => {
+            json!({ "status": "ok", "message": message })
+        }
+        ProfileOperationResult::Share(payload) => serde_json::to_value(payload)?,
+    };
+    api_data_value(
+        Method::WifiProfileOperation.spec().response_key,
+        &result,
+        "serialize profile operation response JSON",
+    )
 }
 
 #[derive(Default, Deserialize)]
@@ -97,6 +126,11 @@ pub(crate) enum ProfileOperationParams {
     Delete {
         path: NmObjectPath,
     },
+    Forget {
+        #[serde(default)]
+        request_id: String,
+        target: Box<WifiConnectTarget>,
+    },
     SetAutoconnect {
         path: NmObjectPath,
         enabled: bool,
@@ -112,22 +146,4 @@ pub(crate) enum ProfileOperationParams {
         path: NmObjectPath,
         enabled: bool,
     },
-}
-
-impl From<ProfileOperationParams> for ProfileOperation {
-    fn from(value: ProfileOperationParams) -> Self {
-        match value {
-            ProfileOperationParams::Delete { path } => Self::Delete { path },
-            ProfileOperationParams::SetAutoconnect { path, enabled } => {
-                Self::SetAutoconnect { path, enabled }
-            }
-            ProfileOperationParams::SetMacRandomization { path, randomized } => {
-                Self::SetMacRandomization { path, randomized }
-            }
-            ProfileOperationParams::Share { path } => Self::Share { path },
-            ProfileOperationParams::SetSendHostname { path, enabled } => {
-                Self::SetSendHostname { path, enabled }
-            }
-        }
-    }
 }

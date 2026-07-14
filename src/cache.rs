@@ -24,6 +24,7 @@ const STATUS_FILE: &str = "status.json";
 const ACTIVE_STATUS_FILE: &str = "active-status.json";
 const KNOWN_CONNECTIONS_FILE: &str = "known-connections.json";
 const CONNECT_HISTORY_FILE: &str = "connects.jsonl";
+const PROFILE_OPERATION_HISTORY_FILE: &str = "profile-operations.jsonl";
 
 #[derive(Debug, Clone)]
 pub(crate) enum CacheRead<T> {
@@ -247,6 +248,12 @@ pub(crate) fn clear_active_connection_cache() -> Result<()> {
 pub(crate) fn append_connect_attempt(record: &ConnectAttemptRecord<'_>) -> Result<()> {
     Repository::state()
         .write_transaction(|repository| repository.append_history(CONNECT_HISTORY_FILE, record))
+}
+
+pub(crate) fn append_profile_operation_audit(record: &(impl Serialize + ?Sized)) -> Result<()> {
+    Repository::state().write_transaction(|repository| {
+        repository.append_history(PROFILE_OPERATION_HISTORY_FILE, record)
+    })
 }
 
 fn snapshot_record(scanning: bool, networks: &[AccessPoint]) -> CachedSnapshot {

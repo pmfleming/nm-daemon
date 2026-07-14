@@ -34,7 +34,6 @@ pub(crate) enum ParameterKind {
 pub(crate) struct MethodSpec {
     pub(crate) method: Method,
     pub(crate) name: &'static str,
-    pub(crate) aliases: &'static [&'static str],
     pub(crate) parameters: ParameterKind,
     pub(crate) params_example: &'static str,
     pub(crate) response_key: &'static str,
@@ -47,7 +46,6 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
-        aliases: &[],
         parameters: ParameterKind::Empty,
         params_example: "{}",
         response_key: "status",
@@ -58,7 +56,6 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
     MethodSpec {
         method: Method::NetworkConnectivity,
         name: "network.connectivity",
-        aliases: &[],
         parameters: ParameterKind::Empty,
         params_example: "{}",
         response_key: "connectivity",
@@ -69,7 +66,6 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
     MethodSpec {
         method: Method::WifiNetworks,
         name: "wifi.networks",
-        aliases: &[],
         parameters: ParameterKind::Networks,
         params_example: r#"{"cached":false,"refresh_cache":false,"refresh_timeout":10}"#,
         response_key: "networks",
@@ -80,7 +76,6 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
     MethodSpec {
         method: Method::WifiScan,
         name: "wifi.scan",
-        aliases: &[],
         parameters: ParameterKind::Scan,
         params_example: r#"{"timeout":12,"strict":false,"cache":false,"ifname":null,"ssids":[]}"#,
         response_key: "result",
@@ -91,7 +86,6 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
     MethodSpec {
         method: Method::WifiConnectTarget,
         name: "wifi.connectTarget",
-        aliases: &["wifi.connect-target"],
         parameters: ParameterKind::ConnectTarget,
         params_example: r#"{"target":{"ssid":"Example"},"password":null,"wep_key_type":null}"#,
         response_key: "result",
@@ -102,7 +96,6 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
     MethodSpec {
         method: Method::WifiDisconnect,
         name: "wifi.disconnect",
-        aliases: &[],
         parameters: ParameterKind::Empty,
         params_example: "{}",
         response_key: "result",
@@ -113,7 +106,6 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
     MethodSpec {
         method: Method::WifiProfileOperation,
         name: "wifi.profile.operation",
-        aliases: &[],
         parameters: ParameterKind::ProfileOperation,
         params_example: r#"{"operation":"set-autoconnect","path":"/org/freedesktop/NetworkManager/Settings/1","enabled":true}"#,
         response_key: "result",
@@ -124,7 +116,6 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
     MethodSpec {
         method: Method::WifiSecretCapabilities,
         name: "wifi.secret.capabilities",
-        aliases: &[],
         parameters: ParameterKind::SecretCapabilities,
         params_example: "{}",
         response_key: "secret_agent",
@@ -135,7 +126,6 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
     MethodSpec {
         method: Method::WifiSecretProvide,
         name: "wifi.secret.provide",
-        aliases: &[],
         parameters: ParameterKind::SecretProvide,
         params_example: r#"{"request_id":"...","values":{"psk":"..."},"save":false,"cancel":false}"#,
         response_key: "result",
@@ -149,7 +139,7 @@ impl Method {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         METHOD_REGISTRY
             .iter()
-            .find(|spec| spec.name == value || spec.aliases.contains(&value))
+            .find(|spec| spec.name == value)
             .map(|spec| spec.method)
     }
 
@@ -204,7 +194,6 @@ pub(crate) enum StreamDelivery {
 pub(crate) struct StreamSpec {
     pub(crate) stream: Stream,
     pub(crate) name: &'static str,
-    pub(crate) aliases: &'static [&'static str],
     pub(crate) subscribable: bool,
     pub(crate) default: bool,
     pub(crate) delivery: StreamDelivery,
@@ -216,7 +205,6 @@ pub(crate) const STREAM_REGISTRY: &[StreamSpec] = &[
     StreamSpec {
         stream: Stream::WifiStatus,
         name: "wifi.status",
-        aliases: &[],
         subscribable: true,
         default: true,
         delivery: StreamDelivery::Continuous,
@@ -226,7 +214,6 @@ pub(crate) const STREAM_REGISTRY: &[StreamSpec] = &[
     StreamSpec {
         stream: Stream::NetworkConnectivity,
         name: "network.connectivity",
-        aliases: &[],
         subscribable: true,
         default: true,
         delivery: StreamDelivery::Continuous,
@@ -236,7 +223,6 @@ pub(crate) const STREAM_REGISTRY: &[StreamSpec] = &[
     StreamSpec {
         stream: Stream::WifiScan,
         name: "wifi.scan",
-        aliases: &[],
         subscribable: true,
         default: true,
         delivery: StreamDelivery::Operation,
@@ -254,7 +240,6 @@ pub(crate) const STREAM_REGISTRY: &[StreamSpec] = &[
     StreamSpec {
         stream: Stream::WifiConnect,
         name: "wifi.connect",
-        aliases: &[],
         subscribable: true,
         default: false,
         delivery: StreamDelivery::Operation,
@@ -271,7 +256,6 @@ pub(crate) const STREAM_REGISTRY: &[StreamSpec] = &[
     StreamSpec {
         stream: Stream::WifiSecret,
         name: "wifi.secret",
-        aliases: &[],
         subscribable: true,
         default: false,
         delivery: StreamDelivery::External,
@@ -281,7 +265,6 @@ pub(crate) const STREAM_REGISTRY: &[StreamSpec] = &[
     StreamSpec {
         stream: Stream::DaemonRequest,
         name: "daemon.request",
-        aliases: &[],
         subscribable: false,
         default: false,
         delivery: StreamDelivery::Internal,
@@ -291,7 +274,6 @@ pub(crate) const STREAM_REGISTRY: &[StreamSpec] = &[
     StreamSpec {
         stream: Stream::DaemonSubscription,
         name: "daemon.subscription",
-        aliases: &[],
         subscribable: false,
         default: false,
         delivery: StreamDelivery::Internal,
@@ -304,7 +286,7 @@ impl Stream {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         STREAM_REGISTRY
             .iter()
-            .find(|spec| spec.name == value || spec.aliases.contains(&value))
+            .find(|spec| spec.name == value)
             .map(|spec| spec.stream)
     }
 
@@ -351,7 +333,6 @@ pub(crate) fn contract_registry() -> Value {
     json!({
         "methods": METHOD_REGISTRY.iter().map(|spec| json!({
             "name": spec.name,
-            "aliases": spec.aliases,
             "parameters": spec.parameters,
             "params_example": serde_json::from_str::<Value>(spec.params_example)
                 .unwrap_or_else(|_| json!(spec.params_example)),
@@ -361,7 +342,6 @@ pub(crate) fn contract_registry() -> Value {
         })).collect::<Vec<_>>(),
         "streams": STREAM_REGISTRY.iter().map(|spec| json!({
             "name": spec.name,
-            "aliases": spec.aliases,
             "subscribable": spec.subscribable,
             "default": spec.default,
             "delivery": spec.delivery,
@@ -373,19 +353,13 @@ pub(crate) fn contract_registry() -> Value {
 
 pub(crate) fn markdown_reference() -> String {
     let mut output = String::from(
-        "### Method registry\n\n| Method | Aliases | Parameters | Response key | Stream | Description |\n| --- | --- | --- | --- | --- | --- |\n",
+        "### Method registry\n\n| Method | Parameters | Response key | Stream | Description |\n| --- | --- | --- | --- | --- |\n",
     );
     for spec in METHOD_REGISTRY {
-        let aliases = if spec.aliases.is_empty() {
-            "—".to_string()
-        } else {
-            spec.aliases.join(", ")
-        };
         let stream = spec.stream.map_or("—", Stream::as_str);
         output.push_str(&format!(
-            "| `{}` | `{}` | `{}` (`{:?}`) | `{}` | `{}` | {} |\n",
+            "| `{}` | `{}` (`{:?}`) | `{}` | `{}` | {} |\n",
             spec.name,
-            aliases,
             spec.params_example,
             spec.parameters,
             spec.response_key,
@@ -417,16 +391,13 @@ mod tests {
     use super::{METHOD_REGISTRY, Method, STREAM_REGISTRY, Stream, markdown_reference};
 
     #[test]
-    fn registry_names_and_aliases_are_unique() {
+    fn registry_names_are_unique() {
         let mut names = HashSet::new();
         for spec in METHOD_REGISTRY {
             assert!(names.insert(spec.name));
             assert_eq!(Method::parse(spec.name), Some(spec.method));
-            for alias in spec.aliases {
-                assert!(names.insert(*alias));
-                assert_eq!(Method::parse(alias), Some(spec.method));
-            }
         }
+        assert_eq!(Method::parse("wifi.connect-target"), None);
 
         names.clear();
         for spec in STREAM_REGISTRY {
@@ -436,10 +407,6 @@ mod tests {
                 Stream::parse_subscription(spec.name),
                 spec.subscribable.then_some(spec.stream)
             );
-            for alias in spec.aliases {
-                assert!(names.insert(*alias));
-                assert_eq!(Stream::parse(alias), Some(spec.stream));
-            }
         }
     }
 

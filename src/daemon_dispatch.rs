@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
-use crate::daemon::emit_json_event_best_effort;
+use crate::daemon::emit_json_event_nonfatal;
 use crate::daemon_connect::DbusConnectTargetParams;
 use crate::daemon_event::next_request_id;
 use crate::daemon_methods::{
@@ -27,18 +27,32 @@ pub(crate) fn dispatch_call(
     runtime: &Arc<DaemonRuntime>,
 ) -> Result<Value> {
     let Some(method) = Method::parse(method) else {
-        let error: anyhow::Error = DomainError::validation(
-            ErrorOperation::ParseRequest,
-            format!("unsupported D-Bus method key: {method}"),
-        )
-        .with_detail("method", method)
-        .into();
-        return Ok(api_error_value_for(&ErrorReport::from_error(
-            &error,
-            ErrorOperation::ParseRequest,
-        )));
+        return Ok(unsupported_method_value(method));
     };
-    let result = match method {
+    let result = dispatch_method(method, params_json, emitter, runtime);
+    operation_result(method.spec().operation, result)
+}
+
+fn unsupported_method_value(method: &str) -> Value {
+    let error: anyhow::Error = DomainError::validation(
+        ErrorOperation::ParseRequest,
+        format!("unsupported D-Bus method key: {method}"),
+    )
+    .with_detail("method", method)
+    .into();
+    api_error_value_for(&ErrorReport::from_error(
+        &error,
+        ErrorOperation::ParseRequest,
+    ))
+}
+
+fn dispatch_method(
+    method: Method,
+    params_json: &str,
+    emitter: SignalEmitter<'static>,
+    runtime: &Arc<DaemonRuntime>,
+) -> Result<Value> {
+    match method {
         Method::WifiStatus => {
             parse_params::<EmptyParams>(params_json)?;
             call_status(runtime)
@@ -47,7 +61,15 @@ pub(crate) fn dispatch_call(
             parse_params::<EmptyParams>(params_json)?;
             call_connectivity(runtime)
         }
+        Method::WifiDisconnect => {
+            parse_params::<EmptyParams>(params_json)?;
+            call_disconnect(runtime)
+        }
         Method::WifiNetworks => call_networks(runtime, parse_params(params_json)?),
+        Method::WifiProfileOperation => call_profile_operation(
+            runtime,
+            parse_required_params::<ProfileOperationParams>(params_json)?,
+        ),
         Method::WifiScan => crate::daemon_scan::start_scan(
             runtime,
             parse_params::<DbusScanParams>(params_json)?,
@@ -58,14 +80,6 @@ pub(crate) fn dispatch_call(
             parse_required_params::<DbusConnectTargetParams>(params_json)?,
             emitter,
         ),
-        Method::WifiDisconnect => {
-            parse_params::<EmptyParams>(params_json)?;
-            call_disconnect(runtime)
-        }
-        Method::WifiProfileOperation => call_profile_operation(
-            runtime,
-            parse_required_params::<ProfileOperationParams>(params_json)?,
-        ),
         Method::WifiSecretCapabilities => {
             crate::daemon_secret::capabilities(parse_params::<SecretCapabilitiesParams>(
                 params_json,
@@ -74,8 +88,7 @@ pub(crate) fn dispatch_call(
         Method::WifiSecretProvide => crate::daemon_secret::provide(parse_required_params::<
             SecretProvideParams,
         >(params_json)?),
-    };
-    operation_result(method.spec().operation, result)
+    }
 }
 
 pub(crate) fn subscribe_streams(
@@ -98,7 +111,7 @@ pub(crate) fn subscribe_streams(
         emitter.clone(),
     )?;
     for stream in &streams {
-        emit_json_event_best_effort(
+        emit_json_event_nonfatal(
             &emitter,
             *stream,
             Some(&subscription_id),
@@ -127,32 +140,39 @@ fn normalized_streams(streams: Vec<String>) -> Result<Vec<Stream>> {
     let mut normalized = Vec::new();
     let mut unsupported = Vec::new();
     for name in streams {
-        match Stream::parse_subscription(&name) {
-            Some(stream) if !normalized.contains(&stream) => normalized.push(stream),
-            Some(_) => {}
-            None => unsupported.push(name),
-        }
+        collect_stream(name, &mut normalized, &mut unsupported);
     }
     if unsupported.is_empty() {
         Ok(normalized)
     } else {
-        Err(DomainError::validation(
-            ErrorOperation::Subscribe,
-            "subscription contains unsupported event streams",
-        )
-        .with_detail("unsupported_streams", json!(unsupported))
-        .with_detail(
-            "supported_streams",
-            json!(
-                crate::protocol::STREAM_REGISTRY
-                    .iter()
-                    .filter(|spec| spec.subscribable)
-                    .map(|spec| spec.name)
-                    .collect::<Vec<_>>()
-            ),
-        )
-        .into())
+        Err(unsupported_streams_error(unsupported))
     }
+}
+
+fn collect_stream(name: String, normalized: &mut Vec<Stream>, unsupported: &mut Vec<String>) {
+    match Stream::parse_subscription(&name) {
+        Some(stream) if !normalized.contains(&stream) => normalized.push(stream),
+        Some(_) => {}
+        None => unsupported.push(name),
+    }
+}
+
+fn unsupported_streams_error(unsupported: Vec<String>) -> anyhow::Error {
+    DomainError::validation(
+        ErrorOperation::Subscribe,
+        "subscription contains unsupported event streams",
+    )
+    .with_detail("unsupported_streams", json!(unsupported))
+    .with_detail("supported_streams", json!(supported_stream_names()))
+    .into()
+}
+
+fn supported_stream_names() -> Vec<&'static str> {
+    crate::protocol::STREAM_REGISTRY
+        .iter()
+        .filter(|spec| spec.subscribable)
+        .map(|spec| spec.name)
+        .collect()
 }
 
 #[derive(Default, Deserialize)]

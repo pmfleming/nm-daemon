@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, ConnectEvent, ConnectOutcome, ConnectRequest};
-use crate::daemon::{emit_json_event, emit_json_event_best_effort};
+use crate::daemon::{emit_json_event, emit_json_event_nonfatal};
 use crate::daemon_event::next_request_id;
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{ErrorOperation, ErrorReport};
@@ -36,10 +36,20 @@ pub(crate) fn start_connect_target(
     let request = ConnectRequest::from(params);
     request.validate()?;
     let request_id = next_request_id("connect");
+    tracing::info!(
+        request_id = %request_id,
+        ssid = %request.target.ssid,
+        ap_path = ?request.target.ap_path,
+        bssid = ?request.target.bssid,
+        ifname = ?request.target.ifname,
+        "accepted correlated Wi-Fi connection request"
+    );
     let worker_request_id = request_id.clone();
+    let target_ssid = request.target.ssid_bytes().to_vec();
     runtime.start_cancellable(
         request_id.clone(),
         TaskKind::Connect,
+        Some(target_ssid),
         move |nm, cancel_flag| {
             if let Err(err) =
                 run_connect_worker(nm, &worker_request_id, request, cancel_flag, &emitter)
@@ -99,31 +109,59 @@ fn emit_connect_event(
             "progress",
             json!({ "request_id": request_id, "message": message }),
         ),
-        ConnectEvent::Finished(ConnectOutcome::Succeeded(result)) => (
-            "succeeded",
-            json!({ "request_id": request_id, "result": result }),
-        ),
-        ConnectEvent::Finished(ConnectOutcome::Failed { result, error }) => (
-            "failed",
-            json!({
-                "request_id": request_id,
-                "reason": result.reason,
-                "message": result.message,
-                "code": error.code,
-                "details": error.api_details(),
-            }),
-        ),
+        ConnectEvent::Finished(ConnectOutcome::Succeeded(result)) => {
+            let connectivity_state = result
+                .connectivity
+                .as_ref()
+                .map(|status| status.state)
+                .unwrap_or("unavailable");
+            let connectivity_code = result.connectivity.as_ref().map(|status| status.code);
+            tracing::info!(
+                %request_id,
+                ssid = %result.ssid,
+                connectivity_state,
+                ?connectivity_code,
+                suggest_open_portal = result.suggest_open_portal,
+                "emitting correlated Wi-Fi connection success"
+            );
+            (
+                "succeeded",
+                json!({ "request_id": request_id, "result": result }),
+            )
+        }
+        ConnectEvent::Finished(ConnectOutcome::Failed { result, error }) => {
+            tracing::warn!(
+                %request_id,
+                ssid = %result.ssid,
+                reason = ?result.reason,
+                code = ?error.code,
+                "emitting correlated Wi-Fi connection failure"
+            );
+            (
+                "failed",
+                json!({
+                    "request_id": request_id,
+                    "reason": result.reason,
+                    "message": result.message,
+                    "code": error.code,
+                    "details": error.api_details(),
+                }),
+            )
+        }
         ConnectEvent::Cancelled { message }
-        | ConnectEvent::Finished(ConnectOutcome::Cancelled { message }) => (
-            "cancelled",
-            json!({ "request_id": request_id, "message": message }),
-        ),
+        | ConnectEvent::Finished(ConnectOutcome::Cancelled { message }) => {
+            tracing::info!(%request_id, "emitting correlated Wi-Fi connection cancellation");
+            (
+                "cancelled",
+                json!({ "request_id": request_id, "message": message }),
+            )
+        }
     };
     emit_json_event(emitter, STREAM, Some(request_id), name, data)
 }
 
 fn emit_connect_failure(emitter: &SignalEmitter<'static>, request_id: &str, report: &ErrorReport) {
-    emit_json_event_best_effort(
+    emit_json_event_nonfatal(
         emitter,
         STREAM,
         Some(request_id),

@@ -4,17 +4,14 @@ use zvariant::OwnedObjectPath;
 use super::wifi_settings::{
     apply_target_profile_settings, cloned_wifi_connection_settings,
     enterprise_wifi_connection_settings, hidden_wifi_connection_settings,
-    owe_wifi_connection_settings, psk_key_mgmt, psk_wifi_connection_settings,
-    wep_wifi_connection_settings,
+    owe_wifi_connection_settings, psk_wifi_connection_settings, wep_wifi_connection_settings,
 };
 use super::{
     ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_IFACE, NM_PATH, Nm, owned_value,
 };
+use crate::auth::WifiAuthentication;
 use crate::error::DomainError;
-use crate::model::{
-    WepKeyType, WifiConnectTarget, ap_is_passwordless, ap_supports_enterprise, ap_supports_psk,
-    ap_uses_owe, ap_uses_wep,
-};
+use crate::model::{WepKeyType, WifiConnectTarget};
 
 impl Nm {
     pub(crate) fn activate_saved_wifi_connection_for(
@@ -105,37 +102,8 @@ impl Nm {
                 .map(Some);
         }
 
-        let mut settings = if ap_is_passwordless(ap.flags, ap.wpa_flags, ap.rsn_flags) {
-            if ap_uses_owe(ap.wpa_flags, ap.rsn_flags) {
-                tracing::debug!(ssid = %target.ssid, "network uses OWE passwordless encryption");
-                owe_wifi_connection_settings()?
-            } else {
-                tracing::debug!(ssid = %target.ssid, "network is open/passwordless");
-                ConnectionSettings::new()
-            }
-        } else if ap_supports_psk(ap.wpa_flags, ap.rsn_flags) {
-            let Some(password) = password else {
-                tracing::info!(ssid = %target.ssid, "WPA/SAE network needs a password; no password supplied to D-Bus add-and-activate");
-                return Ok(None);
-            };
-            tracing::debug!(ssid = %target.ssid, key_mgmt = %psk_key_mgmt(&ap), "network supports WPA/SAE personal authentication");
-            psk_wifi_connection_settings(&ap, password)?
-        } else if ap_uses_wep(ap.flags, ap.wpa_flags, ap.rsn_flags) {
-            let Some(password) = password else {
-                tracing::info!(ssid = %target.ssid, "WEP network needs a key/passphrase; no password supplied to D-Bus add-and-activate");
-                return Ok(None);
-            };
-            tracing::debug!(ssid = %target.ssid, wep_key_type = ?wep_key_type, "network appears to use WEP authentication");
-            wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key))?
-        } else if ap_supports_enterprise(ap.wpa_flags, ap.rsn_flags) {
-            let Some(enterprise) = &target.enterprise else {
-                tracing::info!(ssid = %target.ssid, "enterprise network needs structured 802.1X credentials; none supplied to D-Bus add-and-activate");
-                return Ok(None);
-            };
-            tracing::debug!(ssid = %target.ssid, eap = ?enterprise.eap, "network supports WPA-Enterprise authentication");
-            enterprise_wifi_connection_settings(&ap, enterprise, password)?
-        } else {
-            tracing::info!(ssid = %target.ssid, security = %ap.security, "unsupported visible network security for D-Bus add-and-activate");
+        let Some(mut settings) = visible_connection_settings(target, &ap, password, wep_key_type)?
+        else {
             return Ok(None);
         };
 
@@ -247,6 +215,70 @@ impl Nm {
             })
             .ok()
     }
+}
+
+fn visible_connection_settings(
+    target: &WifiConnectTarget,
+    ap: &crate::model::AccessPoint,
+    password: Option<&str>,
+    wep_key_type: Option<WepKeyType>,
+) -> Result<Option<ConnectionSettings>> {
+    match crate::auth::classify(ap.flags, ap.wpa_flags, ap.rsn_flags) {
+        WifiAuthentication::Open => {
+            tracing::debug!(ssid = %target.ssid, "network is open/passwordless");
+            Ok(Some(ConnectionSettings::new()))
+        }
+        WifiAuthentication::Owe => {
+            tracing::debug!(ssid = %target.ssid, "network uses OWE passwordless encryption");
+            owe_wifi_connection_settings().map(Some)
+        }
+        WifiAuthentication::Personal => personal_connection_settings(target, ap, password),
+        WifiAuthentication::Wep => wep_connection_settings(target, password, wep_key_type),
+        WifiAuthentication::Enterprise => enterprise_connection_settings(target, ap, password),
+        WifiAuthentication::Unsupported => {
+            tracing::info!(ssid = %target.ssid, security = %ap.security, "unsupported visible network security for D-Bus add-and-activate");
+            Ok(None)
+        }
+    }
+}
+
+fn personal_connection_settings(
+    target: &WifiConnectTarget,
+    ap: &crate::model::AccessPoint,
+    password: Option<&str>,
+) -> Result<Option<ConnectionSettings>> {
+    let Some(password) = password else {
+        tracing::info!(ssid = %target.ssid, "WPA/SAE network needs a password; no password supplied to D-Bus add-and-activate");
+        return Ok(None);
+    };
+    tracing::debug!(ssid = %target.ssid, key_mgmt = %crate::auth::personal_key_management(ap.wpa_flags, ap.rsn_flags), "network supports WPA/SAE personal authentication");
+    psk_wifi_connection_settings(ap, password).map(Some)
+}
+
+fn wep_connection_settings(
+    target: &WifiConnectTarget,
+    password: Option<&str>,
+    wep_key_type: Option<WepKeyType>,
+) -> Result<Option<ConnectionSettings>> {
+    let Some(password) = password else {
+        tracing::info!(ssid = %target.ssid, "WEP network needs a key/passphrase; no password supplied to D-Bus add-and-activate");
+        return Ok(None);
+    };
+    tracing::debug!(ssid = %target.ssid, wep_key_type = ?wep_key_type, "network appears to use WEP authentication");
+    wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key)).map(Some)
+}
+
+fn enterprise_connection_settings(
+    target: &WifiConnectTarget,
+    ap: &crate::model::AccessPoint,
+    password: Option<&str>,
+) -> Result<Option<ConnectionSettings>> {
+    let Some(enterprise) = &target.enterprise else {
+        tracing::info!(ssid = %target.ssid, "enterprise network needs structured 802.1X credentials; none supplied to D-Bus add-and-activate");
+        return Ok(None);
+    };
+    tracing::debug!(ssid = %target.ssid, eap = ?enterprise.eap, "network supports WPA-Enterprise authentication");
+    enterprise_wifi_connection_settings(ap, enterprise, password).map(Some)
 }
 
 fn apply_target_connection_metadata(

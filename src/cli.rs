@@ -48,9 +48,9 @@ pub(crate) enum Command {
 pub(crate) enum WifiCommand {
     /// List visible Wi-Fi networks enriched with saved-profile matches and capabilities.
     Networks(ListOptions),
-    /// Request a scan, wait for completion, then emit an nm-api JSON response.
+    /// Request a one-shot scan, wait for completion, then emit an nm-api JSON response.
     Scan(ScanOptions),
-    /// Connect to an SSID using NetworkManager D-Bus, with nmcli fallback for remaining edge cases.
+    /// Connect to an SSID using NetworkManager D-Bus.
     Connect(ConnectOptions),
     /// Connect to an exact JSON target request read from stdin.
     ConnectTarget(ConnectTargetOptions),
@@ -107,15 +107,9 @@ pub(crate) struct ScanOptions {
     /// Scan completion timeout in seconds.
     #[arg(long, default_value_t = 12)]
     pub(crate) timeout: u64,
-    /// Emit JSON Lines snapshots while NetworkManager discovers access points.
-    #[arg(long)]
-    pub(crate) stream: bool,
     /// Return an error instead of printing cached results when scan fails.
     #[arg(long)]
     pub(crate) strict: bool,
-    /// Number of scan request retries when NetworkManager rejects a request.
-    #[arg(long, default_value_t = 2)]
-    pub(crate) retries: u32,
     /// Write latest snapshot/status files under $XDG_RUNTIME_DIR/nm-daemon.
     #[arg(long)]
     pub(crate) cache: bool,

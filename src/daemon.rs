@@ -13,7 +13,9 @@ use crate::cli::{Command, NetworkCommand, ProfileCommand, WifiCommand};
 use crate::daemon_dispatch::{dispatch_call, json_response, subscribe_streams};
 use crate::daemon_event::event_json;
 use crate::daemon_runtime::DaemonRuntime;
-use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource, ensure_domain};
+use crate::error::{
+    DomainError, ErrorCode, ErrorOperation, ErrorSource, best_effort, ensure_domain,
+};
 use crate::protocol::{Method, Stream};
 
 pub(crate) const DBUS_BUS_NAME: &str = "org.laufan.NmDaemon";
@@ -55,37 +57,50 @@ pub(crate) fn try_forward_command(command: &Command) -> Result<ForwardOutcome> {
 pub(crate) fn run_daemon() -> Result<()> {
     let connection = zbus::blocking::Connection::session().context("connect to session D-Bus")?;
     let runtime = DaemonRuntime::start(crate::nm::Nm::new()?);
+    export_daemon_interface(&connection, &runtime)?;
+    watch_client_disconnects(connection.clone(), Arc::clone(&runtime));
+    register_secret_agent(&connection, &runtime);
+    log_daemon_started();
+    loop {
+        std::thread::park();
+    }
+}
+
+fn export_daemon_interface(
+    connection: &zbus::blocking::Connection,
+    runtime: &Arc<DaemonRuntime>,
+) -> Result<()> {
     connection
         .object_server()
         .at(
             DBUS_OBJECT_PATH,
             NmDaemonInterface {
-                runtime: Arc::clone(&runtime),
+                runtime: Arc::clone(runtime),
             },
         )
         .context("export nm-daemon D-Bus object")?;
     connection
         .request_name(DBUS_BUS_NAME)
         .with_context(|| format!("own D-Bus name {DBUS_BUS_NAME}"))?;
-    watch_client_disconnects(connection.clone(), Arc::clone(&runtime));
+    Ok(())
+}
 
+fn register_secret_agent(connection: &zbus::blocking::Connection, runtime: &DaemonRuntime) {
     if let Err(err) = crate::daemon_secret::register_secret_agent(
-        &connection,
+        connection,
         &runtime.network_manager_connection(),
     ) {
-        tracing::warn!(error = %format_args!("{err:#}"), "NetworkManager SecretAgent registration failed");
+        tracing::warn!(error = %crate::error::err_chain(&err), "NetworkManager SecretAgent registration failed");
     }
+}
 
+fn log_daemon_started() {
     tracing::info!(
         bus_name = DBUS_BUS_NAME,
         object_path = DBUS_OBJECT_PATH,
         interface = DBUS_INTERFACE,
         "nm-daemon D-Bus service started"
     );
-
-    loop {
-        std::thread::park();
-    }
 }
 
 fn forward_request_for_command(command: &Command) -> Option<(Method, String)> {
@@ -195,7 +210,7 @@ impl NmDaemonInterface {
     fn cancel(&self, request_id: &str, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>) {
         let outcome = self.runtime.cancel(request_id);
         if outcome.subscription {
-            emit_json_event_best_effort(
+            emit_json_event_nonfatal(
                 &emitter,
                 Stream::DaemonSubscription,
                 Some(request_id),
@@ -204,7 +219,7 @@ impl NmDaemonInterface {
             );
         }
         if outcome.task || !outcome.found() {
-            emit_json_event_best_effort(
+            emit_json_event_nonfatal(
                 &emitter,
                 Stream::DaemonRequest,
                 Some(request_id),
@@ -223,29 +238,41 @@ fn watch_client_disconnects(connection: zbus::blocking::Connection, runtime: Arc
     std::thread::Builder::new()
         .name("nm-dbus-owners".to_string())
         .spawn(move || {
-            let result = (|| -> Result<()> {
-                let rule = MatchRule::builder()
-                    .msg_type(Type::Signal)
-                    .sender("org.freedesktop.DBus")?
-                    .interface("org.freedesktop.DBus")?
-                    .member("NameOwnerChanged")?
-                    .build();
-                let mut changes = MessageIterator::for_match_rule(rule, &connection, Some(64))?;
-                for message in &mut changes {
-                    let message = message?;
-                    let (name, _old_owner, new_owner): (String, String, String) =
-                        message.body().deserialize()?;
-                    if name.starts_with(':') && new_owner.is_empty() {
-                        runtime.drop_owner(name);
-                    }
-                }
-                Ok(())
-            })();
-            if let Err(error) = result {
-                tracing::warn!(error = %format_args!("{error:#}"), "D-Bus owner watcher stopped");
-            }
+            log_owner_watch_result(run_owner_watch(&connection, &runtime));
         })
         .expect("spawn D-Bus owner watcher");
+}
+
+fn run_owner_watch(connection: &zbus::blocking::Connection, runtime: &DaemonRuntime) -> Result<()> {
+    let rule = owner_change_rule()?;
+    let mut changes = MessageIterator::for_match_rule(rule, connection, Some(64))?;
+    for message in &mut changes {
+        handle_owner_change(message?, runtime)?;
+    }
+    Ok(())
+}
+
+fn owner_change_rule() -> Result<MatchRule<'static>> {
+    Ok(MatchRule::builder()
+        .msg_type(Type::Signal)
+        .sender("org.freedesktop.DBus")?
+        .interface("org.freedesktop.DBus")?
+        .member("NameOwnerChanged")?
+        .build())
+}
+
+fn handle_owner_change(message: zbus::Message, runtime: &DaemonRuntime) -> Result<()> {
+    let (name, _old_owner, new_owner): (String, String, String) = message.body().deserialize()?;
+    if name.starts_with(':') && new_owner.is_empty() {
+        runtime.drop_owner(name);
+    }
+    Ok(())
+}
+
+fn log_owner_watch_result(result: Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!(error = %crate::error::err_chain(&error), "D-Bus owner watcher stopped");
+    }
 }
 
 pub(crate) fn emit_event_signal(
@@ -282,16 +309,17 @@ pub(crate) fn emit_json_event(
     emit_event_signal(emitter, stream, event_json(stream, request_id, event, data))
 }
 
-pub(crate) fn emit_json_event_best_effort(
+pub(crate) fn emit_json_event_nonfatal(
     emitter: &SignalEmitter<'_>,
     stream: Stream,
     request_id: Option<&str>,
     event: &str,
     data: Value,
 ) {
-    if let Err(err) = emit_json_event(emitter, stream, request_id, event, data) {
-        tracing::warn!(stream = %stream, event, error = %format_args!("{err:#}"), "failed to emit registered JSON event");
-    }
+    best_effort(
+        format!("failed to emit registered JSON event {stream}.{event}"),
+        || emit_json_event(emitter, stream, request_id, event, data),
+    );
 }
 
 #[cfg(test)]
@@ -303,6 +331,7 @@ mod tests {
 
     use super::*;
     use crate::command::SystemCommandRunner;
+    use crate::nl80211::UnavailableWirelessTelemetry;
     use crate::nm::{NM_PATH, Nm};
     use crate::test_support::TestPeer;
 
@@ -323,10 +352,11 @@ mod tests {
             .object_server()
             .at(NM_PATH, FakeNetworkManager)
             .unwrap();
-        let nm = Nm::with_connection_runner_and_destination(
+        let nm = Nm::with_connection_runner_destination_and_telemetry(
             networkmanager.client.clone(),
             Arc::new(SystemCommandRunner),
             ":1.0",
+            Arc::new(UnavailableWirelessTelemetry),
         );
         let runtime = DaemonRuntime::start(nm);
 

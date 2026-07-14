@@ -1,4 +1,3 @@
-use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug)]
@@ -9,19 +8,11 @@ impl Deadline {
         Self(Instant::now() + timeout)
     }
 
-    pub(crate) fn min(self, other: Self) -> Self {
-        Self(self.0.min(other.0))
-    }
-
     pub(crate) fn expired(self) -> bool {
         Instant::now() >= self.0
     }
 
     pub(crate) fn wait(self, max: Duration) -> Duration {
         max.min(self.0.saturating_duration_since(Instant::now()))
-    }
-
-    pub(crate) fn sleep(self, max: Duration) {
-        sleep(self.wait(max));
     }
 }

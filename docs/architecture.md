@@ -1,12 +1,13 @@
 # Architecture
 
-`nm-daemon` has one application model with two transport adapters: the compatibility CLI and the user-session D-Bus service. Transport code parses requests and serializes responses; it does not own NetworkManager workflows, cache policy, or fallback decisions.
+`nm-daemon` has one application model with two transport adapters: the compatibility CLI and the user-session D-Bus service. Transport code parses requests and serializes responses; it does not own NetworkManager workflows or cache policy.
 
 ```text
 CLI actions ─────┐
                  ├─> Application services ─> NetworkManager D-Bus
 D-Bus handlers ──┘           │               Secret Service D-Bus
-                             │               command gateway (nmcli/iw)
+                             │               diagnostic nmcli adapter
+                             │               kernel nl80211 telemetry
                              └──────────────> cache repositories
 
 D-Bus daemon ─> shared runtime ─> bounded tasks, cancellation, subscriptions
@@ -22,6 +23,8 @@ D-Bus daemon ─> shared runtime ─> bounded tasks, cancellation, subscriptions
 - connect requests and typed connect events;
 - disconnect;
 - saved-profile listing and profile mutations.
+
+`src/forget.rs` owns the complete disconnect-and-forget vertical slice: in-flight connect cancellation, exact-SSID profile resolution, deactivation confirmation, profile mutation, cache refresh, result construction, and audit persistence.
 
 `src/actions.rs` and the `src/daemon_*.rs` handlers are adapters around these services. Disconnect and saved-profile mutations are exposed through both the forwarding CLI and the canonical D-Bus application boundary.
 
@@ -39,12 +42,12 @@ AlreadyActive
    └─ CreateProfile
       ├─ activated ---------------------------------> Verify
       ├─ not found once -> Rescan -> SavedProfile
-      └─ eligible D-Bus failure -> Fallback --------> Verify
+      └─ unsupported or failed ---------------------> Error
 ```
 
-A successful saved-profile activation, newly created profile, or subprocess fallback enters `Verify`. A not-found D-Bus result may trigger one targeted `Rescan` before retrying the D-Bus states. Terminal authentication/authorization failures do not fall through to `nmcli`; fallback eligibility is centralized in the connection error policy. Failed profiles created during an attempt are cleaned up from one failure path.
+A successful saved-profile activation or newly created profile enters `Verify`. A missing visible target may trigger one targeted `Rescan` before retrying the D-Bus states. There is no subprocess connection fallback. Failed profiles created during an attempt are cleaned up from one failure path.
 
-The state machine records the selected engine as `already-active`, `dbus`, or `nmcli-fallback`, updates cache/history on completion, and checks cancellation between transitions and while waiting for activation.
+Verification requires the selected device to report activation and the exact SSID bytes to match. BSSID and NetworkManager AP object paths remain activation-selection hints because roaming or AP object replacement can legitimately change them during activation. The state machine records `already-active` or `dbus`, updates cache/history on completion, and checks cancellation between transitions and while waiting for activation.
 
 ## Domain model and compatibility boundary
 
@@ -54,7 +57,7 @@ Internally, states that must be mutually exclusive are enums rather than boolean
 - typed security, authentication, prompt, connection-engine, and failure-reason enums;
 - validated newtypes for SSIDs, BSSIDs, interface names, and NetworkManager object paths.
 
-An SSID owns its exact bytes and display form, so an empty byte vector is not a second input channel. Custom v1 serializers derive the historical capability booleans (`can_connect`, `needs_password`, and related fields) from `ConnectionReadiness`. Deserializers reject contradictory compatibility fields. This keeps the `nm-api` v1 wire contract stable without allowing invalid states inside the application.
+An SSID owns its exact bytes and display form, so an empty byte vector is not a second input channel. `src/model/wire_v1.rs` isolates the compatibility DTOs and custom serializers that derive the historical capability booleans (`can_connect`, `needs_password`, and related fields) from `ConnectionReadiness`. Deserializers reject contradictory compatibility fields. This keeps the `nm-api` v1 wire contract stable without allowing invalid states inside the application.
 
 ## Typed errors
 
@@ -69,7 +72,7 @@ Validation, zbus, I/O, serialization, NetworkManager, and command failures are c
 
 ## Protocol registry
 
-`src/protocol.rs` is the source of truth for frontend method and stream names. `Method` and `Stream` registry entries define canonical names, aliases, parameter kinds/examples, response keys, associated streams, delivery modes, defaults, events, and descriptions.
+`src/protocol.rs` is the source of truth for frontend method and stream names. `Method` and `Stream` registry entries define canonical names, parameter kinds/examples, response keys, associated streams, delivery modes, defaults, events, and descriptions.
 
 Dispatch parsing, subscription validation, contract metadata, and the generated tables in [dbus-daemon.md](./dbus-daemon.md) consume this registry. `Subscribe` rejects the complete request if any stream is unknown or non-subscribable; `Subscribe([])` expands to registry defaults.
 
@@ -91,11 +94,13 @@ Runtime scan/status data lives under `$XDG_RUNTIME_DIR/nm-daemon` (with a per-us
 
 ## External command boundary
 
-All subprocess execution goes through the injectable `CommandRunner` in `src/command.rs`. Requests specify the operation and timeout, mark sensitive arguments for log redaction, capture stdout/stderr, preserve exit status, and honor cancellation by terminating the child.
+All subprocess execution goes through the injectable `CommandRunner` in `src/command.rs`. Requests specify the operation and timeout, capture stdout/stderr, preserve exit status, and honor cancellation by terminating the child. No remaining command accepts secrets in argv.
 
-Typed `Nmcli` and `Iw` adapters own parsing. The shared nmcli device parser supplies both status enrichment and diagnosis, rather than each caller interpreting command text. Connection fallback policy remains in the connection state machine; the runner only executes a requested command and reports a structured result.
+The typed `Nmcli` adapter is query-only. Its shared device parser supplies both status enrichment and diagnosis, rather than each caller interpreting command text. Connections use NetworkManager D-Bus exclusively.
 
-`nmcli` and `iw` remain deliberate compatibility/diagnostic escape hatches. They should become smaller as NetworkManager D-Bus coverage improves.
+Directional transmit and receive link rates bypass the command gateway. `src/nl80211.rs` queries the kernel's `nl80211` generic-netlink family for associated-station information and converts its typed bitrate attributes into Mbps. Failure remains best-effort and does not prevent status responses.
+
+`nmcli` remains a diagnostic and best-effort status-enrichment escape hatch, not a mutation or connection engine.
 
 ## Daemon runtime
 
@@ -108,7 +113,7 @@ The daemon creates one shared `Nm` instance and therefore one NetworkManager sys
 - coalesced status/connectivity refreshes shared by all subscribers;
 - coalesced background cache refreshes.
 
-Continuous streams are signal-driven, not one polling thread per subscription. Each refresh is computed once for the set of interested subscribers, and duplicate invalidations are coalesced without losing the final change. `Cancel` marks a task, wakes activation waits, terminates an in-flight command through the command gateway, and queues a best-effort NetworkManager disconnect for connect cancellation.
+Continuous streams are signal-driven, not one polling thread per subscription. Each refresh is computed once for the set of interested subscribers, and duplicate invalidations are coalesced without losing the final change. `Cancel` marks a task, wakes activation waits, and queues a best-effort NetworkManager disconnect for connect cancellation.
 
 ## SecretAgent and Secret Service
 
@@ -126,7 +131,7 @@ Boundary coverage also includes:
 
 - real daemon `Call`, `Subscribe`, event, and cancellation lifecycles over an in-process peer-to-peer D-Bus connection with a fake NetworkManager;
 - SecretAgent completion/cancellation timing and a fake Secret Service prompt path;
-- scripted command-runner fallback orchestration and typed failure behavior;
+- command-runner timeout, cancellation, capture, and typed failure behavior;
 - concurrent cache readers, writers, transactions, atomic replacement, and history rotation.
 
 These fakes sit at the NetworkManager, Secret Service, and subprocess boundaries. Application and daemon code under test remains production code.

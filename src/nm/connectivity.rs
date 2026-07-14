@@ -9,6 +9,14 @@ impl Nm {
         let code: u32 = nm
             .call("CheckConnectivity", &())
             .context("CheckConnectivity")?;
-        Ok(ConnectivityStatus::from_nm_code(code))
+        let status = ConnectivityStatus::from_nm_code(code);
+        tracing::debug!(
+            connectivity_code = status.code,
+            connectivity_state = status.state,
+            captive_portal = status.captive_portal,
+            full = status.full,
+            "NetworkManager connectivity check completed"
+        );
+        Ok(status)
     }
 }

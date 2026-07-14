@@ -1,10 +1,9 @@
-pub(crate) mod iw;
 pub(crate) mod nmcli;
 
 use std::ffi::OsString;
 use std::fmt;
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -35,82 +34,185 @@ impl CommandRunner for SystemCommandRunner {
         request: &CommandRequest,
         cancellation: Option<&AtomicBool>,
     ) -> Result<CommandOutput, CommandFailure> {
-        tracing::info!(
-            program = %request.program.to_string_lossy(),
-            args = ?request.redacted_args(),
-            timeout_ms = request.timeout.as_millis(),
-            "running external command"
-        );
-        if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-            return Err(CommandFailure::cancelled(request));
-        }
-
-        let mut command = Command::new(&request.program);
-        command
-            .args(request.args.iter().map(|argument| &argument.value))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|error| CommandFailure::io(request, CommandStage::Spawn, error))?;
-        let stdout = output_reader(child.stdout.take(), request, CommandStage::ReadStdout)?;
-        let stderr = output_reader(child.stderr.take(), request, CommandStage::ReadStderr)?;
-        let started = Instant::now();
-
-        let status = loop {
-            if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                tracing::info!(
-                    pid = child.id(),
-                    "killing external command after cancellation"
-                );
-                let _ = child.kill();
-                let _ = child.wait();
-                let (stdout, stderr) = collect_output(stdout, stderr, request)?;
-                return Err(CommandFailure::cancelled_with_output(
-                    request, stdout, stderr,
-                ));
-            }
-            if started.elapsed() >= request.timeout {
-                tracing::warn!(pid = child.id(), "killing external command after timeout");
-                let _ = child.kill();
-                let _ = child.wait();
-                let (stdout, stderr) = collect_output(stdout, stderr, request)?;
-                return Err(CommandFailure::timed_out(request, stdout, stderr));
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => thread::sleep(POLL_INTERVAL),
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(CommandFailure::io(request, CommandStage::Poll, error));
-                }
-            }
-        };
-
+        log_command_start(request);
+        ensure_command_not_cancelled(request, cancellation)?;
+        let (child, stdout, stderr) = spawn_command(request)?;
+        let (status, stdout, stderr) =
+            wait_for_command(child, stdout, stderr, request, cancellation)?;
         let (stdout, stderr) = collect_output(stdout, stderr, request)?;
-        if !status.success() {
-            tracing::warn!(
-                program = %request.program.to_string_lossy(),
-                exit_code = ?status.code(),
-                "external command failed"
-            );
-            return Err(CommandFailure::exit(request, status.code(), stdout, stderr));
-        }
-        tracing::debug!(
-            program = %request.program.to_string_lossy(),
-            exit_code = ?status.code(),
-            "external command succeeded"
-        );
-        Ok(CommandOutput { stdout, stderr })
+        command_result(request, status, stdout, stderr)
     }
+}
+
+fn log_command_start(request: &CommandRequest) {
+    tracing::info!(
+        program = %request.program.to_string_lossy(),
+        args = ?request.redacted_args(),
+        timeout_ms = request.timeout.as_millis(),
+        "running external command"
+    );
+}
+
+fn ensure_command_not_cancelled(
+    request: &CommandRequest,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(), CommandFailure> {
+    if command_cancelled(cancellation) {
+        return Err(CommandFailure::cancelled(request));
+    }
+    Ok(())
+}
+
+fn spawn_command(
+    request: &CommandRequest,
+) -> Result<(Child, OutputReader, OutputReader), CommandFailure> {
+    let mut command = command_for_request(request);
+    let mut child = command
+        .spawn()
+        .map_err(|error| CommandFailure::io(request, CommandStage::Spawn, error))?;
+    let stdout = output_reader(child.stdout.take(), request, CommandStage::ReadStdout)?;
+    let stderr = output_reader(child.stderr.take(), request, CommandStage::ReadStderr)?;
+    Ok((child, stdout, stderr))
+}
+
+fn command_for_request(request: &CommandRequest) -> Command {
+    let mut command = Command::new(&request.program);
+    command
+        .args(&request.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+fn wait_for_command(
+    mut child: Child,
+    stdout: OutputReader,
+    stderr: OutputReader,
+    request: &CommandRequest,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(ExitStatus, OutputReader, OutputReader), CommandFailure> {
+    let started = Instant::now();
+    let mut stdout = Some(stdout);
+    let mut stderr = Some(stderr);
+    loop {
+        ensure_command_running(
+            &mut child,
+            &mut stdout,
+            &mut stderr,
+            request,
+            started,
+            cancellation,
+        )?;
+        if let Some(status) = poll_command(&mut child, request)? {
+            return Ok((
+                status,
+                stdout.take().expect("stdout reader is available"),
+                stderr.take().expect("stderr reader is available"),
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn ensure_command_running(
+    child: &mut Child,
+    stdout: &mut Option<OutputReader>,
+    stderr: &mut Option<OutputReader>,
+    request: &CommandRequest,
+    started: Instant,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(), CommandFailure> {
+    let Some(reason) = stop_reason(started, request.timeout, cancellation) else {
+        return Ok(());
+    };
+    let stdout = stdout.take().expect("stdout reader is available");
+    let stderr = stderr.take().expect("stderr reader is available");
+    Err(stop_command(child, stdout, stderr, request, reason)?)
+}
+
+#[derive(Clone, Copy)]
+enum CommandStopReason {
+    Cancelled,
+    TimedOut,
+}
+
+fn stop_reason(
+    started: Instant,
+    timeout: Duration,
+    cancellation: Option<&AtomicBool>,
+) -> Option<CommandStopReason> {
+    command_cancelled(cancellation)
+        .then_some(CommandStopReason::Cancelled)
+        .or_else(|| (started.elapsed() >= timeout).then_some(CommandStopReason::TimedOut))
+}
+
+fn command_cancelled(cancellation: Option<&AtomicBool>) -> bool {
+    cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+fn poll_command(
+    child: &mut Child,
+    request: &CommandRequest,
+) -> Result<Option<ExitStatus>, CommandFailure> {
+    child.try_wait().map_err(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        CommandFailure::io(request, CommandStage::Poll, error)
+    })
+}
+
+fn stop_command(
+    child: &mut Child,
+    stdout: OutputReader,
+    stderr: OutputReader,
+    request: &CommandRequest,
+    reason: CommandStopReason,
+) -> Result<CommandFailure, CommandFailure> {
+    log_command_stop(child, reason);
+    let _ = child.kill();
+    let _ = child.wait();
+    let (stdout, stderr) = collect_output(stdout, stderr, request)?;
+    Ok(match reason {
+        CommandStopReason::Cancelled => {
+            CommandFailure::cancelled_with_output(request, stdout, stderr)
+        }
+        CommandStopReason::TimedOut => CommandFailure::timed_out(request, stdout, stderr),
+    })
+}
+
+fn log_command_stop(child: &Child, reason: CommandStopReason) {
+    match reason {
+        CommandStopReason::Cancelled => {
+            tracing::info!(
+                pid = child.id(),
+                "killing external command after cancellation"
+            )
+        }
+        CommandStopReason::TimedOut => {
+            tracing::warn!(pid = child.id(), "killing external command after timeout")
+        }
+    }
+}
+
+fn command_result(
+    request: &CommandRequest,
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+) -> Result<CommandOutput, CommandFailure> {
+    if !status.success() {
+        tracing::warn!(program = %request.program.to_string_lossy(), exit_code = ?status.code(), "external command failed");
+        return Err(CommandFailure::exit(request, status.code(), stdout, stderr));
+    }
+    tracing::debug!(program = %request.program.to_string_lossy(), exit_code = ?status.code(), "external command succeeded");
+    Ok(CommandOutput { stdout, stderr })
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CommandRequest {
     program: OsString,
-    args: Vec<CommandArgument>,
+    args: Vec<OsString>,
     timeout: Duration,
     operation: ErrorOperation,
 }
@@ -129,53 +231,21 @@ impl CommandRequest {
         }
     }
 
-    pub(crate) fn arg(mut self, value: impl Into<OsString>) -> Self {
-        self.args.push(CommandArgument {
-            value: value.into(),
-            sensitive: false,
-        });
-        self
-    }
-
-    pub(crate) fn sensitive_arg(mut self, value: impl Into<OsString>) -> Self {
-        self.args.push(CommandArgument {
-            value: value.into(),
-            sensitive: true,
-        });
-        self
-    }
-
     pub(crate) fn args<I, S>(mut self, values: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<OsString>,
     {
-        self.args
-            .extend(values.into_iter().map(|value| CommandArgument {
-                value: value.into(),
-                sensitive: false,
-            }));
+        self.args.extend(values.into_iter().map(Into::into));
         self
     }
 
     fn redacted_args(&self) -> Vec<String> {
         self.args
             .iter()
-            .map(|argument| {
-                if argument.sensitive {
-                    "<redacted>".to_string()
-                } else {
-                    argument.value.to_string_lossy().into_owned()
-                }
-            })
+            .map(|argument| argument.to_string_lossy().into_owned())
             .collect()
     }
-}
-
-#[derive(Debug, Clone)]
-struct CommandArgument {
-    value: OsString,
-    sensitive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,14 +277,6 @@ pub(crate) struct CommandFailure {
 }
 
 impl CommandFailure {
-    pub(crate) fn kind(&self) -> CommandFailureKind {
-        self.kind
-    }
-
-    pub(crate) fn exit_code(&self) -> Option<i32> {
-        self.exit_code
-    }
-
     pub(crate) fn into_domain(self) -> DomainError {
         let code = match self.kind {
             CommandFailureKind::Timeout => ErrorCode::Timeout,
@@ -432,7 +494,6 @@ fn decode_output(output: Vec<u8>) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::collections::VecDeque;
-    use std::ffi::OsStr;
     use std::sync::Mutex;
 
     use super::*;
@@ -452,39 +513,6 @@ pub(crate) mod tests {
                 requests: Mutex::new(Vec::new()),
             }
         }
-
-        pub(crate) fn nmcli_failure_then_success(exit_code: i32, stderr: &str) -> Self {
-            let request =
-                CommandRequest::new("nmcli", ErrorOperation::Connect, Duration::from_secs(90));
-            Self {
-                responses: Mutex::new(VecDeque::from([
-                    Err(CommandFailure::exit(
-                        &request,
-                        Some(exit_code),
-                        String::new(),
-                        stderr.to_string(),
-                    )),
-                    Ok(CommandOutput {
-                        stdout: String::new(),
-                        stderr: String::new(),
-                    }),
-                ])),
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-
-        pub(crate) fn redacted_args(&self) -> Vec<String> {
-            self.requests.lock().unwrap()[0].redacted_args()
-        }
-
-        pub(crate) fn all_redacted_args(&self) -> Vec<Vec<String>> {
-            self.requests
-                .lock()
-                .unwrap()
-                .iter()
-                .map(CommandRequest::redacted_args)
-                .collect()
-        }
     }
 
     impl CommandRunner for FakeRunner {
@@ -500,19 +528,6 @@ pub(crate) mod tests {
                 .pop_front()
                 .expect("fake command response")
         }
-    }
-
-    #[test]
-    fn sensitive_arguments_are_redacted_from_command_metadata() {
-        let request = CommandRequest::new(
-            OsStr::new("tool"),
-            ErrorOperation::RunNmcli,
-            Duration::from_secs(1),
-        )
-        .arg("password")
-        .sensitive_arg("secret");
-
-        assert_eq!(request.redacted_args(), ["password", "<redacted>"]);
     }
 
     #[test]

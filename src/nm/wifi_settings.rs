@@ -8,16 +8,16 @@ use zvariant::OwnedValue;
 use super::{ConnectionSettings, owned_value};
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
-    AccessPoint, EnterpriseAuth, NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, WepKeyType,
-    WifiConnectTarget, ap_uses_owe, enterprise_key_mgmt,
+    AccessPoint, EnterpriseAuth, WepKeyType, WifiConnectTarget, ap_uses_owe, enterprise_key_mgmt,
 };
+use crate::variant::{insert_optional_strings, insert_optional_u32s, insert_string};
 pub(super) use profile::apply_target_profile_settings;
 
 pub(super) fn psk_wifi_connection_settings(
     ap: &AccessPoint,
     password: &str,
 ) -> Result<ConnectionSettings> {
-    let key_mgmt = psk_key_mgmt(ap);
+    let key_mgmt = crate::auth::personal_key_management(ap.wpa_flags, ap.rsn_flags);
     if key_mgmt == "wpa-psk" {
         validate_wpa_psk(password)?;
     }
@@ -105,16 +105,7 @@ fn security_settings_for_target_hint(
     password: Option<&str>,
     wep_key_type: Option<WepKeyType>,
 ) -> Result<Option<ConnectionSettings>> {
-    let key_mgmt = target
-        .key_mgmt
-        .as_deref()
-        .or_else(|| {
-            target
-                .enterprise
-                .as_ref()
-                .and_then(|auth| auth.key_mgmt.as_deref())
-        })
-        .map(normalized_key_mgmt);
+    let key_mgmt = target_key_mgmt(target);
     if let Some(enterprise) = &target.enterprise {
         let key_mgmt = key_mgmt.as_deref().unwrap_or("wpa-eap");
         return enterprise_wifi_connection_settings_with_key_mgmt(enterprise, password, key_mgmt)
@@ -122,45 +113,11 @@ fn security_settings_for_target_hint(
     }
 
     match key_mgmt.as_deref() {
-        None => {
-            let Some(password) = password else {
-                return Ok(None);
-            };
-            if let Some(wep_key_type) = wep_key_type {
-                wep_wifi_connection_settings(password, wep_key_type).map(Some)
-            } else {
-                validate_wpa_psk(password)?;
-                Ok(Some(security_connection_settings(
-                    wireless_security_section("wpa-psk", password)?,
-                )))
-            }
-        }
+        None => security_settings_without_hint(password, wep_key_type),
         Some("open" | "none" | "--") => Ok(None),
         Some("owe") => owe_wifi_connection_settings().map(Some),
-        Some("wep") => {
-            let Some(password) = password else {
-                return Err(DomainError::connect(
-                    crate::model::ConnectFailureReason::SecretRequired,
-                    "hidden WEP network requires a password/key",
-                )
-                .into());
-            };
-            wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key))
-                .map(Some)
-        }
-        Some("sae" | "wpa-psk") => {
-            let Some(password) = password else {
-                return Err(DomainError::connect(
-                    crate::model::ConnectFailureReason::SecretRequired,
-                    "hidden WPA/SAE network requires a password",
-                )
-                .into());
-            };
-            validate_wpa_psk(password)?;
-            Ok(Some(security_connection_settings(
-                wireless_security_section(key_mgmt.as_deref().unwrap_or("wpa-psk"), password)?,
-            )))
-        }
+        Some("wep") => hidden_wep_settings(password, wep_key_type),
+        Some(key @ ("sae" | "wpa-psk")) => hidden_personal_settings(key, password),
         Some("wpa-eap" | "wpa-eap-suite-b-192") => Err(DomainError::connect(
             crate::model::ConnectFailureReason::SecretRequired,
             "hidden enterprise network requires an enterprise credential object",
@@ -175,21 +132,86 @@ fn security_settings_for_target_hint(
     }
 }
 
+fn target_key_mgmt(target: &WifiConnectTarget) -> Option<String> {
+    target
+        .key_mgmt
+        .as_deref()
+        .or_else(|| target.enterprise.as_ref()?.key_mgmt.as_deref())
+        .map(normalized_key_mgmt)
+}
+
+fn security_settings_without_hint(
+    password: Option<&str>,
+    wep_key_type: Option<WepKeyType>,
+) -> Result<Option<ConnectionSettings>> {
+    let Some(password) = password else {
+        return Ok(None);
+    };
+    if let Some(wep_key_type) = wep_key_type {
+        return wep_wifi_connection_settings(password, wep_key_type).map(Some);
+    }
+    validate_wpa_psk(password)?;
+    Ok(Some(security_connection_settings(
+        wireless_security_section("wpa-psk", password)?,
+    )))
+}
+
+fn hidden_wep_settings(
+    password: Option<&str>,
+    wep_key_type: Option<WepKeyType>,
+) -> Result<Option<ConnectionSettings>> {
+    let password =
+        required_hidden_password(password, "hidden WEP network requires a password/key")?;
+    wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key)).map(Some)
+}
+
+fn hidden_personal_settings(
+    key_mgmt: &str,
+    password: Option<&str>,
+) -> Result<Option<ConnectionSettings>> {
+    let password =
+        required_hidden_password(password, "hidden WPA/SAE network requires a password")?;
+    validate_wpa_psk(password)?;
+    Ok(Some(security_connection_settings(
+        wireless_security_section(key_mgmt, password)?,
+    )))
+}
+
+fn required_hidden_password<'a>(password: Option<&'a str>, message: &str) -> Result<&'a str> {
+    password.ok_or_else(|| {
+        DomainError::connect(crate::model::ConnectFailureReason::SecretRequired, message).into()
+    })
+}
+
 fn enterprise_wifi_connection_settings_with_key_mgmt(
     enterprise: &EnterpriseAuth,
     password: Option<&str>,
     key_mgmt: &str,
 ) -> Result<ConnectionSettings> {
-    let mut security = HashMap::new();
-    security.insert("key-mgmt".to_string(), owned_value(key_mgmt.to_string())?);
+    let security = enterprise_security_section(key_mgmt)?;
+    let mut dot1x = enterprise_dot1x_section(enterprise, password)?;
+    insert_enterprise_certificate_settings(&mut dot1x, enterprise)?;
+    insert_enterprise_flag_settings(&mut dot1x, enterprise)?;
 
-    let mut dot1x = HashMap::new();
-    let eap = if enterprise.eap.is_empty() {
-        vec!["peap".to_string()]
-    } else {
-        enterprise.eap.clone()
-    };
-    dot1x.insert("eap".to_string(), owned_value(eap)?);
+    Ok(ConnectionSettings::from([
+        ("802-11-wireless-security".to_string(), security),
+        ("802-1x".to_string(), dot1x),
+    ]))
+}
+
+fn enterprise_security_section(key_mgmt: &str) -> Result<HashMap<String, OwnedValue>> {
+    Ok(HashMap::from([(
+        "key-mgmt".to_string(),
+        owned_value(key_mgmt.to_string())?,
+    )]))
+}
+
+fn enterprise_dot1x_section(
+    enterprise: &EnterpriseAuth,
+    password: Option<&str>,
+) -> Result<HashMap<String, OwnedValue>> {
+    let eap = enterprise_eap_methods(enterprise);
+    let mut dot1x = HashMap::from([("eap".to_string(), owned_value(eap)?)]);
     insert_required_string(&mut dot1x, "identity", enterprise.identity.as_deref())?;
     insert_optional_strings(
         &mut dot1x,
@@ -216,6 +238,21 @@ fn enterprise_wifi_connection_settings_with_key_mgmt(
             ),
         ],
     )?;
+    Ok(dot1x)
+}
+
+fn enterprise_eap_methods(enterprise: &EnterpriseAuth) -> Vec<String> {
+    if enterprise.eap.is_empty() {
+        vec!["peap".to_string()]
+    } else {
+        enterprise.eap.clone()
+    }
+}
+
+fn insert_enterprise_certificate_settings(
+    dot1x: &mut HashMap<String, OwnedValue>,
+    enterprise: &EnterpriseAuth,
+) -> Result<()> {
     if !enterprise.altsubject_matches.is_empty() {
         dot1x.insert(
             "altsubject-matches".to_string(),
@@ -223,7 +260,7 @@ fn enterprise_wifi_connection_settings_with_key_mgmt(
         );
     }
     insert_optional_strings(
-        &mut dot1x,
+        dot1x,
         &[
             ("client-cert", enterprise.client_cert.as_deref()),
             ("private-key", enterprise.private_key.as_deref()),
@@ -238,8 +275,15 @@ fn enterprise_wifi_connection_settings_with_key_mgmt(
     if let Some(system_ca_certs) = enterprise.system_ca_certs {
         dot1x.insert("system-ca-certs".to_string(), owned_value(system_ca_certs)?);
     }
+    Ok(())
+}
+
+fn insert_enterprise_flag_settings(
+    dot1x: &mut HashMap<String, OwnedValue>,
+    enterprise: &EnterpriseAuth,
+) -> Result<()> {
     insert_optional_u32s(
-        &mut dot1x,
+        dot1x,
         &[
             ("password-flags", enterprise.password_flags),
             (
@@ -248,12 +292,7 @@ fn enterprise_wifi_connection_settings_with_key_mgmt(
             ),
             ("pin-flags", enterprise.pin_flags),
         ],
-    )?;
-
-    Ok(ConnectionSettings::from([
-        ("802-11-wireless-security".to_string(), security),
-        ("802-1x".to_string(), dot1x),
-    ]))
+    )
 }
 
 pub(super) fn wep_wifi_connection_settings(
@@ -309,36 +348,42 @@ fn base_wifi_connection_settings(
     hidden: bool,
 ) -> Result<ConnectionSettings> {
     Ok(ConnectionSettings::from([
-        (
-            "connection".to_string(),
-            HashMap::from([
-                ("id".to_string(), owned_value(ssid.to_string())?),
-                (
-                    "type".to_string(),
-                    owned_value("802-11-wireless".to_string())?,
-                ),
-            ]),
-        ),
+        ("connection".to_string(), base_connection_section(ssid)?),
         (
             "802-11-wireless".to_string(),
-            HashMap::from([
-                ("ssid".to_string(), owned_value(ssid_bytes.to_vec())?),
-                (
-                    "mode".to_string(),
-                    owned_value("infrastructure".to_string())?,
-                ),
-                ("hidden".to_string(), owned_value(hidden)?),
-            ]),
+            base_wireless_section(ssid_bytes, hidden)?,
         ),
+        ("ipv4".to_string(), automatic_ip_section()?),
+        ("ipv6".to_string(), automatic_ip_section()?),
+    ]))
+}
+
+fn base_connection_section(ssid: &str) -> Result<HashMap<String, OwnedValue>> {
+    Ok(HashMap::from([
+        ("id".to_string(), owned_value(ssid.to_string())?),
         (
-            "ipv4".to_string(),
-            HashMap::from([("method".to_string(), owned_value("auto".to_string())?)]),
-        ),
-        (
-            "ipv6".to_string(),
-            HashMap::from([("method".to_string(), owned_value("auto".to_string())?)]),
+            "type".to_string(),
+            owned_value("802-11-wireless".to_string())?,
         ),
     ]))
+}
+
+fn base_wireless_section(ssid_bytes: &[u8], hidden: bool) -> Result<HashMap<String, OwnedValue>> {
+    Ok(HashMap::from([
+        ("ssid".to_string(), owned_value(ssid_bytes.to_vec())?),
+        (
+            "mode".to_string(),
+            owned_value("infrastructure".to_string())?,
+        ),
+        ("hidden".to_string(), owned_value(hidden)?),
+    ]))
+}
+
+fn automatic_ip_section() -> Result<HashMap<String, OwnedValue>> {
+    Ok(HashMap::from([(
+        "method".to_string(),
+        owned_value("auto".to_string())?,
+    )]))
 }
 
 fn security_connection_settings(section: HashMap<String, OwnedValue>) -> ConnectionSettings {
@@ -396,57 +441,7 @@ fn insert_required_string(
         .with_detail("field", key)
         .into());
     };
-    settings.insert(key.to_string(), owned_value(value.to_string())?);
-    Ok(())
-}
-
-fn insert_optional_string(
-    settings: &mut HashMap<String, OwnedValue>,
-    key: &str,
-    value: Option<&str>,
-) -> Result<()> {
-    if let Some(value) = value.filter(|value| !value.is_empty()) {
-        settings.insert(key.to_string(), owned_value(value.to_string())?);
-    }
-    Ok(())
-}
-
-fn insert_optional_strings(
-    settings: &mut HashMap<String, OwnedValue>,
-    values: &[(&str, Option<&str>)],
-) -> Result<()> {
-    values
-        .iter()
-        .try_for_each(|(key, value)| insert_optional_string(settings, key, *value))
-}
-
-fn insert_optional_u32(
-    settings: &mut HashMap<String, OwnedValue>,
-    key: &str,
-    value: Option<u32>,
-) -> Result<()> {
-    if let Some(value) = value {
-        settings.insert(key.to_string(), owned_value(value)?);
-    }
-    Ok(())
-}
-
-fn insert_optional_u32s(
-    settings: &mut HashMap<String, OwnedValue>,
-    values: &[(&str, Option<u32>)],
-) -> Result<()> {
-    values
-        .iter()
-        .try_for_each(|(key, value)| insert_optional_u32(settings, key, *value))
-}
-
-pub(super) fn psk_key_mgmt(ap: &AccessPoint) -> &'static str {
-    let flags = ap.wpa_flags | ap.rsn_flags;
-    if flags & NM_AP_SEC_KEY_MGMT_SAE != 0 && flags & NM_AP_SEC_KEY_MGMT_PSK == 0 {
-        "sae"
-    } else {
-        "wpa-psk"
-    }
+    insert_string(settings, key, value)
 }
 
 fn validate_wpa_psk(password: &str) -> Result<()> {

@@ -46,13 +46,25 @@ impl Write for LockedFileWriter {
 }
 
 pub(crate) fn init(verbose: u8, log_file: Option<PathBuf>) -> Result<PathBuf> {
-    let env_log_file = std::env::var_os("NM_DAEMON_LOG_FILE")
-        .or_else(|| std::env::var_os("NM_API_LOG_FILE"))
-        .map(PathBuf::from);
+    let (log_path, use_default_log_path) = resolve_log_path(log_file);
+    prepare_log_parent(&log_path, use_default_log_path)?;
+    crate::cache::reject_symlink_file(&log_path, "log file")?;
+    let file = open_log_file(&log_path)?;
+    initialize_subscriber(verbose, file)?;
+    tracing::info!(path = %log_path.display(), "logging initialized");
+    Ok(log_path)
+}
+
+fn resolve_log_path(log_file: Option<PathBuf>) -> (PathBuf, bool) {
+    let env_log_file = std::env::var_os("NM_DAEMON_LOG_FILE").map(PathBuf::from);
     let use_default_log_path = log_file.is_none() && env_log_file.is_none();
     let log_path = log_file
         .or(env_log_file)
         .unwrap_or_else(crate::cache::log_path);
+    (log_path, use_default_log_path)
+}
+
+fn prepare_log_parent(log_path: &Path, use_default_log_path: bool) -> Result<()> {
     if let Some(parent) = log_path.parent() {
         if use_default_log_path {
             crate::cache::create_private_dir_all(parent)?;
@@ -60,7 +72,10 @@ pub(crate) fn init(verbose: u8, log_file: Option<PathBuf>) -> Result<PathBuf> {
             create_log_parent(parent)?;
         }
     }
-    crate::cache::reject_symlink_file(&log_path, "log file")?;
+    Ok(())
+}
+
+fn open_log_file(log_path: &Path) -> Result<std::fs::File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -69,20 +84,26 @@ pub(crate) fn init(verbose: u8, log_file: Option<PathBuf>) -> Result<PathBuf> {
         options.mode(0o600);
     }
     let file = options
-        .open(&log_path)
+        .open(log_path)
         .with_context(|| format!("open log file {}", log_path.display()))?;
+    enforce_private_log_permissions(log_path)?;
+    Ok(file)
+}
+
+fn enforce_private_log_permissions(log_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&log_path, fs::Permissions::from_mode(0o600))
+        fs::set_permissions(log_path, fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod 0600 {}", log_path.display()))?;
     }
+    Ok(())
+}
 
+fn initialize_subscriber(verbose: u8, file: std::fs::File) -> Result<()> {
     let stderr_filter = EnvFilter::try_from_env("NM_DAEMON_STDERR_LOG")
-        .or_else(|_| EnvFilter::try_from_env("NM_API_STDERR_LOG"))
         .unwrap_or_else(|_| EnvFilter::new(stderr_directive(verbose)));
     let file_filter = EnvFilter::try_from_env("NM_DAEMON_LOG")
-        .or_else(|_| EnvFilter::try_from_env("NM_API_LOG"))
         .unwrap_or_else(|_| EnvFilter::new(file_directive(verbose)));
 
     let stderr_layer = tracing_subscriber::fmt::layer()
@@ -101,9 +122,7 @@ pub(crate) fn init(verbose: u8, log_file: Option<PathBuf>) -> Result<PathBuf> {
         .with(file_layer)
         .try_init()
         .context("initialize tracing subscriber")?;
-
-    tracing::info!(path = %log_path.display(), "logging initialized");
-    Ok(log_path)
+    Ok(())
 }
 
 fn create_log_parent(parent: &Path) -> Result<()> {

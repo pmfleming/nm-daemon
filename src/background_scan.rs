@@ -25,9 +25,10 @@ impl BackgroundScanScheduler for InlineBackgroundScan<'_> {
                 ifname: None,
                 ssids: Vec::new(),
             },
+            None,
             |_| Ok(()),
         ) {
-            tracing::warn!(error = %format_args!("{error:#}"), "direct-mode cache refresh failed");
+            tracing::warn!(error = %crate::error::err_chain(&error), "direct-mode cache refresh failed");
         }
     }
 }

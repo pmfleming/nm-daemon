@@ -64,7 +64,7 @@ The user D-Bus service is the canonical transport for the methods it exposes. Th
 
 ```bash
 nm-daemon wifi networks [--cached] [--refresh-cache] [--refresh-timeout <seconds>]
-nm-daemon wifi scan [--stream] [--cache] [--quiet] [--strict] [--timeout <seconds>] [--retries <count>] [--ifname <iface>] [--ssid <ssid>...]
+nm-daemon wifi scan [--cache] [--quiet] [--strict] [--timeout <seconds>] [--ifname <iface>] [--ssid <ssid>...]
 nm-daemon wifi connect <ssid> [--password-stdin] [--bssid <bssid>] [--hidden] [--key-mgmt <hint>] [--wep-key-type key|phrase]
 nm-daemon wifi connect-target [--wep-key-type key|phrase] < request.json
 nm-daemon wifi saved
@@ -162,45 +162,46 @@ CLI / D-Bus adapters -> typed Application services -> NetworkManager, cache, com
 D-Bus service        -> shared daemon runtime      -> bounded tasks and event streams
 ```
 
-Connection fallback is an explicit state machine rather than adapter-owned branching. Protocol names and subscription behavior come from one method/stream registry. Storage mechanics, cache-domain merging, subprocess execution/parsing, and SecretAgent request tracking each have a narrow owner. See [docs/architecture.md](./docs/architecture.md) for the detailed invariants.
+Connection activation is an explicit NetworkManager D-Bus state machine rather than adapter-owned branching. Protocol names and subscription behavior come from one method/stream registry. Storage mechanics, cache-domain merging, subprocess execution/parsing, and SecretAgent request tracking each have a narrow owner. See [docs/architecture.md](./docs/architecture.md) for the detailed invariants.
 
 ## Current repository status
 
 Implemented in this repository:
 
 1. Renamed the Rust package/binary and repository target to `nm-daemon` while preserving the `nm-api` v1 JSON protocol envelope.
-2. Moved runtime/state/log paths to `$XDG_RUNTIME_DIR/nm-daemon` and `$XDG_STATE_HOME/nm-daemon`, with `NM_DAEMON_*` log env vars and temporary `NM_API_*` fallbacks.
+2. Moved runtime/state/log paths to `$XDG_RUNTIME_DIR/nm-daemon` and `$XDG_STATE_HOME/nm-daemon`, with `NM_DAEMON_*` log env vars; the temporary `NM_API_*` fallbacks have since been removed.
 3. Removed unsupported frontend surfaces such as plaintext/TSV output, the `active` shortcut, the `list` compatibility alias, stable no-op `--json` flags, and argv password transport. Secrets now move through stdin JSON, `--password-stdin`, D-Bus request JSON, or the SecretAgent response path.
 4. Reshaped stable CLI commands into grouped namespaces: `wifi ...`, `network ...`, and `debug ...`.
 5. Added v1 JSON envelopes, typed frontend error codes, per-method contract fixtures, and Shelllist schema checks for network/status/connect/scan/profile shapes.
 6. Added parity tooling: `debug diagnose` and `tools/connect-parity-probe.sh` compare daemon behavior against relevant `nmcli` surfaces.
-7. Improved connect parity with `nmcli`: AP re-resolution by SSID/BSSID, one targeted rescan before fallback, `not-found` classification, signal-assisted activation waits, shorter post-connect waits, background cache refresh, and structured connect-attempt history.
+7. Improved connection parity: AP re-resolution by SSID/BSSID, one targeted rescan before the final D-Bus attempt, `not-found` classification, signal-assisted activation waits, shorter post-connect waits, background cache refresh, and structured connect-attempt history.
 8. Added `nm-daemon daemon`, exporting a session-bus service at `org.laufan.NmDaemon` `/org/laufan/NmDaemon` with interface `org.laufan.NmDaemon1`.
 9. Implemented D-Bus `Call`, `Subscribe`, `Cancel`, and `Event(stream, event_json)`.
-10. Implemented D-Bus method keys: `wifi.status`, `network.connectivity`, `wifi.networks`, `wifi.scan`, `wifi.connectTarget`/`wifi.connect-target`, `wifi.disconnect`, `wifi.profile.operation`, `wifi.secret.capabilities`, and `wifi.secret.provide`.
+10. Implemented D-Bus method keys: `wifi.status`, `network.connectivity`, `wifi.networks`, `wifi.scan`, `wifi.connectTarget`, `wifi.disconnect`, `wifi.profile.operation`, `wifi.secret.capabilities`, and `wifi.secret.provide`.
 11. Added CLI forwarding for compatible status, connectivity, networks, disconnect, and profile commands through the daemon, with `--direct` and `NM_DAEMON_DIRECT=1` as recovery/debug escape hatches.
 12. Added event streams for scan/status/connectivity/connect flows. Scan and connect calls return immediately with a `request_id`; clients consume follow-up `Event` signals.
 13. Added real NetworkManager SecretAgent registration on the system bus at `/org/laufan/NmDaemon/SecretAgent`, bridging `GetSecrets`/`CancelGetSecrets` to `wifi.secret` requested/cancelled events and `wifi.secret.provide` responses.
 14. Added Secret Service keyring lookup/store/delete support for `wifi.secret.provide save:true`, NetworkManager `SaveSecrets`, and `DeleteSecrets`. Secret lookup prefers stable NetworkManager UUIDs and falls back to connection paths.
 15. Expanded SecretAgent key mapping for `802-11-wireless-security`, `802-1x`, `vpn`, `gsm`, and `cdma` settings. Prompt events include `secret_keys` and `primary_secret_key` for Shelllist forms.
-16. Added deep best-effort connect cancellation: `Cancel(connect-*)` marks the shared task, kills an in-flight `nmcli`, interrupts activation waits, and queues a NetworkManager disconnect/activation abort through the daemon runtime. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call.
+16. Added deep best-effort connect cancellation: `Cancel(connect-*)` marks the shared task, interrupts activation waits, and queues a NetworkManager disconnect/activation abort through the daemon runtime. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call.
 17. Added packaged systemd user service metadata for `nm-daemon daemon`; host/Home Manager configuration now enables the user service at login.
 18. Kept the repository passing formatting, Clippy with warnings denied, the complete test suite, and a debug build as the architecture changed.
 19. Added one transport-neutral application layer for canonical status, networks, scan, connect, disconnect, and profile operations; CLI and D-Bus now adapt typed requests, results, and events instead of independently orchestrating NetworkManager/cache behavior.
-20. Replaced branching connection orchestration with an explicit `AlreadyActive → SavedProfile → CreateProfile → Rescan → Fallback → Verify` state machine, with centralized D-Bus fallback routing, nmcli eligibility, and failed-profile cleanup.
+20. Replaced branching connection orchestration with an explicit `AlreadyActive → SavedProfile → CreateProfile → Rescan → Verify` NetworkManager D-Bus state machine and failed-profile cleanup; the later cleanup removed the subprocess connection fallback.
 21. Replaced the network readiness boolean matrix and authentication/prompt/security strings with enums, and consolidated connect-target SSID/identifier inputs into validated newtypes while preserving the `nm-api` v1 wire fields through custom serialization.
 22. Replaced rendered-message error classification with typed domain errors carrying stable codes, operations, source categories, and structured details; D-Bus, I/O, validation, serialization, cancellation, NetworkManager, and nmcli failures are now converted at their boundaries and shared by CLI responses and daemon events.
-23. Centralized method names, aliases, parameter metadata, response keys, streams, defaults, event sets, contract metadata, and generated protocol documentation in typed `Method`/`Stream` registries; unsupported subscriptions now fail before acknowledgement or worker startup.
+23. Centralized method names, parameter metadata, response keys, streams, defaults, event sets, contract metadata, and generated protocol documentation in typed `Method`/`Stream` registries; unsupported subscriptions now fail before acknowledgement or worker startup, and the final legacy method alias has since been removed.
 24. Split cache repository mechanics from network-domain merging. Runtime and persistent repositories use advisory writer locks, atomic JSON replacement, explicit `Missing`/`Stale`/`Corrupt`/`Available` results, private-file/symlink checks, and locked read-modify-write transactions. Connection history rotates at 512 KiB with three retained generations.
-25. Put `nmcli` and `iw` behind one injectable command runner with common timeouts, cancellation, sensitive-argument redaction, stdout/stderr and exit-status capture, structured failures, and shared typed nmcli device parsing. Fallback policy remains in the connection state machine.
+25. Put external commands behind one injectable runner with common timeouts, cancellation, stdout/stderr and exit-status capture, structured failures, and shared typed nmcli query parsing. Connection mutation no longer uses subprocess fallback.
 26. Replaced per-subscription polling and per-operation watcher processes with one daemon-owned NetworkManager connection, a bounded worker pool, one event loop, shared/coalesced subscription refreshes, cancellable task registrations, and coalesced background cache work.
 27. Made Secret Service persistence truthful: create/delete/unlock prompts are dismissed and returned as `prompt_unsupported`, `wifi.secret.provide save:true` reports pending until a persistence event, and pending SecretAgent calls use one registry with guard-based cleanup and poison recovery.
-28. Replaced hand-built nested contract states with fixtures derived from production network/connect/status/share constructors, added a checked-in serialized v1 snapshot and schema assertions, and added in-process fake NetworkManager/Secret Service D-Bus boundary tests plus SecretAgent timing, scripted command fallback, and concurrent cache reader/writer coverage.
+28. Replaced hand-built nested contract states with fixtures derived from production network/connect/status/share constructors, added a checked-in serialized v1 snapshot and schema assertions, and added in-process fake NetworkManager/Secret Service D-Bus boundary tests plus SecretAgent timing, command-gateway, and concurrent cache reader/writer coverage.
 29. Added `nm-daemon client`, a long-lived JSONL frontend transport over one session-bus connection with response/event correlation, per-session filtering, cancellation, and EOF cleanup.
 30. Exposed disconnect and all canonical saved-profile operations through `wifi.disconnect` and `wifi.profile.operation`; compatible CLI commands now forward through those methods.
 31. Bound subscriptions to the calling D-Bus unique name, remove them on owner loss, acknowledge only after registration, and emit resource-specific cancellation events.
 32. Expanded `wifi.secret.provide` with named values, explicit cancellation, and truthful save/persistence outcomes for richer frontend forms.
 33. Split validated network identity types into `model::identity` to reduce the central model module's change surface.
+34. Replaced `iw` command execution and text parsing with a direct typed `nl80211` generic-netlink station query for directional transmit/receive bitrate enrichment.
 
 ## Remaining open items
 

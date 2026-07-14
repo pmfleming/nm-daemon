@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, PreparedScanRequest, ScanEvent, ScanRequest};
-use crate::daemon::{emit_json_event, emit_json_event_best_effort};
+use crate::daemon::{emit_json_event, emit_json_event_nonfatal};
 use crate::daemon_event::next_request_id;
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{ErrorOperation, ErrorReport};
@@ -52,12 +52,13 @@ pub(crate) fn start_scan(
     runtime.start_cancellable(
         request_id.clone(),
         TaskKind::Scan,
+        None,
         move |nm, cancellation| {
             if let Err(err) =
                 run_scan_events(nm, &worker_request_id, request, cancellation, &emitter)
             {
                 let report = ErrorReport::from_error(&err, ErrorOperation::Scan);
-                emit_json_event_best_effort(
+                emit_json_event_nonfatal(
                     &emitter,
                     STREAM,
                     Some(&worker_request_id),
@@ -97,7 +98,7 @@ fn run_scan_events(
 ) -> Result<()> {
     let application = Application::new(nm);
     application
-        .scan_prepared_cancellable(request, Some(cancellation), |event| {
+        .scan_prepared(request, Some(cancellation), |event| {
             emit_scan_event(&application, emitter, request_id, event)
         })
         .map(|_| ())
