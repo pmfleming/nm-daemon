@@ -9,8 +9,10 @@ use super::{
 };
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
-    AccessPoint, NetworkEntry, ProfilePrivacy, SavedWifiConnection, WifiConnectTarget, WifiDevice,
-    WifiSharePayload, ap_supports_enterprise, ap_supports_psk, ap_uses_wep, display_ssid,
+    AccessPoint, NetworkEntry, ProfileIpSettings, ProfilePrivacy, SavedWifiConnection,
+    TargetIpAddress, TargetIpRoute, TargetIpSettings, WifiConnectTarget, WifiDevice,
+    WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload,
+    ap_supports_enterprise, ap_supports_psk, ap_uses_wep, display_ssid,
     network_entries_with_profile_matches,
 };
 
@@ -124,6 +126,107 @@ impl Nm {
         self.mutate_connection_settings(path, "DHCP hostname privacy", |settings| {
             set_dhcp_send_hostname(settings, "ipv4", enabled)?;
             set_dhcp_send_hostname(settings, "ipv6", enabled)
+        })
+    }
+
+    pub(crate) fn wifi_profile_details_by_path(&self, path: &str) -> Result<WifiProfileDetails> {
+        let path = OwnedObjectPath::try_from(path).context("parse connection path")?;
+        let settings = self.connection_settings(&path)?;
+        let profile = saved_wifi_connection_from_settings(&path, &settings).ok_or_else(|| {
+            DomainError::not_found(
+                ErrorOperation::ProfileOperation,
+                format!("connection is not a saved Wi-Fi profile: {path}"),
+            )
+        })?;
+        let connection = settings.get("connection").cloned().unwrap_or_default();
+        let wireless = settings.get("802-11-wireless").cloned().unwrap_or_default();
+        Ok(WifiProfileDetails {
+            path: profile.path,
+            id: profile.id,
+            ssid: profile.ssid,
+            autoconnect: profile.autoconnect,
+            metered: metered_from_settings(&connection),
+            hidden: wireless
+                .get("hidden")
+                .and_then(setting_bool)
+                .unwrap_or(false),
+            mac_address_policy: profile.privacy.mac_address_policy,
+            send_hostname: profile.privacy.send_hostname,
+            security_type: security_type_from_settings(&settings),
+            ipv4: profile_ip_settings(&settings, "ipv4"),
+            ipv6: profile_ip_settings(&settings, "ipv6"),
+        })
+    }
+
+    pub(crate) fn wifi_profile_secret_by_path(&self, path: &str) -> Result<WifiProfileSecret> {
+        let path = OwnedObjectPath::try_from(path).context("parse connection path")?;
+        let settings = self.connection_settings(&path)?;
+        if saved_wifi_connection_from_settings(&path, &settings).is_none() {
+            return Err(DomainError::not_found(
+                ErrorOperation::ProfileOperation,
+                format!("connection is not a saved Wi-Fi profile: {path}"),
+            )
+            .into());
+        }
+        let secrets = self
+            .connection_secrets(&path, "802-11-wireless-security")
+            .ok();
+        let key_mgmt = settings
+            .get("802-11-wireless-security")
+            .and_then(|section| setting_string(section, "key-mgmt"))
+            .unwrap_or_default();
+        let (kind, key) = match key_mgmt.as_str() {
+            "wpa-psk" | "sae" => ("password", "psk".to_string()),
+            "none" | "" if has_wep_settings(&settings, secrets.as_ref()) => {
+                let index = settings
+                    .get("802-11-wireless-security")
+                    .and_then(|section| section.get("wep-tx-keyidx"))
+                    .and_then(setting_u32)
+                    .unwrap_or(0)
+                    .min(3);
+                ("wep-key", format!("wep-key{index}"))
+            }
+            value if value.contains("eap") => ("enterprise", "password".to_string()),
+            _ => ("none", String::new()),
+        };
+        let password = (!key.is_empty())
+            .then(|| secret_string(&settings, secrets.as_ref(), &key))
+            .flatten();
+        Ok(WifiProfileSecret {
+            path: path.to_string(),
+            available: password.is_some(),
+            kind: kind.to_string(),
+            password,
+        })
+    }
+
+    pub(crate) fn update_wifi_profile_by_path(
+        &self,
+        path: &str,
+        update: &WifiProfileUpdate,
+    ) -> Result<()> {
+        validate_profile_update(update)?;
+        self.mutate_connection_settings(path, "advanced Wi-Fi profile", |settings| {
+            let connection = settings.entry("connection".to_string()).or_default();
+            connection.insert("autoconnect".to_string(), owned_value(update.autoconnect)?);
+            connection.insert(
+                "metered".to_string(),
+                owned_value(metered_code(&update.metered)?)?,
+            );
+            let wireless = settings.entry("802-11-wireless".to_string()).or_default();
+            wireless.insert("hidden".to_string(), owned_value(update.hidden)?);
+            wireless.insert(
+                "assigned-mac-address".to_string(),
+                owned_value(update.mac_address_policy.clone())?,
+            );
+            set_dhcp_send_hostname(settings, "ipv4", update.send_hostname)?;
+            set_dhcp_send_hostname(settings, "ipv6", update.send_hostname)?;
+            replace_ip_settings(settings, "ipv4", &update.ipv4)?;
+            replace_ip_settings(settings, "ipv6", &update.ipv6)?;
+            if let Some(password) = update.password.as_deref().filter(|value| !value.is_empty()) {
+                update_personal_password(settings, password)?;
+            }
+            Ok(())
         })
     }
 
@@ -674,6 +777,322 @@ fn section_has_key(settings: &ConnectionSettings, section: &str, key: &str) -> b
     settings
         .get(section)
         .is_some_and(|settings| settings.contains_key(key))
+}
+
+fn metered_from_settings(connection: &HashMap<String, OwnedValue>) -> String {
+    match connection.get("metered").and_then(setting_u32).unwrap_or(0) {
+        1 | 3 => "yes",
+        2 | 4 => "no",
+        _ => "auto",
+    }
+    .to_string()
+}
+
+fn metered_code(value: &str) -> Result<u32> {
+    match value {
+        "" | "auto" | "unknown" => Ok(0),
+        "yes" | "on" | "true" => Ok(1),
+        "no" | "off" | "false" => Ok(2),
+        _ => Err(DomainError::validation(
+            ErrorOperation::ProfileOperation,
+            "metered must be auto, yes, or no",
+        )
+        .with_detail("field", "metered")
+        .with_detail("value", value)
+        .into()),
+    }
+}
+
+fn security_type_from_settings(settings: &ConnectionSettings) -> String {
+    let Some(security) = settings.get("802-11-wireless-security") else {
+        return "Open".to_string();
+    };
+    match setting_string(security, "key-mgmt")
+        .unwrap_or_default()
+        .as_str()
+    {
+        "wpa-psk" => "WPA/WPA2 Personal",
+        "sae" => "WPA3 Personal",
+        "owe" => "Enhanced Open (OWE)",
+        "none" | "" if has_wep_settings(settings, None) => "WEP",
+        value if value.contains("eap") => "WPA Enterprise",
+        value if !value.is_empty() => value,
+        _ => "Open",
+    }
+    .to_string()
+}
+
+fn profile_ip_settings(settings: &ConnectionSettings, section: &str) -> ProfileIpSettings {
+    let values = settings.get(section);
+    ProfileIpSettings {
+        method: values
+            .and_then(|values| setting_string(values, "method"))
+            .unwrap_or_else(|| "auto".to_string()),
+        addresses: values
+            .and_then(|values| values.get("address-data"))
+            .and_then(setting_address_data)
+            .unwrap_or_default(),
+        gateway: values
+            .and_then(|values| setting_string(values, "gateway"))
+            .filter(|value| !value.is_empty()),
+        dns: values
+            .and_then(|values| values.get("dns-data"))
+            .and_then(setting_string_list)
+            .unwrap_or_default(),
+        routes: values
+            .and_then(|values| values.get("route-data"))
+            .and_then(setting_route_data)
+            .unwrap_or_default(),
+        ignore_auto_dns: values
+            .and_then(|values| values.get("ignore-auto-dns"))
+            .and_then(setting_bool)
+            .unwrap_or(false),
+        dns_search: values
+            .and_then(|values| values.get("dns-search"))
+            .and_then(setting_string_list)
+            .unwrap_or_default(),
+        route_metric: values
+            .and_then(|values| values.get("route-metric"))
+            .and_then(setting_i64),
+    }
+}
+
+fn setting_address_data(value: &OwnedValue) -> Option<Vec<TargetIpAddress>> {
+    let entries: Vec<HashMap<String, OwnedValue>> = value.try_clone().ok()?.try_into().ok()?;
+    Some(
+        entries
+            .into_iter()
+            .filter_map(|entry| {
+                Some(TargetIpAddress {
+                    address: setting_string(&entry, "address")?,
+                    prefix: entry.get("prefix").and_then(setting_u32)?,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn setting_route_data(value: &OwnedValue) -> Option<Vec<TargetIpRoute>> {
+    let entries: Vec<HashMap<String, OwnedValue>> = value.try_clone().ok()?.try_into().ok()?;
+    Some(
+        entries
+            .into_iter()
+            .filter_map(|entry| {
+                Some(TargetIpRoute {
+                    dest: setting_string(&entry, "dest")?,
+                    prefix: entry.get("prefix").and_then(setting_u32)?,
+                    next_hop: setting_string(&entry, "next-hop").filter(|value| !value.is_empty()),
+                    metric: entry.get("metric").and_then(setting_u32),
+                    table: entry.get("table").and_then(setting_u32),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn setting_string_list(value: &OwnedValue) -> Option<Vec<String>> {
+    value.try_clone().ok()?.try_into().ok()
+}
+
+fn setting_i64(value: &OwnedValue) -> Option<i64> {
+    value
+        .try_clone()
+        .ok()
+        .and_then(|value| value.try_into().ok())
+        .or_else(|| setting_u32(value).map(i64::from))
+}
+
+fn validate_profile_update(update: &WifiProfileUpdate) -> Result<()> {
+    if !matches!(
+        update.mac_address_policy.as_str(),
+        "default" | "stable" | "random" | "permanent"
+    ) {
+        return Err(DomainError::validation(
+            ErrorOperation::ProfileOperation,
+            "MAC address policy must be default, stable, random, or permanent",
+        )
+        .with_detail("field", "mac_address_policy")
+        .into());
+    }
+    metered_code(&update.metered)?;
+    validate_ip_settings("ipv4", &update.ipv4, false)?;
+    validate_ip_settings("ipv6", &update.ipv6, true)
+}
+
+fn validate_ip_settings(section: &str, settings: &TargetIpSettings, ipv6: bool) -> Result<()> {
+    let method = settings.method.as_deref().unwrap_or("auto");
+    if !matches!(method, "auto" | "manual" | "disabled") {
+        return Err(DomainError::validation(
+            ErrorOperation::ProfileOperation,
+            format!("{section} method must be auto, manual, or disabled"),
+        )
+        .with_detail("field", format!("{section}.method"))
+        .into());
+    }
+    if method == "manual" && settings.addresses.is_empty() {
+        return Err(DomainError::validation(
+            ErrorOperation::ProfileOperation,
+            format!("{section} manual configuration requires an address"),
+        )
+        .with_detail("field", format!("{section}.addresses"))
+        .into());
+    }
+    for address in &settings.addresses {
+        validate_ip_value(section, "address", &address.address, ipv6)?;
+        let max_prefix = if ipv6 { 128 } else { 32 };
+        if address.prefix > max_prefix {
+            return Err(DomainError::validation(
+                ErrorOperation::ProfileOperation,
+                format!("{section} prefix must be between 0 and {max_prefix}"),
+            )
+            .with_detail("field", format!("{section}.prefix"))
+            .into());
+        }
+    }
+    if let Some(gateway) = settings
+        .gateway
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        validate_ip_value(section, "gateway", gateway, ipv6)?;
+    }
+    for dns in &settings.dns {
+        validate_ip_value(section, "dns", dns, ipv6)?;
+    }
+    Ok(())
+}
+
+fn validate_ip_value(section: &str, field: &str, value: &str, ipv6: bool) -> Result<()> {
+    let parsed: std::net::IpAddr = value.parse().map_err(|error| {
+        DomainError::validation(
+            ErrorOperation::ProfileOperation,
+            format!("invalid {section} {field}: {value}"),
+        )
+        .with_detail("field", format!("{section}.{field}"))
+        .with_cause(anyhow::Error::new(error))
+    })?;
+    if parsed.is_ipv6() != ipv6 {
+        return Err(DomainError::validation(
+            ErrorOperation::ProfileOperation,
+            format!("{section} {field} has the wrong address family"),
+        )
+        .with_detail("field", format!("{section}.{field}"))
+        .into());
+    }
+    Ok(())
+}
+
+fn replace_ip_settings(
+    settings: &mut ConnectionSettings,
+    section: &str,
+    update: &TargetIpSettings,
+) -> Result<()> {
+    let values = settings.entry(section.to_string()).or_default();
+    for key in [
+        "address-data",
+        "addresses",
+        "gateway",
+        "dns-data",
+        "dns",
+        "route-data",
+        "route-metric",
+        "ignore-auto-dns",
+        "dns-search",
+    ] {
+        values.remove(key);
+    }
+    let method = update.method.as_deref().unwrap_or("auto");
+    values.insert("method".to_string(), owned_value(method.to_string())?);
+    if !update.addresses.is_empty() {
+        values.insert(
+            "address-data".to_string(),
+            owned_value(profile_address_data(&update.addresses)?)?,
+        );
+    }
+    if let Some(gateway) = update.gateway.as_deref().filter(|value| !value.is_empty()) {
+        values.insert("gateway".to_string(), owned_value(gateway.to_string())?);
+    }
+    if !update.dns.is_empty() {
+        values.insert("dns-data".to_string(), owned_value(update.dns.clone())?);
+    }
+    if !update.routes.is_empty() {
+        values.insert(
+            "route-data".to_string(),
+            owned_value(profile_route_data(&update.routes)?)?,
+        );
+    }
+    values.insert(
+        "ignore-auto-dns".to_string(),
+        owned_value(update.ignore_auto_dns.unwrap_or(false))?,
+    );
+    if !update.dns_search.is_empty() {
+        values.insert(
+            "dns-search".to_string(),
+            owned_value(update.dns_search.clone())?,
+        );
+    }
+    if let Some(route_metric) = update.route_metric {
+        values.insert("route-metric".to_string(), owned_value(route_metric)?);
+    }
+    Ok(())
+}
+
+fn profile_address_data(addresses: &[TargetIpAddress]) -> Result<Vec<HashMap<String, OwnedValue>>> {
+    addresses
+        .iter()
+        .map(|address| {
+            Ok(HashMap::from([
+                ("address".to_string(), owned_value(address.address.clone())?),
+                ("prefix".to_string(), owned_value(address.prefix)?),
+            ]))
+        })
+        .collect()
+}
+
+fn profile_route_data(routes: &[TargetIpRoute]) -> Result<Vec<HashMap<String, OwnedValue>>> {
+    routes
+        .iter()
+        .map(|route| {
+            let mut values = HashMap::from([
+                ("dest".to_string(), owned_value(route.dest.clone())?),
+                ("prefix".to_string(), owned_value(route.prefix)?),
+            ]);
+            if let Some(next_hop) = route.next_hop.as_deref().filter(|value| !value.is_empty()) {
+                values.insert("next-hop".to_string(), owned_value(next_hop.to_string())?);
+            }
+            if let Some(metric) = route.metric {
+                values.insert("metric".to_string(), owned_value(metric)?);
+            }
+            if let Some(table) = route.table {
+                values.insert("table".to_string(), owned_value(table)?);
+            }
+            Ok(values)
+        })
+        .collect()
+}
+
+fn update_personal_password(settings: &mut ConnectionSettings, password: &str) -> Result<()> {
+    let security = settings
+        .get("802-11-wireless-security")
+        .and_then(|section| setting_string(section, "key-mgmt"))
+        .unwrap_or_default();
+    match security.as_str() {
+        "wpa-psk" | "sae" => crate::nm::wifi_settings::validate_wpa_psk(password)?,
+        _ => {
+            return Err(DomainError::validation(
+                ErrorOperation::ProfileOperation,
+                "password updates are currently supported only for WPA personal profiles",
+            )
+            .with_detail("field", "password")
+            .into());
+        }
+    }
+    let section = settings
+        .entry("802-11-wireless-security".to_string())
+        .or_default();
+    section.insert("psk".to_string(), owned_value(password.to_string())?);
+    section.insert("psk-flags".to_string(), owned_value(0_u32)?);
+    Ok(())
 }
 
 fn privacy_from_settings(settings: &ConnectionSettings) -> ProfilePrivacy {

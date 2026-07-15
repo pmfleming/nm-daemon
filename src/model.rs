@@ -315,6 +315,56 @@ impl Default for ProfilePrivacy {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct WifiProfileDetails {
+    pub(crate) path: String,
+    pub(crate) id: String,
+    pub(crate) ssid: String,
+    pub(crate) autoconnect: bool,
+    pub(crate) metered: String,
+    pub(crate) hidden: bool,
+    pub(crate) mac_address_policy: String,
+    pub(crate) send_hostname: bool,
+    pub(crate) security_type: String,
+    pub(crate) ipv4: ProfileIpSettings,
+    pub(crate) ipv6: ProfileIpSettings,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct ProfileIpSettings {
+    pub(crate) method: String,
+    pub(crate) addresses: Vec<TargetIpAddress>,
+    pub(crate) gateway: Option<String>,
+    pub(crate) dns: Vec<String>,
+    pub(crate) routes: Vec<TargetIpRoute>,
+    pub(crate) ignore_auto_dns: bool,
+    pub(crate) dns_search: Vec<String>,
+    pub(crate) route_metric: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct WifiProfileSecret {
+    pub(crate) path: String,
+    pub(crate) available: bool,
+    pub(crate) kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) password: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct WifiProfileUpdate {
+    pub(crate) autoconnect: bool,
+    pub(crate) metered: String,
+    pub(crate) hidden: bool,
+    pub(crate) mac_address_policy: String,
+    pub(crate) send_hostname: bool,
+    pub(crate) ipv4: TargetIpSettings,
+    pub(crate) ipv6: TargetIpSettings,
+    pub(crate) password: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Security {
     Open,

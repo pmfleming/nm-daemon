@@ -1,8 +1,12 @@
 use super::{
-    ConnectionSettings, saved_wifi_profile_candidate_from_settings, settings_match_access_point,
-    settings_match_wifi_ssid, ssid_bytes_match, wifi_settings_need_secret_agent,
+    ConnectionSettings, profile_ip_settings, replace_ip_settings,
+    saved_wifi_profile_candidate_from_settings, settings_match_access_point,
+    settings_match_wifi_ssid, ssid_bytes_match, validate_profile_update,
+    wifi_settings_need_secret_agent,
 };
-use crate::model::AccessPoint;
+use crate::model::{
+    AccessPoint, TargetIpAddress, TargetIpSettings, WifiProfileUpdate,
+};
 use std::collections::HashMap;
 use zvariant::{OwnedObjectPath, OwnedValue, Value};
 
@@ -71,6 +75,54 @@ fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets()
         Some(&secrets),
         None
     ));
+}
+
+#[test]
+fn advanced_profile_ip_settings_round_trip_and_validate_address_families() {
+    let ipv4 = TargetIpSettings {
+        method: Some("manual".to_string()),
+        addresses: vec![TargetIpAddress {
+            address: "192.0.2.20".to_string(),
+            prefix: 24,
+        }],
+        gateway: Some("192.0.2.1".to_string()),
+        dns: vec!["1.1.1.1".to_string()],
+        ignore_auto_dns: Some(true),
+        ..Default::default()
+    };
+    let update = WifiProfileUpdate {
+        autoconnect: true,
+        metered: "no".to_string(),
+        hidden: false,
+        mac_address_policy: "stable".to_string(),
+        send_hostname: true,
+        ipv4: ipv4.clone(),
+        ipv6: TargetIpSettings {
+            method: Some("auto".to_string()),
+            ..Default::default()
+        },
+        password: None,
+    };
+    validate_profile_update(&update).expect("valid advanced profile");
+
+    let mut settings = ConnectionSettings::new();
+    replace_ip_settings(&mut settings, "ipv4", &ipv4).expect("write IPv4 settings");
+    let parsed = profile_ip_settings(&settings, "ipv4");
+    assert_eq!(parsed.method, "manual");
+    assert_eq!(parsed.addresses[0].address, "192.0.2.20");
+    assert_eq!(parsed.addresses[0].prefix, 24);
+    assert_eq!(parsed.gateway.as_deref(), Some("192.0.2.1"));
+    assert_eq!(parsed.dns, vec!["1.1.1.1"]);
+    assert!(parsed.ignore_auto_dns);
+
+    let invalid = WifiProfileUpdate {
+        ipv4: TargetIpSettings {
+            dns: vec!["2001:db8::53".to_string()],
+            ..ipv4
+        },
+        ..update
+    };
+    assert!(validate_profile_update(&invalid).is_err());
 }
 
 #[test]

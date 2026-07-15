@@ -9,7 +9,8 @@ use crate::error::{
 use crate::model::{
     AccessPoint, ConnectResult, ConnectivityStatus, DisconnectResult, InterfaceName, NetworkEntry,
     NmObjectPath, SavedWifiConnection, ScanRequestOptions, WepKeyType, WifiConnectTarget,
-    WifiSharePayload, WifiStatus, validate_ssid_bytes,
+    WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload, WifiStatus,
+    validate_ssid_bytes,
 };
 use crate::nm::Nm;
 use anyhow::Result;
@@ -224,6 +225,11 @@ impl<'a> Application<'a> {
         operation: ProfileOperation,
     ) -> Result<ProfileOperationResult> {
         match operation {
+            ProfileOperation::Details { path } => self.profile_details(path.as_str()),
+            ProfileOperation::Update { path, settings } => {
+                self.update_profile(path.as_str(), settings.as_ref())
+            }
+            ProfileOperation::RevealSecret { path } => self.reveal_profile_secret(path.as_str()),
             ProfileOperation::Delete { path } => self.delete_profile(path.as_str()),
             ProfileOperation::SetAutoconnect { path, enabled } => {
                 self.set_profile_autoconnect(path.as_str(), enabled)
@@ -236,6 +242,27 @@ impl<'a> Application<'a> {
                 self.set_profile_send_hostname(path.as_str(), enabled)
             }
         }
+    }
+
+    fn profile_details(&self, path: &str) -> Result<ProfileOperationResult> {
+        Ok(ProfileOperationResult::Details(Box::new(
+            self.nm.wifi_profile_details_by_path(path)?,
+        )))
+    }
+
+    fn update_profile(
+        &self,
+        path: &str,
+        settings: &WifiProfileUpdate,
+    ) -> Result<ProfileOperationResult> {
+        self.nm.update_wifi_profile_by_path(path, settings)?;
+        Ok(profile_updated("Saved Wi-Fi profile settings updated"))
+    }
+
+    fn reveal_profile_secret(&self, path: &str) -> Result<ProfileOperationResult> {
+        Ok(ProfileOperationResult::Secret(
+            self.nm.wifi_profile_secret_by_path(path)?,
+        ))
     }
 
     fn delete_profile(&self, path: &str) -> Result<ProfileOperationResult> {
@@ -513,6 +540,16 @@ pub(crate) enum ConnectOutcome {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ProfileOperation {
+    Details {
+        path: NmObjectPath,
+    },
+    Update {
+        path: NmObjectPath,
+        settings: Box<WifiProfileUpdate>,
+    },
+    RevealSecret {
+        path: NmObjectPath,
+    },
     Delete {
         path: NmObjectPath,
     },
@@ -536,6 +573,8 @@ pub(crate) enum ProfileOperation {
 #[derive(Debug)]
 pub(crate) enum ProfileOperationResult {
     Updated { message: &'static str },
+    Details(Box<WifiProfileDetails>),
+    Secret(WifiProfileSecret),
     Share(WifiSharePayload),
 }
 

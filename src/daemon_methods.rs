@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::application::{Application, NetworksRequest, ProfileOperation, ProfileOperationResult};
 use crate::daemon_runtime::DaemonRuntime;
 use crate::error::ErrorOperation;
-use crate::model::{NmObjectPath, WifiConnectTarget};
+use crate::model::{NmObjectPath, WifiConnectTarget, WifiProfileUpdate};
 use crate::output::api_data_value;
 use crate::protocol::Method;
 
@@ -68,6 +68,11 @@ pub(crate) fn call_profile_operation(
     params: ProfileOperationParams,
 ) -> Result<Value> {
     let operation = match params {
+        ProfileOperationParams::Details { path } => ProfileOperation::Details { path },
+        ProfileOperationParams::Update { path, settings } => {
+            ProfileOperation::Update { path, settings }
+        }
+        ProfileOperationParams::RevealSecret { path } => ProfileOperation::RevealSecret { path },
         ProfileOperationParams::Delete { path } => ProfileOperation::Delete { path },
         ProfileOperationParams::Forget { request_id, target } => {
             let result = crate::forget::execute(runtime, request_id, target)?;
@@ -103,6 +108,8 @@ fn serialize_profile_result(result: ProfileOperationResult) -> Result<Value> {
         ProfileOperationResult::Updated { message } => {
             json!({ "status": "ok", "message": message })
         }
+        ProfileOperationResult::Details(details) => serde_json::to_value(details)?,
+        ProfileOperationResult::Secret(secret) => serde_json::to_value(secret)?,
         ProfileOperationResult::Share(payload) => serde_json::to_value(payload)?,
     };
     api_data_value(
@@ -123,6 +130,16 @@ pub(crate) struct NetworksParams {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum ProfileOperationParams {
+    Details {
+        path: NmObjectPath,
+    },
+    Update {
+        path: NmObjectPath,
+        settings: Box<WifiProfileUpdate>,
+    },
+    RevealSecret {
+        path: NmObjectPath,
+    },
     Delete {
         path: NmObjectPath,
     },

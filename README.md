@@ -68,7 +68,7 @@ The canonical method/stream registry—including parameter shapes, response keys
 
 Frontends that cannot conveniently maintain an arbitrary D-Bus client can run `nm-daemon client`. It accepts JSONL `call`, `subscribe`, `cancel`, and `shutdown` messages on stdin and emits correlated `response` and `event` messages on stdout. It filters operation events to IDs started by that session, preserves response-before-event ordering, and cancels owned requests/subscriptions when stdin closes.
 
-`wifi.profile.operation` accepts `{"operation":"forget","request_id":"forget-…","target":{…}}` for frontend network removal. The daemon cancels matching in-flight connects, waits for cancellation, resolves every saved profile with the target's exact SSID bytes, disables autoconnect, disconnects an active target, waits for confirmed deactivation, then deletes the profiles. Its structured result reports cancelled requests, active/disconnected state, deleted and failed profile paths, warnings, and `portal_session_reset:false`. Logs carry the supplied request ID through acceptance, cancellation, profile resolution, deactivation, each mutation, cache refresh, and the final summary. Forget does not revoke a hotspot's network-side captive-portal authorization.
+`wifi.profile.operation` accepts `details`, `update`, and `reveal-secret` operations for Shelllist's advanced saved-profile editor. Advanced updates atomically replace the editable NetworkManager profile fields for metered/hidden state, MAC policy, hostname privacy, IPv4/IPv6 assignment and DNS, with optional WPA Personal password replacement. Secret reveal and replacement remain stdin/JSONL transported and are never logged. The same method accepts `{"operation":"forget","request_id":"forget-…","target":{…}}` for frontend network removal. The daemon cancels matching in-flight connects, waits for cancellation, resolves every saved profile with the target's exact SSID bytes, disables autoconnect, disconnects an active target, waits for confirmed deactivation, then deletes the profiles. Its structured result reports cancelled requests, active/disconnected state, deleted and failed profile paths, warnings, and `portal_session_reset:false`. Logs carry the supplied request ID through acceptance, cancellation, profile resolution, deactivation, each mutation, cache refresh, and the final summary. Forget does not revoke a hotspot's network-side captive-portal authorization.
 
 Contract fixtures derive network/authentication readiness through the production model constructors. Tests lock their serialized v1 boundary in [`test_support/contract-v1.json`](./test_support/contract-v1.json) and exercise the real daemon D-Bus lifecycle against in-process fake NetworkManager and Secret Service peers, alongside command-gateway and concurrent cache I/O coverage.
 
@@ -95,6 +95,8 @@ Forwarded today:
 - `nm-daemon network connectivity`
 - `nm-daemon wifi disconnect`
 - `nm-daemon wifi profile delete|autoconnect|mac-randomization|share|send-hostname ...`
+
+The D-Bus/JSONL profile-operation API additionally exposes advanced profile details, updates, and secret reveal for frontends; these are intentionally not argv-oriented CLI commands.
 
 Current Wi-Fi commands:
 

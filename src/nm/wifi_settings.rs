@@ -444,7 +444,7 @@ fn insert_required_string(
     insert_string(settings, key, value)
 }
 
-fn validate_wpa_psk(password: &str) -> Result<()> {
+pub(super) fn validate_wpa_psk(password: &str) -> Result<()> {
     let len = password.len();
     if (8..=63).contains(&len) || (len == 64 && password.chars().all(|ch| ch.is_ascii_hexdigit())) {
         return Ok(());

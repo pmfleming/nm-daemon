@@ -168,6 +168,9 @@ pub(crate) fn run_profile_command(nm: &Nm, command: ProfileCommand) -> Result<()
     match Application::new(nm).profile_operation(operation)? {
         ProfileOperationResult::Updated { message } => print_api_message(message),
         ProfileOperationResult::Share(payload) => print_wifi_share_payload(&payload),
+        ProfileOperationResult::Details(_) | ProfileOperationResult::Secret(_) => {
+            unreachable!("CLI profile commands do not request advanced profile data")
+        }
     }
 }
 
