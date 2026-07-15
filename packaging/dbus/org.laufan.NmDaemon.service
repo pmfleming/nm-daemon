@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.laufan.NmDaemon
+Exec=@out@/bin/nm-daemon daemon
+SystemdService=nm-daemon.service

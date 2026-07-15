@@ -238,7 +238,8 @@ fn activation_timeout_message(
 fn target_radio_details(target: &WifiConnectTarget) -> String {
     target
         .bssid
-        .as_deref()
+        .as_ref()
+        .map(crate::model::Bssid::as_str)
         .filter(|value| !value.is_empty())
         .map(|bssid| format!(" (BSSID {bssid})"))
         .unwrap_or_default()

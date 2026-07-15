@@ -329,8 +329,9 @@ mod tests {
     use serde_json::Value;
     use zbus::blocking::Proxy;
 
-    use super::*;
+    use super::{DBUS_INTERFACE, DBUS_OBJECT_PATH, NmDaemonInterface};
     use crate::command::SystemCommandRunner;
+    use crate::daemon_runtime::DaemonRuntime;
     use crate::nl80211::UnavailableWirelessTelemetry;
     use crate::nm::{NM_PATH, Nm};
     use crate::test_support::TestPeer;

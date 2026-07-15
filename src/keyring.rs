@@ -439,10 +439,16 @@ fn secret_label(settings: &ConnectionSettings, setting_name: &str, key: &str) ->
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::*;
+    use zvariant::{OwnedObjectPath, OwnedValue};
+
+    use super::{
+        KeyringOutcome, KeyringPromptOperation, NULL_PROMPT, SECRET_SERVICE_PATH, Secret,
+        SecretServiceClient,
+    };
     use crate::test_support::TestPeer;
 
     const COLLECTION_PATH: &str = "/org/freedesktop/secrets/collection/test";

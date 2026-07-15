@@ -1,12 +1,10 @@
 use super::{
-    ConnectionSettings, profile_ip_settings, replace_ip_settings,
-    saved_wifi_profile_candidate_from_settings, settings_match_access_point,
-    settings_match_wifi_ssid, ssid_bytes_match, validate_profile_update,
-    wifi_settings_need_secret_agent,
+    ConnectionSettings, profile_ip_settings, saved_wifi_profile_candidate_from_settings,
+    settings_match_access_point, settings_match_wifi_ssid, ssid_bytes_match,
+    validate_profile_update, wifi_settings_need_secret_agent,
 };
-use crate::model::{
-    AccessPoint, TargetIpAddress, TargetIpSettings, WifiProfileUpdate,
-};
+use crate::model::{AccessPoint, TargetIpAddress, TargetIpSettings, WifiProfileUpdate};
+use crate::nm::ip_settings::replace as replace_ip_settings;
 use std::collections::HashMap;
 use zvariant::{OwnedObjectPath, OwnedValue, Value};
 
@@ -50,10 +48,7 @@ fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets()
     settings
         .get_mut("802-11-wireless-security")
         .expect("security settings")
-        .insert(
-            "psk-flags".to_string(),
-            owned_value(Value::new(4_u32)),
-        );
+        .insert("psk-flags".to_string(), owned_value(Value::new(4_u32)));
     assert!(!wifi_settings_need_secret_agent(&settings, None, None));
 
     settings
@@ -62,7 +57,11 @@ fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets()
         .remove("psk-flags");
     let mut secrets = ConnectionSettings::new();
     secrets.insert("802-11-wireless-security".to_string(), HashMap::new());
-    assert!(wifi_settings_need_secret_agent(&settings, Some(&secrets), None));
+    assert!(wifi_settings_need_secret_agent(
+        &settings,
+        Some(&secrets),
+        None
+    ));
     secrets
         .get_mut("802-11-wireless-security")
         .expect("secret settings")

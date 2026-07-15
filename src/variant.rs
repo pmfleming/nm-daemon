@@ -43,15 +43,26 @@ pub(crate) fn insert_optional_strings(
         .try_for_each(|(key, value)| insert_optional_string(section, key, *value))
 }
 
+pub(crate) fn insert_optional_value<T>(
+    section: &mut HashMap<String, OwnedValue>,
+    key: &str,
+    value: Option<T>,
+) -> Result<()>
+where
+    T: Into<Value<'static>> + DynamicType,
+{
+    if let Some(value) = value {
+        section.insert(key.to_string(), owned_value(value)?);
+    }
+    Ok(())
+}
+
 pub(crate) fn insert_optional_u32(
     section: &mut HashMap<String, OwnedValue>,
     key: &str,
     value: Option<u32>,
 ) -> Result<()> {
-    if let Some(value) = value {
-        section.insert(key.to_string(), owned_value(value)?);
-    }
-    Ok(())
+    insert_optional_value(section, key, value)
 }
 
 pub(crate) fn insert_optional_u32s(

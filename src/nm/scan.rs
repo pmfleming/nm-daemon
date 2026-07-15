@@ -8,7 +8,7 @@ use zvariant::Value;
 use super::{Nm, WIFI_IFACE};
 use crate::deadline::Deadline;
 use crate::error::{DomainError, ErrorOperation};
-use crate::model::{ScanRequestOptions, WifiDevice};
+use crate::model::{InterfaceName, ScanRequestOptions, WifiDevice};
 
 impl Nm {
     pub(crate) fn scan_with_options(
@@ -23,8 +23,11 @@ impl Nm {
             "starting blocking Wi-Fi scan"
         );
         let deadline = Deadline::from_now(options.timeout);
-        let devices =
-            self.wait_for_scan_devices(options.ifname.as_deref(), deadline, cancellation)?;
+        let devices = self.wait_for_scan_devices(
+            options.ifname.as_ref().map(InterfaceName::as_str),
+            deadline,
+            cancellation,
+        )?;
         tracing::info!(
             device_count = devices.len(),
             "discovered matching Wi-Fi scan devices"

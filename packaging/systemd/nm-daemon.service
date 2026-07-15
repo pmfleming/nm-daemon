@@ -4,7 +4,8 @@ Documentation=https://github.com/pmfleming/nm-daemon
 After=graphical-session.target
 
 [Service]
-Type=simple
+Type=dbus
+BusName=org.laufan.NmDaemon
 ExecStart=@out@/bin/nm-daemon daemon
 Restart=on-failure
 RestartSec=2s

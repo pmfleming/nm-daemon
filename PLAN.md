@@ -202,10 +202,10 @@ Implemented in this repository:
 32. Expanded `wifi.secret.provide` with named values, explicit cancellation, and truthful save/persistence outcomes for richer frontend forms.
 33. Split validated network identity types into `model::identity` to reduce the central model module's change surface.
 34. Replaced `iw` command execution and text parsing with a direct typed `nl80211` generic-netlink station query for directional transmit/receive bitrate enrichment.
+35. Added session D-Bus activation backed by the packaged `Type=dbus` systemd user unit, allowing Hyprland/Quickshell clients to start the daemon on first use without depending on login-service ordering.
 
 ## Remaining open items
 
-1. Add a D-Bus activation file later as a fallback startup path; the host/Home Manager configuration now enables `nm-daemon.service` at login.
-2. Optionally add desktop UI integration for Secret Service prompts. The daemon now dismisses create/delete/unlock prompts and reports `prompt_unsupported` instead of claiming success.
-3. Run real Wi-Fi connect/cancel/SecretAgent/keyring integration tests on target machines.
-4. Continue reviewing complexity and test hotspots as new NetworkManager surfaces are added.
+1. Optionally add desktop UI integration for Secret Service prompts. The daemon now dismisses create/delete/unlock prompts and reports `prompt_unsupported` instead of claiming success.
+2. Run real Wi-Fi connect/cancel/SecretAgent/keyring integration tests on target machines.
+3. Continue reviewing complexity and test hotspots as new NetworkManager surfaces are added.

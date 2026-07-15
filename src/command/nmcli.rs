@@ -61,28 +61,28 @@ pub(crate) struct NmcliWifiRow {
 }
 
 pub(crate) fn parse_device_ip4(output: &str) -> Option<Ip4Status> {
-    let mut address = None;
-    let mut prefix = None;
-    let mut gateway = None;
-    let mut dns = Vec::new();
-    for line in output.lines() {
-        let Some((key, value)) = split_key_value(line) else {
-            continue;
-        };
-        if key.starts_with("IP4.ADDRESS") {
-            (address, prefix) = parse_cidr(&value);
-        } else if key == "IP4.GATEWAY" && !value.is_empty() {
-            gateway = Some(value);
-        } else if key.starts_with("IP4.DNS") && !value.is_empty() {
-            dns.push(value);
+    let mut ip4 = Ip4Status {
+        address: None,
+        prefix: None,
+        gateway: None,
+        dns: Vec::new(),
+    };
+    output
+        .lines()
+        .filter_map(split_key_value)
+        .for_each(|(key, value)| apply_device_ip4_field(&mut ip4, &key, value));
+    (ip4.address.is_some() || ip4.gateway.is_some() || !ip4.dns.is_empty()).then_some(ip4)
+}
+
+fn apply_device_ip4_field(ip4: &mut Ip4Status, key: &str, value: String) {
+    match key {
+        key if key.starts_with("IP4.ADDRESS") => {
+            (ip4.address, ip4.prefix) = parse_cidr(&value);
         }
+        "IP4.GATEWAY" if !value.is_empty() => ip4.gateway = Some(value),
+        key if key.starts_with("IP4.DNS") && !value.is_empty() => ip4.dns.push(value),
+        _ => {}
     }
-    (address.is_some() || gateway.is_some() || !dns.is_empty()).then_some(Ip4Status {
-        address,
-        prefix,
-        gateway,
-        dns,
-    })
 }
 
 fn parse_active_wifi_row(line: &str) -> Option<NmcliWifiRow> {
@@ -136,8 +136,9 @@ fn parse_cidr(value: &str) -> (Option<String>, Option<u32>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Nmcli, parse_active_wifi_row};
     use crate::command::tests::FakeRunner;
+    use crate::error::ErrorOperation;
 
     #[test]
     fn parses_escaped_active_wifi_rows() {

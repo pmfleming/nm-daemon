@@ -730,9 +730,16 @@ impl Drop for PendingRegistration {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
-    use super::*;
+    use super::{
+        PendingRegistration, PendingRegistry, PendingSecretRequest, SecretResponse,
+        apply_secret_response, register_pending, remove_pending, with_pending_registry,
+    };
+    use crate::nm::ConnectionSettings;
+    use crate::variant::value_string;
 
     #[test]
     fn pending_registry_replaces_one_request_per_connection_setting() {

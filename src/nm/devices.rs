@@ -6,8 +6,9 @@ use zvariant::OwnedObjectPath;
 
 use super::{AP_IFACE, DEVICE_IFACE, NM_DEVICE_TYPE_WIFI, NM_IFACE, NM_PATH, Nm, WIFI_IFACE};
 use crate::model::{
-    AccessPoint, WifiConnectTarget, WifiDevice, display_ssid, frequency_band, frequency_channel,
-    security_flags_label, security_label, ssid_hex, wifi_mode_label,
+    AccessPoint, Bssid, InterfaceName, NmObjectPath, WifiConnectTarget, WifiDevice, display_ssid,
+    frequency_band, frequency_channel, security_flags_label, security_label, ssid_hex,
+    wifi_mode_label,
 };
 
 impl Nm {
@@ -59,8 +60,8 @@ impl Nm {
         Ok(access_point_matches(
             &ap,
             target.ssid_bytes(),
-            target.ap_path.as_deref(),
-            target.bssid.as_deref(),
+            target.ap_path.as_ref().map(NmObjectPath::as_str),
+            target.bssid.as_ref().map(Bssid::as_str),
         ))
     }
 
@@ -114,7 +115,8 @@ impl Nm {
         }
         if target
             .ap_path
-            .as_deref()
+            .as_ref()
+            .map(NmObjectPath::as_str)
             .is_some_and(|value| !value.is_empty())
             && let Some(match_) =
                 self.visible_access_point_matching(&devices, target, target_ssid.as_ref(), true)?
@@ -147,9 +149,9 @@ impl Nm {
                     &ap,
                     target_ssid,
                     (!ignore_ap_path)
-                        .then_some(target.ap_path.as_deref())
+                        .then(|| target.ap_path.as_ref().map(NmObjectPath::as_str))
                         .flatten(),
-                    target.bssid.as_deref(),
+                    target.bssid.as_ref().map(Bssid::as_str),
                 ) {
                     tracing::debug!(
                         ssid = %target.ssid,
@@ -305,12 +307,14 @@ impl Nm {
 fn target_matches_device(target: &WifiConnectTarget, device: &WifiDevice) -> bool {
     target
         .device_path
-        .as_deref()
+        .as_ref()
+        .map(NmObjectPath::as_str)
         .filter(|value| !value.is_empty())
         .is_none_or(|path| device.path.as_str() == path)
         && target
             .ifname
-            .as_deref()
+            .as_ref()
+            .map(InterfaceName::as_str)
             .filter(|value| !value.is_empty())
             .is_none_or(|ifname| device.iface == ifname)
 }

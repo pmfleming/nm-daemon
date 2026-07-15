@@ -124,8 +124,8 @@ impl Nm {
         enabled: bool,
     ) -> Result<()> {
         self.mutate_connection_settings(path, "DHCP hostname privacy", |settings| {
-            set_dhcp_send_hostname(settings, "ipv4", enabled)?;
-            set_dhcp_send_hostname(settings, "ipv6", enabled)
+            super::ip_settings::set_send_hostname(settings, "ipv4", enabled)?;
+            super::ip_settings::set_send_hostname(settings, "ipv6", enabled)
         })
     }
 
@@ -219,10 +219,10 @@ impl Nm {
                 "assigned-mac-address".to_string(),
                 owned_value(update.mac_address_policy.clone())?,
             );
-            set_dhcp_send_hostname(settings, "ipv4", update.send_hostname)?;
-            set_dhcp_send_hostname(settings, "ipv6", update.send_hostname)?;
-            replace_ip_settings(settings, "ipv4", &update.ipv4)?;
-            replace_ip_settings(settings, "ipv6", &update.ipv6)?;
+            super::ip_settings::set_send_hostname(settings, "ipv4", update.send_hostname)?;
+            super::ip_settings::set_send_hostname(settings, "ipv6", update.send_hostname)?;
+            super::ip_settings::replace(settings, "ipv4", &update.ipv4)?;
+            super::ip_settings::replace(settings, "ipv6", &update.ipv6)?;
             if let Some(password) = update.password.as_deref().filter(|value| !value.is_empty()) {
                 update_personal_password(settings, password)?;
             }
@@ -555,7 +555,7 @@ fn wifi_share_payload_for_settings(
         .and_then(|section| setting_string(section, "key-mgmt"))
         .unwrap_or_default();
     if security.is_none() || (key_mgmt.is_empty() && !has_wep_settings(settings, secrets)) {
-        return shareable_payload(profile, "nopass", None, hidden);
+        return WifiSharePayload::shareable(profile, "nopass", None, hidden);
     }
 
     share_payload_for_key_mgmt(profile, settings, secrets, hidden, security, &key_mgmt)
@@ -579,7 +579,7 @@ fn share_payload_for_key_mgmt(
             let key = format!("wep-key{key_index}");
             secret_payload(profile, "WEP", &key, settings, secrets, hidden)
         }
-        "none" | "" => shareable_payload(profile, "nopass", None, hidden),
+        "none" | "" => WifiSharePayload::shareable(profile, "nopass", None, hidden),
         "owe" => unshareable_payload(
             profile,
             "OWE/enhanced-open QR sharing is not supported by the standard Wi-Fi QR format",
@@ -629,16 +629,7 @@ fn secret_payload(
             &format!("saved {auth_type} password is not readable from NetworkManager"),
         );
     };
-    shareable_payload(profile, auth_type, Some(&password), hidden)
-}
-
-fn shareable_payload(
-    profile: &SavedWifiConnection,
-    auth_type: &str,
-    password: Option<&str>,
-    hidden: bool,
-) -> WifiSharePayload {
-    WifiSharePayload::shareable(profile, auth_type, password, hidden)
+    WifiSharePayload::shareable(profile, auth_type, Some(&password), hidden)
 }
 
 fn unshareable_payload(profile: &SavedWifiConnection, reason: &str) -> WifiSharePayload {
@@ -920,6 +911,24 @@ fn validate_profile_update(update: &WifiProfileUpdate) -> Result<()> {
 }
 
 fn validate_ip_settings(section: &str, settings: &TargetIpSettings, ipv6: bool) -> Result<()> {
+    validate_ip_method(section, settings)?;
+    settings
+        .addresses
+        .iter()
+        .try_for_each(|address| validate_ip_address(section, address, ipv6))?;
+    settings
+        .gateway
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|gateway| validate_ip_value(section, "gateway", gateway, ipv6))
+        .transpose()?;
+    settings
+        .dns
+        .iter()
+        .try_for_each(|dns| validate_ip_value(section, "dns", dns, ipv6))
+}
+
+fn validate_ip_method(section: &str, settings: &TargetIpSettings) -> Result<()> {
     let method = settings.method.as_deref().unwrap_or("auto");
     if !matches!(method, "auto" | "manual" | "disabled") {
         return Err(DomainError::validation(
@@ -937,27 +946,19 @@ fn validate_ip_settings(section: &str, settings: &TargetIpSettings, ipv6: bool) 
         .with_detail("field", format!("{section}.addresses"))
         .into());
     }
-    for address in &settings.addresses {
-        validate_ip_value(section, "address", &address.address, ipv6)?;
-        let max_prefix = if ipv6 { 128 } else { 32 };
-        if address.prefix > max_prefix {
-            return Err(DomainError::validation(
-                ErrorOperation::ProfileOperation,
-                format!("{section} prefix must be between 0 and {max_prefix}"),
-            )
-            .with_detail("field", format!("{section}.prefix"))
-            .into());
-        }
-    }
-    if let Some(gateway) = settings
-        .gateway
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        validate_ip_value(section, "gateway", gateway, ipv6)?;
-    }
-    for dns in &settings.dns {
-        validate_ip_value(section, "dns", dns, ipv6)?;
+    Ok(())
+}
+
+fn validate_ip_address(section: &str, address: &TargetIpAddress, ipv6: bool) -> Result<()> {
+    validate_ip_value(section, "address", &address.address, ipv6)?;
+    let max_prefix = if ipv6 { 128 } else { 32 };
+    if address.prefix > max_prefix {
+        return Err(DomainError::validation(
+            ErrorOperation::ProfileOperation,
+            format!("{section} prefix must be between 0 and {max_prefix}"),
+        )
+        .with_detail("field", format!("{section}.prefix"))
+        .into());
     }
     Ok(())
 }
@@ -980,95 +981,6 @@ fn validate_ip_value(section: &str, field: &str, value: &str, ipv6: bool) -> Res
         .into());
     }
     Ok(())
-}
-
-fn replace_ip_settings(
-    settings: &mut ConnectionSettings,
-    section: &str,
-    update: &TargetIpSettings,
-) -> Result<()> {
-    let values = settings.entry(section.to_string()).or_default();
-    for key in [
-        "address-data",
-        "addresses",
-        "gateway",
-        "dns-data",
-        "dns",
-        "route-data",
-        "route-metric",
-        "ignore-auto-dns",
-        "dns-search",
-    ] {
-        values.remove(key);
-    }
-    let method = update.method.as_deref().unwrap_or("auto");
-    values.insert("method".to_string(), owned_value(method.to_string())?);
-    if !update.addresses.is_empty() {
-        values.insert(
-            "address-data".to_string(),
-            owned_value(profile_address_data(&update.addresses)?)?,
-        );
-    }
-    if let Some(gateway) = update.gateway.as_deref().filter(|value| !value.is_empty()) {
-        values.insert("gateway".to_string(), owned_value(gateway.to_string())?);
-    }
-    if !update.dns.is_empty() {
-        values.insert("dns-data".to_string(), owned_value(update.dns.clone())?);
-    }
-    if !update.routes.is_empty() {
-        values.insert(
-            "route-data".to_string(),
-            owned_value(profile_route_data(&update.routes)?)?,
-        );
-    }
-    values.insert(
-        "ignore-auto-dns".to_string(),
-        owned_value(update.ignore_auto_dns.unwrap_or(false))?,
-    );
-    if !update.dns_search.is_empty() {
-        values.insert(
-            "dns-search".to_string(),
-            owned_value(update.dns_search.clone())?,
-        );
-    }
-    if let Some(route_metric) = update.route_metric {
-        values.insert("route-metric".to_string(), owned_value(route_metric)?);
-    }
-    Ok(())
-}
-
-fn profile_address_data(addresses: &[TargetIpAddress]) -> Result<Vec<HashMap<String, OwnedValue>>> {
-    addresses
-        .iter()
-        .map(|address| {
-            Ok(HashMap::from([
-                ("address".to_string(), owned_value(address.address.clone())?),
-                ("prefix".to_string(), owned_value(address.prefix)?),
-            ]))
-        })
-        .collect()
-}
-
-fn profile_route_data(routes: &[TargetIpRoute]) -> Result<Vec<HashMap<String, OwnedValue>>> {
-    routes
-        .iter()
-        .map(|route| {
-            let mut values = HashMap::from([
-                ("dest".to_string(), owned_value(route.dest.clone())?),
-                ("prefix".to_string(), owned_value(route.prefix)?),
-            ]);
-            if let Some(next_hop) = route.next_hop.as_deref().filter(|value| !value.is_empty()) {
-                values.insert("next-hop".to_string(), owned_value(next_hop.to_string())?);
-            }
-            if let Some(metric) = route.metric {
-                values.insert("metric".to_string(), owned_value(metric)?);
-            }
-            if let Some(table) = route.table {
-                values.insert("table".to_string(), owned_value(table)?);
-            }
-            Ok(values)
-        })
-        .collect()
 }
 
 fn update_personal_password(settings: &mut ConnectionSettings, password: &str) -> Result<()> {
@@ -1119,18 +1031,6 @@ fn privacy_from_settings(settings: &ConnectionSettings) -> ProfilePrivacy {
         randomized_mac,
         send_hostname: ipv4_send_hostname || ipv6_send_hostname,
     }
-}
-
-fn set_dhcp_send_hostname(
-    settings: &mut ConnectionSettings,
-    section: &str,
-    enabled: bool,
-) -> Result<()> {
-    let ip = settings.entry(section.to_string()).or_default();
-    ip.entry("method".to_string())
-        .or_insert(owned_value("auto".to_string())?);
-    ip.insert("dhcp-send-hostname".to_string(), owned_value(enabled)?);
-    Ok(())
 }
 
 fn settings_match_wifi_ssid(settings: &ConnectionSettings, ssid_bytes: &[u8]) -> bool {
@@ -1217,6 +1117,5 @@ fn root_object_path() -> Result<OwnedObjectPath> {
 }
 
 #[cfg(test)]
-mod tests {
-    include!("../../test_support/settings_unit.rs");
-}
+#[path = "../../test_support/settings_unit.rs"]
+mod tests;

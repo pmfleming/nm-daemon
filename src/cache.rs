@@ -8,8 +8,8 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectionDetails, NetworkEntry,
-    WifiConnectTarget, WifiStatus,
+    AccessPoint, Bssid, ConnectEnginePath, ConnectFailureReason, ConnectionDetails, InterfaceName,
+    NetworkEntry, NmObjectPath, WifiConnectTarget, WifiStatus,
 };
 
 use self::merge::{mark_inactive, network_key, upsert_connected_access_point};
@@ -130,10 +130,10 @@ impl<'a> ConnectAttemptRecord<'a> {
             path,
             ssid: target.ssid.as_str(),
             ssid_bytes: target.ssid_bytes().to_vec(),
-            bssid: non_empty(target.bssid.as_deref()),
-            ap_path: non_empty(target.ap_path.as_deref()),
-            device_iface: non_empty(target.ifname.as_deref()),
-            device_path: non_empty(target.device_path.as_deref()),
+            bssid: non_empty(target.bssid.as_ref().map(Bssid::as_str)),
+            ap_path: non_empty(target.ap_path.as_ref().map(NmObjectPath::as_str)),
+            device_iface: non_empty(target.ifname.as_ref().map(InterfaceName::as_str)),
+            device_path: non_empty(target.device_path.as_ref().map(NmObjectPath::as_str)),
             message,
         }
     }

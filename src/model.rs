@@ -1326,6 +1326,5 @@ fn has_owe(flags: u32) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    include!("../test_support/model_unit.rs");
-}
+#[path = "../test_support/model_unit.rs"]
+mod tests;

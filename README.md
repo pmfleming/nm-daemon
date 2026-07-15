@@ -7,7 +7,7 @@ Local NetworkManager JSON/JSONL adapter and user D-Bus service for Shelllist and
 ## Current state
 
 - Long-lived user D-Bus service is implemented at `org.laufan.NmDaemon` and packaged as `nm-daemon.service`.
-- The host NixOS/Home Manager setup enables the user service at login; D-Bus activation is still a future fallback path.
+- The package includes both a systemd user unit and session D-Bus activation, so Hyprland/Quickshell clients can start the daemon on their first call without login-service ordering.
 - Read-only, disconnect, and saved-profile CLI calls forward through the daemon; scan/connect/debug commands retain direct implementations.
 - CLI and D-Bus adapters share one typed application layer for status, network listing, scan, connect, disconnect, and saved-profile operations. The frontend `forget` profile operation is a daemon-owned disconnect-and-forget workflow rather than a sequence of UI calls.
 - Connection orchestration is an explicit NetworkManager D-Bus state machine with SSID-based activation verification, cancellation, and failed-profile cleanup; BSSID and AP paths are selection hints rather than post-activation invariants.
@@ -82,7 +82,7 @@ The Nix package installs `share/systemd/user/nm-daemon.service`, running:
 ExecStart=<package>/bin/nm-daemon daemon
 ```
 
-The current host configuration enables this user service at `default.target`, so the daemon starts at login. A D-Bus activation file is not present yet; add one later only as a fallback startup path.
+The package also installs `share/dbus-1/services/org.laufan.NmDaemon.service`. Session-bus calls activate the systemd user unit on demand, which avoids startup races in Hyprland sessions. Enabling `nm-daemon.service` at `default.target` remains supported for eager login startup.
 
 ## CLI compatibility
 

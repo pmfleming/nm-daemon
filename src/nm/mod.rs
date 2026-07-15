@@ -14,6 +14,7 @@ mod activate;
 mod connectivity;
 mod devices;
 mod events;
+mod ip_settings;
 mod scan;
 mod settings;
 mod status;

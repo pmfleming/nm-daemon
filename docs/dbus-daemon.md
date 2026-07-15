@@ -4,7 +4,7 @@ This document describes the current `nm-daemon` user D-Bus API for Shelllist and
 
 ## Current status
 
-`nm-daemon daemon` is implemented and packaged as a systemd user service. The host NixOS/Home Manager configuration starts that service at login. D-Bus activation is intentionally not present yet and remains a fallback startup enhancement. Shelllist consumes this API through the long-lived `nm-daemon client` JSONL session. CLI and D-Bus transports call the same typed application services; the daemon adds a shared event runtime rather than a second orchestration path.
+`nm-daemon daemon` is packaged as a `Type=dbus` systemd user service and as a session D-Bus activatable service. It may start eagerly at login or on the first frontend call. Shelllist consumes this API through the long-lived `nm-daemon client` JSONL session. CLI and D-Bus transports call the same typed application services; the daemon adds a shared event runtime rather than a second orchestration path.
 
 ## Service identity
 
@@ -196,7 +196,7 @@ The unit runs:
 ExecStart=<package>/bin/nm-daemon daemon
 ```
 
-The host NixOS/Home Manager configuration enables this user service at `default.target`, so it starts at login once the package is installed in the user environment. D-Bus activation is not implemented yet; keep it as a later fallback startup path rather than the primary startup mechanism.
+The package installs `share/dbus-1/services/org.laufan.NmDaemon.service` alongside the user unit. A session-bus call asks systemd to start `nm-daemon.service` and waits for `BusName=org.laufan.NmDaemon`, avoiding daemon/frontend ordering races in Hyprland sessions. The unit can still be enabled at `default.target` for eager login startup.
 
 ## Implementation status
 
@@ -220,12 +220,12 @@ Implemented here:
 16. Packaged systemd user service metadata.
 17. A long-lived JSONL frontend client with correlated operation events and cleanup on EOF.
 18. Caller-owned subscriptions that are removed automatically when the D-Bus client disconnects.
+19. Session D-Bus activation through the packaged systemd user unit.
 
 Still open:
 
 - Optional desktop integration for completing Secret Service prompts; the daemon currently dismisses and reports them as unsupported.
 - Rich multi-field frontend forms for requests that contain several `secret_keys`.
-- D-Bus activation file as a fallback startup path.
 
 ## Shelllist integration
 

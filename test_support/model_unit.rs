@@ -1,7 +1,7 @@
 use super::{
-    AccessPoint, AuthKind, ConnectionReadiness, ConnectivityStatus, MeteredStatus,
-    NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_802_1X, NM_AP_SEC_KEY_MGMT_OWE,
-    NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, NetworkAuth, NetworkCapabilities,
+    AccessPoint, AuthKind, Bssid, ConnectionReadiness, ConnectivityStatus, InterfaceName,
+    MeteredStatus, NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_802_1X, NM_AP_SEC_KEY_MGMT_OWE,
+    NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, NetworkAuth, NetworkCapabilities, NmObjectPath,
     ProfilePrivacy, SavedWifiConnection, Security, WifiConnectTarget, ap_is_passwordless,
     ap_supports_enterprise, ap_supports_psk, ap_uses_wep, network_entries_with_profile_matches,
     security_flags_label, security_label,
@@ -22,7 +22,11 @@ fn security_label_prefers_rsn_over_wpa() {
 #[test]
 fn owe_is_passwordless_but_psk_is_not() {
     assert!(ap_is_passwordless(0, 0, NM_AP_SEC_KEY_MGMT_OWE));
-    assert!(ap_is_passwordless(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_OWE));
+    assert!(ap_is_passwordless(
+        NM_AP_FLAGS_PRIVACY,
+        0,
+        NM_AP_SEC_KEY_MGMT_OWE
+    ));
     assert_eq!(security_label(0, 0, NM_AP_SEC_KEY_MGMT_OWE), Security::Owe);
     assert_eq!(
         security_label(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_OWE),
@@ -126,10 +130,8 @@ fn metered_status_maps_networkmanager_codes() {
 #[test]
 fn connect_target_validation_rejects_bad_identity() {
     assert!(
-        serde_json::from_str::<WifiConnectTarget>(
-            r#"{"ssid":"Example","bssid":"not-a-mac"}"#
-        )
-        .is_err()
+        serde_json::from_str::<WifiConnectTarget>(r#"{"ssid":"Example","bssid":"not-a-mac"}"#)
+            .is_err()
     );
     assert!(
         serde_json::from_value::<WifiConnectTarget>(serde_json::json!({
@@ -156,11 +158,17 @@ fn connect_target_accepts_network_entry_path_alias() {
     assert_eq!(target.ssid.as_str(), "Cafe");
     assert_eq!(target.ssid_bytes(), b"Cafe");
     assert_eq!(
-        target.ap_path.as_deref(),
+        target.ap_path.as_ref().map(NmObjectPath::as_str),
         Some("/org/freedesktop/NetworkManager/AccessPoint/1")
     );
-    assert_eq!(target.bssid.as_deref(), Some("00:11:22:33:44:55"));
-    assert_eq!(target.ifname.as_deref(), Some("wlan0"));
+    assert_eq!(
+        target.bssid.as_ref().map(Bssid::as_str),
+        Some("00:11:22:33:44:55")
+    );
+    assert_eq!(
+        target.ifname.as_ref().map(InterfaceName::as_str),
+        Some("wlan0")
+    );
     assert!(!target.hidden);
 }
 

@@ -16,10 +16,16 @@
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
+            checkFlags = [ "--" "--test-threads=1" ];
             nativeBuildInputs = with pkgs; [ pkg-config ];
             postInstall = ''
               install -Dm644 ${./packaging/systemd/nm-daemon.service} $out/share/systemd/user/nm-daemon.service
-              substituteInPlace $out/share/systemd/user/nm-daemon.service --replace-fail @out@ $out
+              install -Dm644 ${./packaging/dbus/org.laufan.NmDaemon.service} \
+                $out/share/dbus-1/services/org.laufan.NmDaemon.service
+              substituteInPlace \
+                $out/share/systemd/user/nm-daemon.service \
+                $out/share/dbus-1/services/org.laufan.NmDaemon.service \
+                --replace-fail @out@ $out
             '';
             meta = {
               description = "NetworkManager JSON/JSONL adapter and user D-Bus daemon";
@@ -70,15 +76,19 @@
         default = pkgs.mkShell {
           packages = with pkgs; [
             cargo
+            cargo-llvm-cov
             clippy
             gcc
             just
+            llvmPackages.llvm
             pkg-config
             rust-analyzer
             rustc
             rustfmt
           ];
 
+          LLVM_COV = "${pkgs.llvmPackages.llvm}/bin/llvm-cov";
+          LLVM_PROFDATA = "${pkgs.llvmPackages.llvm}/bin/llvm-profdata";
           RUST_BACKTRACE = "1";
         };
       });

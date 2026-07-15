@@ -52,14 +52,6 @@ impl Bssid {
     }
 }
 
-impl std::ops::Deref for Bssid {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
-    }
-}
-
 impl std::fmt::Display for Bssid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -105,14 +97,6 @@ impl InterfaceName {
     }
 }
 
-impl std::ops::Deref for InterfaceName {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
-    }
-}
-
 impl std::fmt::Display for InterfaceName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -149,14 +133,6 @@ impl NmObjectPath {
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl std::ops::Deref for NmObjectPath {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
     }
 }
 
