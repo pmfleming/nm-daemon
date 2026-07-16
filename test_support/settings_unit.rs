@@ -1,7 +1,8 @@
 use super::{
-    ConnectionSettings, profile_ip_settings, saved_wifi_profile_candidate_from_settings,
-    settings_match_access_point, settings_match_wifi_ssid, ssid_bytes_match,
-    validate_profile_update, wifi_settings_need_secret_agent,
+    ConnectionSettings, apply_mac_address_policy, privacy_from_settings, profile_ip_settings,
+    saved_wifi_profile_candidate_from_settings, settings_match_access_point,
+    settings_match_wifi_ssid, ssid_bytes_match, validate_profile_update,
+    wifi_settings_need_secret_agent,
 };
 use crate::model::{AccessPoint, TargetIpAddress, TargetIpSettings, WifiProfileUpdate};
 use crate::nm::ip_settings::replace as replace_ip_settings;
@@ -122,6 +123,43 @@ fn advanced_profile_ip_settings_round_trip_and_validate_address_families() {
         ..update
     };
     assert!(validate_profile_update(&invalid).is_err());
+}
+
+#[test]
+fn system_default_mac_policy_omits_networkmanager_policy_properties() {
+    let mut settings = wifi_settings("Example", "802-11-wireless");
+    let wireless = settings
+        .get_mut("802-11-wireless")
+        .expect("wireless settings");
+    wireless.insert(
+        "assigned-mac-address".to_string(),
+        owned_value(Value::new("permanent".to_string())),
+    );
+    wireless.insert(
+        "cloned-mac-address".to_string(),
+        owned_value(Value::new("random".to_string())),
+    );
+    wireless.insert(
+        "mac-address-randomization".to_string(),
+        owned_value(Value::new(1_u32)),
+    );
+
+    apply_mac_address_policy(&mut settings, "default").expect("apply system default policy");
+
+    let wireless = settings.get("802-11-wireless").expect("wireless settings");
+    assert!(!wireless.contains_key("assigned-mac-address"));
+    assert!(!wireless.contains_key("cloned-mac-address"));
+    assert!(!wireless.contains_key("mac-address-randomization"));
+    assert_eq!(
+        privacy_from_settings(&settings).mac_address_policy,
+        "default"
+    );
+
+    apply_mac_address_policy(&mut settings, "stable").expect("apply stable policy");
+    assert_eq!(
+        privacy_from_settings(&settings).mac_address_policy,
+        "stable"
+    );
 }
 
 #[test]

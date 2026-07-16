@@ -107,14 +107,7 @@ impl Nm {
         randomized: bool,
     ) -> Result<()> {
         self.mutate_connection_settings(path, "MAC randomization", |settings| {
-            settings
-                .entry("802-11-wireless".to_string())
-                .or_default()
-                .insert(
-                    "assigned-mac-address".to_string(),
-                    owned_value(if randomized { "stable" } else { "permanent" }.to_string())?,
-                );
-            Ok(())
+            apply_mac_address_policy(settings, if randomized { "stable" } else { "permanent" })
         })
     }
 
@@ -213,12 +206,11 @@ impl Nm {
                 "metered".to_string(),
                 owned_value(metered_code(&update.metered)?)?,
             );
-            let wireless = settings.entry("802-11-wireless".to_string()).or_default();
-            wireless.insert("hidden".to_string(), owned_value(update.hidden)?);
-            wireless.insert(
-                "assigned-mac-address".to_string(),
-                owned_value(update.mac_address_policy.clone())?,
-            );
+            settings
+                .entry("802-11-wireless".to_string())
+                .or_default()
+                .insert("hidden".to_string(), owned_value(update.hidden)?);
+            apply_mac_address_policy(settings, &update.mac_address_policy)?;
             super::ip_settings::set_send_hostname(settings, "ipv4", update.send_hostname)?;
             super::ip_settings::set_send_hostname(settings, "ipv6", update.send_hostname)?;
             super::ip_settings::replace(settings, "ipv4", &update.ipv4)?;
@@ -1015,6 +1007,22 @@ fn update_personal_password(settings: &mut ConnectionSettings, password: &str) -
         .or_default();
     section.insert("psk".to_string(), owned_value(password.to_string())?);
     section.insert("psk-flags".to_string(), owned_value(0_u32)?);
+    Ok(())
+}
+
+fn apply_mac_address_policy(settings: &mut ConnectionSettings, policy: &str) -> Result<()> {
+    let wireless = settings.entry("802-11-wireless".to_string()).or_default();
+    // NetworkManager represents its system default by omitting the property. The literal
+    // string "default" is not a valid assigned-mac-address value.
+    wireless.remove("assigned-mac-address");
+    wireless.remove("cloned-mac-address");
+    wireless.remove("mac-address-randomization");
+    if policy != "default" {
+        wireless.insert(
+            "assigned-mac-address".to_string(),
+            owned_value(policy.to_string())?,
+        );
+    }
     Ok(())
 }
 
