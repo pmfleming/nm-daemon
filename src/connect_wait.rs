@@ -6,11 +6,9 @@ use anyhow::Result;
 use crate::connect_cancel::check_cancelled_and_abort;
 use crate::connect_error::{connect_failure, target_appears_to_need_secret};
 use crate::deadline::Deadline;
+use crate::generated::{ACTIVATION_FAILURE_GRACE, ACTIVATION_TIMEOUT, WPA_WRONG_KEY_RETRY_DELAY};
 use crate::model::{ConnectFailureReason, WifiConnectTarget};
 use crate::nm::Nm;
-
-const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(90);
-const ACTIVATION_FAILURE_GRACE: Duration = Duration::from_secs(3);
 
 const NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE: u32 = 5;
 const NM_DEVICE_STATE_REASON_IP_CONFIG_EXPIRED: u32 = 6;
@@ -19,8 +17,6 @@ const NM_DEVICE_STATE_REASON_SUPPLICANT_DISCONNECT: u32 = 8;
 const NM_DEVICE_STATE_REASON_SUPPLICANT_CONFIG_FAILED: u32 = 9;
 const NM_DEVICE_STATE_REASON_SUPPLICANT_FAILED: u32 = 10;
 const NM_DEVICE_STATE_REASON_SUPPLICANT_TIMEOUT: u32 = 11;
-const WPA_WRONG_KEY_RETRY_DELAY: Duration = Duration::from_secs(10);
-
 pub(crate) fn wait_for_active_target(
     nm: &Nm,
     target: &WifiConnectTarget,

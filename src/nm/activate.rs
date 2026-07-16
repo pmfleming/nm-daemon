@@ -2,9 +2,10 @@ use anyhow::{Context, Result};
 use zvariant::OwnedObjectPath;
 
 use super::wifi_settings::{
-    apply_target_profile_settings, cloned_wifi_connection_settings,
-    enterprise_wifi_connection_settings, hidden_wifi_connection_settings,
-    owe_wifi_connection_settings, psk_wifi_connection_settings, wep_wifi_connection_settings,
+    apply_saved_activation_settings, apply_target_profile_settings,
+    cloned_wifi_connection_settings, enterprise_wifi_connection_settings,
+    hidden_wifi_connection_settings, owe_wifi_connection_settings, psk_wifi_connection_settings,
+    wep_wifi_connection_settings,
 };
 use super::{
     ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_IFACE, NM_PATH, Nm, owned_value,
@@ -18,18 +19,30 @@ impl Nm {
         &self,
         target: &WifiConnectTarget,
         password: Option<&str>,
-        _wep_key_type: Option<WepKeyType>,
+        wep_key_type: Option<WepKeyType>,
     ) -> Result<bool> {
-        if password.is_some() {
-            tracing::info!(ssid = %target.ssid, "skipping saved-profile activation because caller supplied a password");
-            return Ok(false);
-        }
         let Some((connection_path, device_path, specific_object)) =
             self.saved_wifi_activation_target_for(target)?
         else {
             return Ok(false);
         };
-        if self.saved_wifi_connection_needs_secret_agent(&connection_path, None)? {
+        let supplied_credentials = password.is_some() || target.enterprise.is_some();
+        if supplied_credentials {
+            let visible_ap = self
+                .visible_access_point_for(target)?
+                .map(|(_device, _path, ap)| ap);
+            let mut settings = self.connection_settings(&connection_path)?;
+            apply_saved_activation_settings(
+                &mut settings,
+                target,
+                visible_ap.as_ref(),
+                password,
+                wep_key_type,
+            )?;
+            apply_target_connection_metadata(&mut settings, target)?;
+            tracing::info!(ssid = %target.ssid, connection = %connection_path, "updating compatible saved profile before activation");
+            self.update_connection_settings_for_activation(&connection_path, settings)?;
+        } else if self.saved_wifi_connection_needs_secret_agent(&connection_path, None)? {
             tracing::info!(ssid = %target.ssid, connection = %connection_path, "saved Wi-Fi profile needs a secret agent before activation");
             return Err(DomainError::connect(
                 crate::model::ConnectFailureReason::PasswordUnavailable,

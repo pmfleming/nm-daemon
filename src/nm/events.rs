@@ -7,6 +7,7 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Type;
 
 use super::NM_DEST;
+use crate::generated::NETWORKMANAGER_EVENT_RETRY_DELAY;
 
 #[derive(Default)]
 pub(super) struct NetworkEvents {
@@ -26,7 +27,7 @@ impl NetworkEvents {
                     if let Err(error) = monitor_signals(connection.clone(), &monitor_events) {
                         tracing::warn!(error = %crate::error::err_chain(&error), "NetworkManager event monitor interrupted; retrying");
                     }
-                    std::thread::sleep(Duration::from_secs(1));
+                    std::thread::sleep(NETWORKMANAGER_EVENT_RETRY_DELAY);
                 }
             })
             .expect("spawn NetworkManager event monitor");

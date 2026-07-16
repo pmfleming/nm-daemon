@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use zvariant::OwnedValue;
 
 use super::{
-    cloned_wifi_connection_settings, enterprise_wifi_connection_settings,
-    hidden_wifi_connection_settings, owe_wifi_connection_settings, psk_wifi_connection_settings,
-    validate_wep_key, validate_wpa_psk,
+    apply_saved_activation_settings, cloned_wifi_connection_settings,
+    enterprise_wifi_connection_settings, hidden_wifi_connection_settings,
+    owe_wifi_connection_settings, psk_wifi_connection_settings, validate_wep_key, validate_wpa_psk,
 };
 use crate::model::{
     AccessPoint, EnterpriseAuth, NM_AP_SEC_KEY_MGMT_802_1X, NM_AP_SEC_KEY_MGMT_PSK,
@@ -147,6 +147,12 @@ fn cloned_profile_settings_replace_secret_and_preserve_profile_options() {
     );
     assert_eq!(
         settings
+            .get("connection")
+            .and_then(|section| setting::<u32>(section, "metered")),
+        Some(2)
+    );
+    assert_eq!(
+        settings
             .get("ipv4")
             .and_then(|section| setting::<String>(section, "method"))
             .as_deref(),
@@ -192,6 +198,48 @@ fn cloned_profile_settings_replace_secret_and_preserve_profile_options() {
         setting::<String>(&route_data[0], "next-hop").as_deref(),
         Some("192.0.2.1")
     );
+}
+
+#[test]
+fn saved_profile_password_update_preserves_security_options() {
+    let target = example_connect_target(false);
+    let mut settings =
+        super::base_wifi_connection_settings("Example", b"Example", false).expect("base settings");
+    settings.insert(
+        "802-11-wireless-security".to_string(),
+        HashMap::from([
+            (
+                "key-mgmt".to_string(),
+                super::owned_value("wpa-psk".to_string()).expect("key management"),
+            ),
+            (
+                "pmf".to_string(),
+                super::owned_value(2_u32).expect("PMF setting"),
+            ),
+        ]),
+    );
+
+    apply_saved_activation_settings(
+        &mut settings,
+        &target,
+        Some(&test_ap(NM_AP_SEC_KEY_MGMT_PSK)),
+        Some("secret123"),
+        None,
+    )
+    .expect("update saved settings");
+
+    let security = settings
+        .get("802-11-wireless-security")
+        .expect("security settings");
+    assert_eq!(
+        setting::<String>(security, "key-mgmt").as_deref(),
+        Some("wpa-psk")
+    );
+    assert_eq!(
+        setting::<String>(security, "psk").as_deref(),
+        Some("secret123")
+    );
+    assert_eq!(setting::<u32>(security, "pmf"), Some(2));
 }
 
 #[test]

@@ -10,8 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
-
-const POLL_INTERVAL: Duration = Duration::from_millis(25);
+use crate::generated::COMMAND_POLL_INTERVAL;
 
 pub(crate) trait CommandRunner: Send + Sync {
     fn run(
@@ -111,7 +110,7 @@ fn wait_for_command(
                 stderr.take().expect("stderr reader is available"),
             ));
         }
-        thread::sleep(POLL_INTERVAL);
+        thread::sleep(COMMAND_POLL_INTERVAL);
     }
 }
 

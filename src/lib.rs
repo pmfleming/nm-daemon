@@ -25,6 +25,9 @@ mod deadline;
 mod diagnose;
 mod error;
 mod forget;
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/generated_config.rs"));
+}
 mod keyring;
 mod logging;
 mod model;

@@ -255,6 +255,20 @@ impl Nm {
             .with_context(|| format!("Update {action} for {path}"))
     }
 
+    pub(super) fn update_connection_settings_for_activation(
+        &self,
+        path: &OwnedObjectPath,
+        settings: ConnectionSettings,
+    ) -> Result<()> {
+        const BLOCK_AUTOCONNECT: u32 = 0x20;
+        let proxy = self.proxy_path(path, SETTINGS_CONNECTION_IFACE)?;
+        let args = HashMap::<String, OwnedValue>::new();
+        let _: HashMap<String, OwnedValue> = proxy
+            .call("Update2", &(settings, BLOCK_AUTOCONNECT, args))
+            .with_context(|| format!("Update2 credentials for {path}"))?;
+        Ok(())
+    }
+
     pub(crate) fn saved_wifi_connections(&self) -> Result<Vec<SavedWifiConnection>> {
         let mut connections = Vec::new();
         for path in self.saved_connections()? {
@@ -453,7 +467,7 @@ impl Nm {
             .context("ListConnections")
     }
 
-    fn connection_settings(&self, path: &OwnedObjectPath) -> Result<ConnectionSettings> {
+    pub(super) fn connection_settings(&self, path: &OwnedObjectPath) -> Result<ConnectionSettings> {
         let connection = self.proxy_path(path, SETTINGS_CONNECTION_IFACE)?;
         connection
             .call("GetSettings", &())
@@ -580,10 +594,7 @@ fn share_payload_for_key_mgmt(
             secret_payload(profile, "WEP", &key, settings, secrets, hidden)
         }
         "none" | "" => WifiSharePayload::shareable(profile, "nopass", None, hidden),
-        "owe" => unshareable_payload(
-            profile,
-            "OWE/enhanced-open QR sharing is not supported by the standard Wi-Fi QR format",
-        ),
+        "owe" => WifiSharePayload::shareable(profile, "nopass", None, hidden),
         value if value.contains("eap") => {
             unshareable_payload(profile, "enterprise Wi-Fi QR sharing is not supported")
         }

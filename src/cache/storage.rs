@@ -7,11 +7,10 @@ use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::CacheRead;
+use crate::generated::{HISTORY_MAX_BYTES, HISTORY_ROTATIONS};
 
 const CACHE_DIR_NAME: &str = "nm-daemon";
 const LOCK_FILE_NAME: &str = ".storage.lock";
-const HISTORY_MAX_BYTES: u64 = 512 * 1024;
-const HISTORY_ROTATIONS: usize = 3;
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 

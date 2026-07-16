@@ -11,12 +11,9 @@ use zbus::object_server::SignalEmitter;
 use crate::application::{Application, BackgroundScanScheduler, ScanRequest};
 use crate::daemon_status::{SubscriptionState, refresh_payloads};
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
+use crate::generated::{CONTROL_QUEUE_CAPACITY, WORK_QUEUE_CAPACITY, WORKER_COUNT};
 use crate::nm::Nm;
 use crate::protocol::Stream;
-
-const WORKER_COUNT: usize = 3;
-const WORK_QUEUE_CAPACITY: usize = 16;
-const CONTROL_QUEUE_CAPACITY: usize = 64;
 
 type Job = Box<dyn FnOnce(&Nm) + Send + 'static>;
 

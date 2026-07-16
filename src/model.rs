@@ -225,7 +225,7 @@ impl ConnectivityStatus {
         Self {
             code,
             state,
-            captive_portal: matches!(code, 2 | 3),
+            captive_portal: code == 2,
             full: code == 4,
         }
     }
@@ -369,6 +369,7 @@ pub(crate) struct WifiProfileUpdate {
 pub(crate) enum Security {
     Open,
     Owe,
+    OweTransition,
     Wpa,
     Wpa2Or3,
     Wep,
@@ -381,6 +382,7 @@ impl Security {
         match self {
             Self::Open => "--",
             Self::Owe => "OWE",
+            Self::OweTransition => "OWE-TM",
             Self::Wpa => "WPA",
             Self::Wpa2Or3 => "WPA2/3",
             Self::Wep => "WEP",
@@ -420,6 +422,7 @@ impl<'de> Deserialize<'de> for Security {
         Ok(match value.as_str() {
             "--" | "open" | "none" => Self::Open,
             "OWE" | "owe" => Self::Owe,
+            "OWE-TM" | "owe-tm" => Self::OweTransition,
             "WPA" => Self::Wpa,
             "WPA2/3" => Self::Wpa2Or3,
             "WEP" | "wep" => Self::Wep,
@@ -929,20 +932,22 @@ pub(crate) fn ssid_hex(ssid_bytes: &[u8]) -> String {
 }
 
 pub(crate) fn frequency_channel(frequency: u32) -> u32 {
-    match frequency {
-        2412..=2472 => (frequency - 2407) / 5,
-        2484 => 14,
-        5000..=5900 => (frequency - 5000) / 5,
-        5955..=7115 => ((frequency - 5955) / 5) + 1,
-        _ => 0,
-    }
+    crate::generated::WIFI_CHANNELS
+        .iter()
+        .find_map(|(candidate, channel)| (*candidate == frequency).then_some(*channel))
+        .unwrap_or(0)
 }
 
 pub(crate) fn frequency_band(frequency: u32) -> &'static str {
+    use crate::generated::{
+        WIFI_BAND_2_4_MAX_MHZ, WIFI_BAND_2_4_MIN_MHZ, WIFI_BAND_5_MAX_MHZ, WIFI_BAND_5_MIN_MHZ,
+        WIFI_BAND_6_MAX_MHZ, WIFI_BAND_6_MIN_MHZ,
+    };
+
     match frequency {
-        2400..=2500 => "2.4 GHz",
-        4900..=5900 => "5 GHz",
-        5925..=7125 => "6 GHz",
+        WIFI_BAND_2_4_MIN_MHZ..=WIFI_BAND_2_4_MAX_MHZ => "2.4 GHz",
+        WIFI_BAND_5_MIN_MHZ..=WIFI_BAND_5_MAX_MHZ => "5 GHz",
+        WIFI_BAND_6_MIN_MHZ..=WIFI_BAND_6_MAX_MHZ => "6 GHz",
         _ => "",
     }
 }
@@ -993,8 +998,11 @@ pub(crate) fn security_label(flags: u32, wpa_flags: u32, rsn_flags: u32) -> Secu
 }
 
 fn passwordless_security(wpa_flags: u32, rsn_flags: u32) -> Security {
-    if has_owe(wpa_flags | rsn_flags) {
+    let flags = wpa_flags | rsn_flags;
+    if flags & NM_AP_SEC_KEY_MGMT_OWE != 0 {
         Security::Owe
+    } else if flags & NM_AP_SEC_KEY_MGMT_OWE_TM != 0 {
+        Security::OweTransition
     } else {
         Security::Open
     }
@@ -1015,7 +1023,7 @@ pub(crate) fn ap_is_passwordless(flags: u32, wpa_flags: u32, rsn_flags: u32) -> 
 }
 
 pub(crate) fn ap_uses_owe(wpa_flags: u32, rsn_flags: u32) -> bool {
-    has_owe(wpa_flags | rsn_flags)
+    (wpa_flags | rsn_flags) & NM_AP_SEC_KEY_MGMT_OWE != 0
 }
 
 pub(crate) fn ap_supports_psk(wpa_flags: u32, rsn_flags: u32) -> bool {
@@ -1242,13 +1250,8 @@ fn network_share_hint_for(
     access_point: &AccessPoint,
     primary_profile: Option<&SavedWifiConnection>,
 ) -> NetworkShareHint {
-    if is_shareable_open_network(access_point) {
-        return open_network_share_hint(access_point);
-    }
-    if ap_uses_owe(access_point.wpa_flags, access_point.rsn_flags) {
-        return unshareable_hint(
-            "OWE/enhanced-open QR sharing is not supported by the standard Wi-Fi QR format",
-        );
+    if is_shareable_passwordless_network(access_point) {
+        return passwordless_network_share_hint(access_point);
     }
     if let Some(profile) = primary_profile {
         return profile_share_hint(profile);
@@ -1258,13 +1261,11 @@ fn network_share_hint_for(
     )
 }
 
-fn is_shareable_open_network(access_point: &AccessPoint) -> bool {
-    !access_point.ssid_bytes().is_empty()
-        && access_point_is_passwordless(access_point)
-        && !ap_uses_owe(access_point.wpa_flags, access_point.rsn_flags)
+fn is_shareable_passwordless_network(access_point: &AccessPoint) -> bool {
+    !access_point.ssid_bytes().is_empty() && access_point_is_passwordless(access_point)
 }
 
-fn open_network_share_hint(access_point: &AccessPoint) -> NetworkShareHint {
+fn passwordless_network_share_hint(access_point: &AccessPoint) -> NetworkShareHint {
     NetworkShareHint {
         shareable: true,
         reason: None,

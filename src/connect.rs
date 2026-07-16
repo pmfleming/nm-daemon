@@ -12,14 +12,12 @@ use crate::connect_error::{
 use crate::connect_wait::wait_for_active_target;
 use crate::deadline::Deadline;
 use crate::error::{ErrorOperation, best_effort, ensure_domain};
+use crate::generated::{NOT_FOUND_RESCAN_TIMEOUT, POST_CONNECT_STATUS_WAIT};
 use crate::model::{
     ConnectEnginePath, ConnectFailureReason, ConnectResult, ScanRequestOptions, WepKeyType,
     WifiConnectTarget, WifiStatus,
 };
 use crate::nm::Nm;
-
-const POST_CONNECT_STATUS_WAIT: Duration = Duration::from_secs(1);
-const NOT_FOUND_RESCAN_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(crate) use crate::connect_error::connect_failure_reason;
 
@@ -154,12 +152,16 @@ impl<'a> ConnectionMachine<'a> {
 
     fn check_already_active(&self) -> Result<StateTransition> {
         match self.nm.active_target_matches(self.target) {
-            Ok(true) => {
+            Ok(true) if self.password.is_none() && self.target.enterprise.is_none() => {
                 tracing::info!(ssid = %self.target.ssid, "target Wi-Fi network is already active; skipping reactivation");
                 Ok(StateTransition::Connected(ActivationOutcome::new(
                     format!("Already connected to {}", self.target.ssid),
                     ConnectEnginePath::AlreadyActive,
                 )))
+            }
+            Ok(true) => {
+                tracing::info!(ssid = %self.target.ssid, "target Wi-Fi network is active but supplied credentials must update its profile");
+                Ok(StateTransition::Next(ConnectionState::SavedProfile))
             }
             Ok(false) => Ok(StateTransition::Next(ConnectionState::SavedProfile)),
             Err(err) => {
@@ -327,11 +329,23 @@ impl<'a> ConnectionMachine<'a> {
             refresh_cached_networks(self.nm)
         });
         check_cancelled(self.cancellation)?;
+        let status_started = Instant::now();
         let active_status = cache_active_status(self.nm, self.cancellation);
-        let connectivity = active_status
+        let status_elapsed_ms = status_started.elapsed().as_millis();
+        let connectivity_from_status = active_status
             .as_ref()
-            .and_then(|status| status.connectivity.clone())
-            .or_else(|| self.nm.connectivity_check().ok());
+            .and_then(|status| status.connectivity.clone());
+        let (connectivity, connectivity_source) = match connectivity_from_status {
+            Some(connectivity) => (Some(connectivity), "wifi-status"),
+            None => (self.nm.connectivity_check().ok(), "fallback-check"),
+        };
+        tracing::info!(
+            ssid = %self.target.ssid,
+            status_available = active_status.is_some(),
+            status_elapsed_ms,
+            connectivity_source,
+            "collected post-activation Wi-Fi and connectivity status"
+        );
         let result = ConnectResult::connected(
             self.target.ssid.to_string(),
             outcome.message,

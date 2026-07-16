@@ -13,6 +13,7 @@ use zvariant::{OwnedObjectPath, OwnedValue};
 
 use crate::daemon::{DBUS_OBJECT_PATH, emit_json_event_nonfatal};
 use crate::error::best_effort;
+use crate::generated::SECRET_TIMEOUT;
 use crate::nm::{ConnectionSettings, NM_DEST};
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
@@ -23,7 +24,6 @@ pub(crate) const SECRET_AGENT_OBJECT_PATH: &str = "/org/laufan/NmDaemon/SecretAg
 const AGENT_MANAGER_PATH: &str = "/org/freedesktop/NetworkManager/AgentManager";
 const AGENT_MANAGER_IFACE: &str = "org.freedesktop.NetworkManager.AgentManager";
 const SECRET_AGENT_ID: &str = "nm-daemon";
-const SECRET_TIMEOUT: Duration = Duration::from_secs(90);
 
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 static PENDING: OnceLock<Mutex<PendingRegistry>> = OnceLock::new();

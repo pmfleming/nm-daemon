@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use serde::Serialize;
@@ -8,11 +7,12 @@ use crate::cache;
 use crate::daemon_runtime::DaemonRuntime;
 use crate::deadline::Deadline;
 use crate::error::{ErrorOperation, best_effort};
+use crate::generated::{
+    FORGET_CANCELLATION_TIMEOUT, FORGET_DEACTIVATION_TIMEOUT, FORGET_EVENT_POLL_INTERVAL,
+};
 use crate::model::{SavedWifiConnection, WifiConnectTarget, WifiStatus};
 use crate::nm::Nm;
 
-const CANCELLATION_TIMEOUT: Duration = Duration::from_secs(10);
-const DEACTIVATION_TIMEOUT: Duration = Duration::from_secs(10);
 const PORTAL_NOTE: &str =
     "The hotspot may continue to recognize this device until its captive-portal session expires.";
 
@@ -32,7 +32,7 @@ pub(crate) fn execute(
     );
 
     let cancelled = runtime.cancel_connects_for_ssid(&request_id, target.ssid_bytes());
-    let pending = runtime.wait_for_tasks(&cancelled, CANCELLATION_TIMEOUT);
+    let pending = runtime.wait_for_tasks(&cancelled, FORGET_CANCELLATION_TIMEOUT);
     tracing::info!(
         %request_id,
         ssid = %target.ssid,
@@ -209,7 +209,7 @@ impl<'a> ForgetService<'a> {
         tracing::info!(%request_id, ssid = %target.ssid, "disconnecting active network before forget");
         let result = self.nm.disconnect_wifi()?;
         tracing::info!(%request_id, ssid = %target.ssid, status = result.status, message = %result.message, "NetworkManager accepted disconnect before forget");
-        let deadline = Deadline::from_now(DEACTIVATION_TIMEOUT);
+        let deadline = Deadline::from_now(FORGET_DEACTIVATION_TIMEOUT);
         let mut generation = self.nm.event_generation();
         while !deadline.expired() {
             if !status_matches_target(&self.nm.wifi_status()?, target) {
@@ -218,7 +218,7 @@ impl<'a> ForgetService<'a> {
             }
             generation = self
                 .nm
-                .wait_for_event(generation, deadline.wait(Duration::from_millis(500)));
+                .wait_for_event(generation, deadline.wait(FORGET_EVENT_POLL_INTERVAL));
         }
         warnings.push(
             "NetworkManager did not confirm disconnection within 10 seconds; no profiles were deleted."

@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::error::{DomainError, ErrorOperation};
 use crate::model::{TargetProfileSettings, WifiConnectTarget};
 use crate::nm::ip_settings;
 use crate::nm::{ConnectionSettings, owned_value};
@@ -39,9 +40,24 @@ fn apply_connection_settings(
         connection.insert("autoconnect-priority".to_string(), owned_value(priority)?);
     }
     if let Some(metered) = profile.metered.as_deref().filter(|value| !value.is_empty()) {
-        connection.insert("metered".to_string(), owned_value(metered.to_string())?);
+        connection.insert("metered".to_string(), owned_value(metered_code(metered)?)?);
     }
     Ok(())
+}
+
+fn metered_code(value: &str) -> Result<u32> {
+    match value {
+        "auto" | "unknown" => Ok(0),
+        "yes" | "on" | "true" => Ok(1),
+        "no" | "off" | "false" => Ok(2),
+        _ => Err(DomainError::validation(
+            ErrorOperation::Connect,
+            "profile.metered must be auto, yes, or no",
+        )
+        .with_detail("field", "profile.metered")
+        .with_detail("value", value)
+        .into()),
+    }
 }
 
 fn apply_mac_policy(

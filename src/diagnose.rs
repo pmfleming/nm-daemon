@@ -150,6 +150,7 @@ fn parity_checks(nm_api: &NmApiSnapshot, nmcli: &NmcliSnapshot) -> Vec<ParityChe
         nmcli_active.map(|active| active.bssid.clone()),
     ));
     checks.push(compare_frequency(status, nmcli_active));
+    checks.push(compare_band(status, nmcli_active));
     checks.push(compare_signal(status, nmcli_active));
     checks.push(compare_optional(
         "ip4",
@@ -231,6 +232,12 @@ fn compare_frequency(status: &WifiStatus, nmcli_active: Option<&NmcliWifiRow>) -
         .map(|ap| ap.frequency.to_string());
     let right = nmcli_active.and_then(|active| active.frequency_mhz.map(|value| value.to_string()));
     compare_optional("active", "frequency", left, right)
+}
+
+fn compare_band(status: &WifiStatus, nmcli_active: Option<&NmcliWifiRow>) -> ParityCheck {
+    let left = status.access_point.as_ref().map(|ap| ap.band.clone());
+    let right = nmcli_active.map(|active| active.band.clone());
+    compare_optional("active", "band", left, right)
 }
 
 fn compare_signal(status: &WifiStatus, nmcli_active: Option<&NmcliWifiRow>) -> ParityCheck {

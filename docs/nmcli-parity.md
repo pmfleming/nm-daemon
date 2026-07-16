@@ -12,7 +12,8 @@ Current status: the first high-impact parity gaps are closed. `debug diagnose` i
 | --- | --- | --- | --- |
 | Active SSID | `nmcli -t -f IN-USE,SSID ... dev wifi list --rescan no` | `data.status.access_point.ssid` | Shelllist must highlight the connected network. |
 | Active BSSID | same | `data.status.access_point.bssid` | Exact AP selection among same-SSID APs. |
-| Active frequency | same | `data.status.access_point.frequency` | Detail pane should show the actual connected band/AP. |
+| Active frequency | same | `data.status.access_point.frequency` | Detail pane should show the actual connected AP frequency. |
+| Active band | `nmcli -t -f IN-USE,BAND ... dev wifi list --rescan no` | `data.status.access_point.band` | Keeps the 2.4/5/6 GHz label aligned with nmcli 1.58. |
 | Signal | same | `data.status.access_point.strength` | UI list/detail signal should agree with NetworkManager. |
 | IPv4 address | `nmcli -t device show <iface>` | `data.status.ip4.address` | Connection details card. |
 | Gateway | same | `data.status.ip4.gateway` | Connection details card. |
@@ -37,6 +38,18 @@ The connect probe defaults to a dry run. Only `--execute` performs connection at
 just connect-parity-probe
 just connect-parity-probe --execute --order alternate --skip-needs-secret
 ```
+
+## NetworkManager 1.58/1.60 review
+
+The local NetworkManager source was reviewed at commit `4114b664e9` (`meson.build`: `1.59.1-dev`, the 1.60 development cycle). Relevant alignment points:
+
+- nmcli's new AP `BAND` field is queried by `debug diagnose`; nm-daemon generates NetworkManager-compatible 2.4/5/6 GHz bounds and channel tables from `data/wifi-channels.csv` at build time.
+- OWE transition-mode BSSes are reported as `OWE-TM` but treated as the open half of a transition network; only a real OWE BSS creates an `owe` profile.
+- Supplying replacement credentials for a compatible saved profile now updates that profile with `Update2(BLOCK_AUTOCONNECT)` before activation. This follows nmcli's fixed ordering, preserves security options, avoids duplicate profiles, and prevents an old-password autoconnect retry from racing the update.
+- QR sharing suppresses secured-network payloads when NetworkManager cannot return a password, quotes hex-only values like NetworkManager's shared QR helper, and emits `nopass` for open/OWE profiles, matching nmcli 1.58's `show-password` behavior.
+- 64-hex-character WPA PSKs are accepted, matching the NetworkManager 1.58 WPS/PSK handling improvement.
+- NetworkManager's stale global-connectivity fix requires no protocol change; nm-daemon continues to expose the resulting global `Connectivity` state and explicitly rechecks it after activation/portal interaction. Only NetworkManager's `PORTAL` state suggests opening a portal; `LIMITED` no longer does.
+- Wi-Fi 7 AP-MLD background-scan deduplication is core-owned and introduces no new public D-Bus AP property, so nm-daemon should continue grouping the AP objects NetworkManager exports rather than inventing MLD identity.
 
 ## Closed gaps from the first matrix pass
 

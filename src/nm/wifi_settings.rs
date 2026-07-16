@@ -47,6 +47,60 @@ pub(super) fn hidden_wifi_connection_settings(
     Ok(settings)
 }
 
+pub(super) fn apply_saved_activation_settings(
+    settings: &mut ConnectionSettings,
+    target: &WifiConnectTarget,
+    ap: Option<&AccessPoint>,
+    password: Option<&str>,
+    wep_key_type: Option<WepKeyType>,
+) -> Result<()> {
+    let credential_settings = match ap {
+        Some(ap) => security_settings_for_visible_ap(ap, target, password, wep_key_type)?,
+        None => security_settings_for_saved_profile(settings, target, password, wep_key_type)?,
+    };
+    if let Some(credential_settings) = credential_settings {
+        merge_connection_settings(settings, credential_settings);
+    }
+    apply_target_profile_settings(settings, target)
+}
+
+fn security_settings_for_saved_profile(
+    settings: &ConnectionSettings,
+    target: &WifiConnectTarget,
+    password: Option<&str>,
+    wep_key_type: Option<WepKeyType>,
+) -> Result<Option<ConnectionSettings>> {
+    if target.enterprise.is_some() || target.key_mgmt.is_some() {
+        return security_settings_for_target_hint(target, password, wep_key_type);
+    }
+    let key_mgmt: String = settings
+        .get("802-11-wireless-security")
+        .and_then(|section| section.get("key-mgmt"))
+        .and_then(|value| value.try_clone().ok())
+        .and_then(|value| value.try_into().ok())
+        .unwrap_or_default();
+    match (key_mgmt.as_str(), password) {
+        ("wpa-psk" | "sae", Some(password)) => {
+            validate_wpa_psk(password)?;
+            Ok(Some(security_connection_settings(
+                wireless_security_section(&key_mgmt, password)?,
+            )))
+        }
+        ("none" | "", Some(password)) => {
+            wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key))
+                .map(Some)
+        }
+        (_, Some(_)) => security_settings_for_target_hint(target, password, wep_key_type),
+        (_, None) => Ok(None),
+    }
+}
+
+fn merge_connection_settings(settings: &mut ConnectionSettings, updates: ConnectionSettings) {
+    for (section, values) in updates {
+        settings.entry(section).or_default().extend(values);
+    }
+}
+
 pub(super) fn cloned_wifi_connection_settings(
     mut settings: ConnectionSettings,
     target: &WifiConnectTarget,
@@ -56,10 +110,7 @@ pub(super) fn cloned_wifi_connection_settings(
 ) -> Result<ConnectionSettings> {
     sanitize_cloned_settings(&mut settings)?;
     ensure_wireless_settings(&mut settings, target, false)?;
-    if let Some(security) = security_settings_for_visible_ap(ap, target, password, wep_key_type)? {
-        settings.extend(security);
-    }
-    apply_target_profile_settings(&mut settings, target)?;
+    apply_saved_activation_settings(&mut settings, target, Some(ap), password, wep_key_type)?;
     Ok(settings)
 }
 

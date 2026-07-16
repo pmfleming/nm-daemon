@@ -1,9 +1,10 @@
 use super::{
     AccessPoint, AuthKind, Bssid, ConnectionReadiness, ConnectivityStatus, InterfaceName,
     MeteredStatus, NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_802_1X, NM_AP_SEC_KEY_MGMT_OWE,
-    NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, NetworkAuth, NetworkCapabilities, NmObjectPath,
-    ProfilePrivacy, SavedWifiConnection, Security, WifiConnectTarget, ap_is_passwordless,
-    ap_supports_enterprise, ap_supports_psk, ap_uses_wep, network_entries_with_profile_matches,
+    NM_AP_SEC_KEY_MGMT_OWE_TM, NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, NetworkAuth,
+    NetworkCapabilities, NmObjectPath, ProfilePrivacy, SavedWifiConnection, Security,
+    WifiConnectTarget, ap_is_passwordless, ap_supports_enterprise, ap_supports_psk, ap_uses_owe,
+    ap_uses_wep, frequency_band, frequency_channel, network_entries_with_profile_matches,
     security_flags_label, security_label,
 };
 
@@ -32,7 +33,41 @@ fn owe_is_passwordless_but_psk_is_not() {
         security_label(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_OWE),
         Security::Owe
     );
+    let [owe] = network_entries_with_profile_matches(
+        vec![test_ap(0, 0, NM_AP_SEC_KEY_MGMT_OWE)],
+        &std::collections::BTreeMap::new(),
+    )
+    .try_into()
+    .expect("one OWE network");
+    assert!(owe.share.shareable);
+    assert_eq!(
+        owe.share.qr_payload.as_deref(),
+        Some("WIFI:T:nopass;S:Example;;")
+    );
     assert!(!ap_is_passwordless(0, 0, NM_AP_SEC_KEY_MGMT_PSK));
+}
+
+#[test]
+fn owe_transition_bss_is_open_but_keeps_its_nmcli_security_label() {
+    assert!(ap_is_passwordless(0, 0, NM_AP_SEC_KEY_MGMT_OWE_TM));
+    assert!(!ap_uses_owe(0, NM_AP_SEC_KEY_MGMT_OWE_TM));
+    assert_eq!(
+        security_label(0, 0, NM_AP_SEC_KEY_MGMT_OWE_TM),
+        Security::OweTransition
+    );
+}
+
+#[test]
+fn wifi_band_and_channel_match_networkmanager_tables() {
+    assert_eq!(frequency_band(2412), "2.4 GHz");
+    assert_eq!(frequency_channel(2412), 1);
+    assert_eq!(frequency_band(4915), "5 GHz");
+    assert_eq!(frequency_channel(4915), 183);
+    assert_eq!(frequency_band(5955), "6 GHz");
+    assert_eq!(frequency_channel(5955), 1);
+    assert_eq!(frequency_channel(6795), 0);
+    assert_eq!(frequency_band(5900), "");
+    assert_eq!(frequency_channel(5900), 0);
 }
 
 #[test]
@@ -103,6 +138,11 @@ fn connectivity_status_maps_networkmanager_codes() {
     assert_eq!(portal.state, "portal");
     assert!(portal.captive_portal);
     assert!(!portal.full);
+
+    let limited = ConnectivityStatus::from_nm_code(3);
+    assert_eq!(limited.state, "limited");
+    assert!(!limited.captive_portal);
+    assert!(!limited.full);
 
     let full = ConnectivityStatus::from_nm_code(4);
     assert_eq!(full.state, "full");

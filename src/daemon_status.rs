@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use serde_json::{Map, Value, json};
 use zbus::object_server::SignalEmitter;
 
@@ -81,6 +83,7 @@ pub(crate) fn refresh_payloads(
     need_status: bool,
     need_connectivity: bool,
 ) -> SharedPayloads {
+    let started = Instant::now();
     let application = Application::new(nm);
     let status = need_status
         .then(|| application.status())
@@ -88,7 +91,7 @@ pub(crate) fn refresh_payloads(
     let connectivity_from_status = status
         .as_ref()
         .and_then(|status| status.connectivity.clone());
-    SharedPayloads {
+    let payloads = SharedPayloads {
         status: status.map(|status| json!(status)),
         connectivity: need_connectivity
             .then(|| match connectivity_from_status {
@@ -98,7 +101,22 @@ pub(crate) fn refresh_payloads(
                     .map(|connectivity| json!(connectivity)),
             })
             .and_then(log_refresh_error),
-    }
+    };
+    tracing::debug!(
+        need_status,
+        need_connectivity,
+        status_available = payloads.status.is_some(),
+        connectivity_available = payloads.connectivity.is_some(),
+        connectivity_state = payloads
+            .connectivity
+            .as_ref()
+            .and_then(|value| value.get("state"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("unavailable"),
+        elapsed_ms = started.elapsed().as_millis(),
+        "refreshed shared NetworkManager subscription payloads"
+    );
+    payloads
 }
 
 fn log_typed_refresh_error<T>(result: anyhow::Result<T>) -> Option<T> {
@@ -131,6 +149,33 @@ fn emit_on_change(
 ) {
     if last.as_ref() == Some(value) {
         return;
+    }
+    if stream == Stream::NetworkConnectivity {
+        tracing::info!(
+            subscription_id,
+            previous_state = last
+                .as_ref()
+                .and_then(|previous| previous.get("state"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("unavailable"),
+            connectivity_state = value
+                .get("state")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown"),
+            connectivity_code = value
+                .get("code")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            captive_portal = value
+                .get("captive_portal")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            full = value
+                .get("full")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            "emitting NetworkManager connectivity transition"
+        );
     }
     *last = Some(value.clone());
     let mut payload = Map::new();

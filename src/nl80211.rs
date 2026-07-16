@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use neli::consts::nl::{NlmF, NlmFFlags, Nlmsg};
@@ -11,8 +11,7 @@ use neli::socket::NlSocketHandle;
 use neli::types::GenlBuffer;
 use neli_wifi::{NL_80211_GENL_NAME, NL_80211_GENL_VERSION, Nl80211Attr, Nl80211Cmd, Station};
 
-const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
+use crate::generated::{NL80211_POLL_INTERVAL, NL80211_QUERY_TIMEOUT};
 
 /// Directional link rates reported by the kernel in megabits per second.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -113,13 +112,13 @@ fn send_station_query(
 }
 
 fn collect_station_info(socket: &mut NlSocketHandle) -> Result<Vec<Station>> {
-    let deadline = Instant::now() + QUERY_TIMEOUT;
+    let deadline = Instant::now() + NL80211_QUERY_TIMEOUT;
     let mut stations = Vec::new();
     loop {
         check_query_deadline(deadline)?;
         match receive_station_message(socket)? {
             StationMessage::Complete => return Ok(stations),
-            StationMessage::Pending => thread::sleep(POLL_INTERVAL),
+            StationMessage::Pending => thread::sleep(NL80211_POLL_INTERVAL),
             StationMessage::Station(station) => stations.push(station),
         }
     }
@@ -137,7 +136,7 @@ fn check_query_deadline(deadline: Instant) -> Result<()> {
     }
     bail!(
         "nl80211 station query timed out after {} ms",
-        QUERY_TIMEOUT.as_millis()
+        NL80211_QUERY_TIMEOUT.as_millis()
     )
 }
 

@@ -43,7 +43,7 @@ Failures use typed errors:
 }
 ```
 
-See [the architecture guide](./docs/architecture.md) for component ownership, state transitions, cache/command/runtime guarantees, and test boundaries.
+See [the architecture guide](./docs/architecture.md) for component ownership, state transitions, cache/command/runtime guarantees, and test boundaries. For real hotspot validation and latency attribution, use the [captive-portal field-test checklist](./docs/captive-portal-field-test.md).
 
 ## D-Bus service
 
@@ -137,6 +137,15 @@ nix run .#connectParityProbe
 nix run .#connectParityProbe -- --execute --order alternate --skip-needs-secret
 # or: just connect-parity-probe --execute --order alternate --skip-needs-secret
 ```
+
+Build-time data and policy live outside the Rust sources:
+
+- `data/wifi-channels.csv` defines NetworkManager-compatible channel/frequency mappings and derives band bounds.
+- `config/timeouts.conf` defines operational timeouts and polling intervals.
+- `config/daemon-capacity.conf` defines worker and queue capacities.
+- `config/storage-policy.conf` defines history retention limits.
+
+`build.rs` validates these files and generates typed Rust constants in Cargo's `OUT_DIR`; they are compiled into the binary and are not runtime configuration files.
 
 Development:
 
