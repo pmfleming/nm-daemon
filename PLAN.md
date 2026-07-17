@@ -94,7 +94,7 @@ Removed from the supported frontend API:
 
 These fields are considered frontend contract fields once emitted in v1 fixtures:
 
-- Network/AP identity: `ssid`, `ssid_bytes`, `ssid_hex`, `path`, `bssid`.
+- Network/AP identity: opaque network `key`, `ssid`, `ssid_bytes`, `ssid_hex`, `path`, `bssid`.
 - Device identity: `device_path`, `device_iface`.
 - Grouping: `access_points`.
 - Saved profiles: `primary_profile`, `profiles`, profile `path`, `id`, `autoconnect`, `privacy`.

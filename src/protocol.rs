@@ -87,11 +87,11 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
         method: Method::WifiConnectTarget,
         name: "wifi.connectTarget",
         parameters: ParameterKind::ConnectTarget,
-        params_example: r#"{"target":{"ssid":"Example"},"password":null,"wep_key_type":null}"#,
+        params_example: r#"{"key":"ssid-hex:4578616d706c65","password":null,"enterprise_identity":null,"wep_key_type":null}"#,
         response_key: "result",
         stream: Some(Stream::WifiConnect),
         operation: ErrorOperation::Connect,
-        description: "Starts an event-driven Wi-Fi connection and returns its request id.",
+        description: "Starts an event-driven Wi-Fi connection by opaque network key and returns its request id; legacy target requests remain accepted.",
     },
     MethodSpec {
         method: Method::WifiDisconnect,

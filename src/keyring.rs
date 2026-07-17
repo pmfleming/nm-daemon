@@ -19,7 +19,16 @@ const LOGIN_COLLECTION: &str = "login";
 const NULL_PROMPT: &str = "/";
 
 pub(crate) fn available() -> bool {
-    SecretServiceClient::new().is_ok()
+    let Ok(connection) = Connection::session() else {
+        return false;
+    };
+    let destination = SECRET_DEST.to_string();
+    let Ok(service) = service_proxy(&connection, &destination) else {
+        return false;
+    };
+    service
+        .call::<_, _, OwnedObjectPath>("ReadAlias", &(DEFAULT_COLLECTION,))
+        .is_ok()
 }
 
 pub(crate) struct KeyringSecret {
@@ -54,90 +63,102 @@ pub(crate) enum KeyringOutcome<T> {
     },
 }
 
-pub(crate) fn lookup_secret(
-    connection_path: &str,
-    settings: &ConnectionSettings,
-    setting_name: &str,
-    keys: &[String],
-) -> Result<KeyringOutcome<Option<KeyringSecret>>> {
-    let client = SecretServiceClient::new()?;
-    for key in keys {
-        match lookup_key(&client, connection_path, settings, setting_name, key)? {
-            KeyringOutcome::Completed(Some(password)) => {
-                return Ok(KeyringOutcome::Completed(Some(KeyringSecret {
-                    key: key.clone(),
-                    password,
-                })));
+pub(crate) struct Keyring {
+    client: SecretServiceClient,
+}
+
+impl Keyring {
+    pub(crate) fn new() -> Result<Self> {
+        Ok(Self {
+            client: SecretServiceClient::new()?,
+        })
+    }
+
+    pub(crate) fn lookup_secret(
+        &self,
+        connection_path: &str,
+        settings: &ConnectionSettings,
+        setting_name: &str,
+        keys: &[String],
+    ) -> Result<KeyringOutcome<Option<KeyringSecret>>> {
+        for key in keys {
+            match self.lookup_key(connection_path, settings, setting_name, key)? {
+                KeyringOutcome::Completed(Some(password)) => {
+                    return Ok(KeyringOutcome::Completed(Some(KeyringSecret {
+                        key: key.clone(),
+                        password,
+                    })));
+                }
+                KeyringOutcome::Completed(None) => {}
+                KeyringOutcome::PromptUnsupported {
+                    operation, prompt, ..
+                } => {
+                    return Ok(KeyringOutcome::PromptUnsupported {
+                        operation,
+                        prompt,
+                        completed: None,
+                    });
+                }
             }
-            KeyringOutcome::Completed(None) => {}
-            KeyringOutcome::PromptUnsupported {
-                operation, prompt, ..
-            } => {
-                return Ok(KeyringOutcome::PromptUnsupported {
+        }
+        Ok(KeyringOutcome::Completed(None))
+    }
+
+    fn lookup_key(
+        &self,
+        connection_path: &str,
+        settings: &ConnectionSettings,
+        setting_name: &str,
+        key: &str,
+    ) -> Result<KeyringOutcome<Option<String>>> {
+        for attrs in secret_attribute_sets(connection_path, settings, setting_name, key) {
+            let outcome = self.client.lookup(&attrs)?;
+            if !matches!(outcome, KeyringOutcome::Completed(None)) {
+                return Ok(outcome);
+            }
+        }
+        Ok(KeyringOutcome::Completed(None))
+    }
+
+    pub(crate) fn store_secret(
+        &self,
+        connection_path: &str,
+        settings: &ConnectionSettings,
+        setting_name: &str,
+        key: &str,
+        password: &str,
+    ) -> Result<KeyringOutcome<()>> {
+        let attrs = primary_secret_attributes(connection_path, settings, setting_name, key);
+        let label = secret_label(settings, setting_name, key);
+        self.client.store(&attrs, &label, password)
+    }
+
+    pub(crate) fn delete_secret(
+        &self,
+        connection_path: &str,
+        settings: &ConnectionSettings,
+        setting_name: &str,
+        key: &str,
+    ) -> Result<KeyringOutcome<usize>> {
+        let mut deleted = 0;
+        for attrs in secret_attribute_sets(connection_path, settings, setting_name, key) {
+            match self.client.delete(&attrs)? {
+                KeyringOutcome::Completed(count) => deleted += count,
+                KeyringOutcome::PromptUnsupported {
                     operation,
                     prompt,
-                    completed: None,
-                });
+                    completed,
+                } => {
+                    return Ok(KeyringOutcome::PromptUnsupported {
+                        operation,
+                        prompt,
+                        completed: deleted + completed,
+                    });
+                }
             }
         }
+        Ok(KeyringOutcome::Completed(deleted))
     }
-    Ok(KeyringOutcome::Completed(None))
-}
-
-fn lookup_key(
-    client: &SecretServiceClient,
-    connection_path: &str,
-    settings: &ConnectionSettings,
-    setting_name: &str,
-    key: &str,
-) -> Result<KeyringOutcome<Option<String>>> {
-    for attrs in secret_attribute_sets(connection_path, settings, setting_name, key) {
-        let outcome = client.lookup(&attrs)?;
-        if !matches!(outcome, KeyringOutcome::Completed(None)) {
-            return Ok(outcome);
-        }
-    }
-    Ok(KeyringOutcome::Completed(None))
-}
-
-pub(crate) fn store_secret(
-    connection_path: &str,
-    settings: &ConnectionSettings,
-    setting_name: &str,
-    key: &str,
-    password: &str,
-) -> Result<KeyringOutcome<()>> {
-    let client = SecretServiceClient::new()?;
-    let attrs = primary_secret_attributes(connection_path, settings, setting_name, key);
-    let label = secret_label(settings, setting_name, key);
-    client.store(&attrs, &label, password)
-}
-
-pub(crate) fn delete_secret(
-    connection_path: &str,
-    settings: &ConnectionSettings,
-    setting_name: &str,
-    key: &str,
-) -> Result<KeyringOutcome<usize>> {
-    let client = SecretServiceClient::new()?;
-    let mut deleted = 0;
-    for attrs in secret_attribute_sets(connection_path, settings, setting_name, key) {
-        match client.delete(&attrs)? {
-            KeyringOutcome::Completed(count) => deleted += count,
-            KeyringOutcome::PromptUnsupported {
-                operation,
-                prompt,
-                completed,
-            } => {
-                return Ok(KeyringOutcome::PromptUnsupported {
-                    operation,
-                    prompt,
-                    completed: deleted + completed,
-                });
-            }
-        }
-    }
-    Ok(KeyringOutcome::Completed(deleted))
 }
 
 struct SecretServiceClient {

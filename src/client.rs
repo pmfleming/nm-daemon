@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 
@@ -36,6 +36,29 @@ enum ClientRequest {
 struct ClientState {
     active_ids: HashSet<String>,
     pending_events: HashMap<String, Vec<(String, Value)>>,
+    pending_event_order: VecDeque<String>,
+}
+
+impl ClientState {
+    fn take_pending_events(&mut self, request_id: &str) -> Vec<(String, Value)> {
+        self.pending_event_order.retain(|id| id != request_id);
+        self.pending_events.remove(request_id).unwrap_or_default()
+    }
+
+    fn buffer_event(&mut self, request_id: String, stream: String, event: Value) {
+        if !self.pending_events.contains_key(&request_id) {
+            if self.pending_events.len() >= 32
+                && let Some(oldest) = self.pending_event_order.pop_front()
+            {
+                self.pending_events.remove(&oldest);
+            }
+            self.pending_event_order.push_back(request_id.clone());
+        }
+        self.pending_events
+            .entry(request_id)
+            .or_default()
+            .push((stream, event));
+    }
 }
 
 /// Run one frontend-owned D-Bus session over newline-delimited JSON.
@@ -137,7 +160,7 @@ fn emit_dbus_response(
                     let pending = {
                         let mut state = state.lock().expect("frontend client state poisoned");
                         state.active_ids.insert(active_id.clone());
-                        state.pending_events.remove(&active_id).unwrap_or_default()
+                        state.take_pending_events(&active_id)
                     };
                     for (stream, event) in pending {
                         emit(
@@ -229,16 +252,7 @@ fn forward_event(
     if correlated && let Some(request_id) = request_id {
         let mut state = state.lock().expect("frontend client state poisoned");
         if !state.active_ids.contains(request_id) {
-            if state.pending_events.len() >= 32
-                && let Some(oldest) = state.pending_events.keys().next().cloned()
-            {
-                state.pending_events.remove(&oldest);
-            }
-            state
-                .pending_events
-                .entry(request_id.to_string())
-                .or_default()
-                .push((stream, event));
+            state.buffer_event(request_id.to_string(), stream, event);
             return Ok(());
         }
     }
@@ -293,6 +307,25 @@ mod tests {
     use super::{ClientState, forget_terminal_id, response_active_id};
     use serde_json::json;
     use std::sync::Mutex;
+
+    #[test]
+    fn buffered_events_evict_the_oldest_request() {
+        let mut state = ClientState::default();
+        for index in 0..33 {
+            state.buffer_event(
+                format!("request-{index}"),
+                "wifi.scan".to_string(),
+                json!({ "index": index }),
+            );
+        }
+        assert!(!state.pending_events.contains_key("request-0"));
+        assert!(state.pending_events.contains_key("request-1"));
+        assert!(state.pending_events.contains_key("request-32"));
+        assert_eq!(
+            state.pending_event_order.front().map(String::as_str),
+            Some("request-1")
+        );
+    }
 
     #[test]
     fn tracks_async_request_and_subscription_lifetimes() {

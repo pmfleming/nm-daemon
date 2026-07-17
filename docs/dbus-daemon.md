@@ -44,7 +44,7 @@ signal Event(s stream, s event_json)
 | `network.connectivity` | `{}` (`Empty`) | `connectivity` | `network.connectivity` | NetworkManager connectivity and captive-portal state. |
 | `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `—` | Visible networks enriched with saved-profile and capability details. |
 | `wifi.scan` | `{"timeout":12,"strict":false,"cache":false,"ifname":null,"ssids":[]}` (`Scan`) | `result` | `wifi.scan` | Starts an event-driven scan and returns its request id. |
-| `wifi.connectTarget` | `{"target":{"ssid":"Example"},"password":null,"wep_key_type":null}` (`ConnectTarget`) | `result` | `wifi.connect` | Starts an event-driven Wi-Fi connection and returns its request id. |
+| `wifi.connectTarget` | `{"key":"ssid-hex:4578616d706c65","password":null,"enterprise_identity":null,"wep_key_type":null}` (`ConnectTarget`) | `result` | `wifi.connect` | Starts an event-driven Wi-Fi connection by opaque network key and returns its request id; legacy target requests remain accepted. |
 | `wifi.disconnect` | `{}` (`Empty`) | `result` | `—` | Disconnects the active Wi-Fi connection. |
 | `wifi.profile.operation` | `{"operation":"set-autoconnect","path":"/org/freedesktop/NetworkManager/Settings/1","enabled":true}` (`ProfileOperation`) | `result` | `—` | Mutates or builds a share payload for one saved Wi-Fi profile. |
 | `wifi.secret.capabilities` | `{}` (`SecretCapabilities`) | `secret_agent` | `wifi.secret` | Reports SecretAgent and keyring capabilities. |
@@ -127,7 +127,7 @@ Continuous status/connectivity subscriptions emit a `changed` event immediately,
 Connect attempts are event-driven:
 
 ```text
-start_json = Call("wifi.connectTarget", "{\"target\":{...},\"password\":\"...\"}")
+start_json = Call("wifi.connectTarget", "{\"key\":\"ssid-hex:...\",\"password\":\"...\"}")
 request_id = JSON.parse(start_json).data.result.request_id
 Cancel(request_id)
 ```

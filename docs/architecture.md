@@ -98,6 +98,8 @@ All subprocess execution goes through the injectable `CommandRunner` in `src/com
 
 The typed `Nmcli` adapter is query-only. Its shared device parser supplies both status enrichment and diagnosis, rather than each caller interpreting command text. Connections use NetworkManager D-Bus exclusively.
 
+The shared `Nm` instance also retains the fixed NetworkManager root and Settings proxies. Object-specific device, AP, active-connection, and saved-connection proxies remain short-lived because their paths change with NetworkManager state.
+
 Directional transmit and receive link rates bypass the command gateway. `src/nl80211.rs` queries the kernel's `nl80211` generic-netlink family for associated-station information and converts its typed bitrate attributes into Mbps. Failure remains best-effort and does not prevent status responses.
 
 `nmcli` remains a diagnostic and best-effort status-enrichment escape hatch, not a mutation or connection engine.
@@ -106,7 +108,8 @@ Directional transmit and receive link rates bypass the command gateway. `src/nl8
 
 The daemon creates one shared `Nm` instance and therefore one NetworkManager system-bus connection. `DaemonRuntime` owns:
 
-- a bounded work queue with a fixed worker pool;
+- a bounded long-running work queue for cancellable scan/connect jobs;
+- a separate bounded fast lane for synchronous calls, status refreshes, and activation aborts so they do not queue behind multi-second jobs;
 - cancellable scan/connect task registrations;
 - one control/event loop for all subscriptions;
 - NetworkManager change notifications;
@@ -121,7 +124,7 @@ The daemon registers one NetworkManager SecretAgent and keeps pending requests i
 
 `wifi.secret.provide` accepts requested named values or explicit cancellation and reports whether NetworkManager accepted the response. With `save:true`, its immediate `persistence_status` is `pending`; a later `wifi.secret persistence` event reports `stored`, `prompt_unsupported`, or `failed`.
 
-Secret Service create, delete, and unlock calls are transactional only when they complete without a desktop prompt. Because the daemon cannot present desktop keyring prompts, it dismisses them and reports `prompt_unsupported`; prompted work is never counted as success. `wifi.secret.capabilities` advertises this as `prompt_handling: "unsupported"` and `prompt_policy: "dismiss_and_report"`.
+Each SecretAgent lookup or multi-secret persistence batch opens one Secret Service session and reuses it for every key in that batch; capability probing checks the service without opening a secret session. Secret Service create, delete, and unlock calls are transactional only when they complete without a desktop prompt. Because the daemon cannot present desktop keyring prompts, it dismisses them and reports `prompt_unsupported`; prompted work is never counted as success. `wifi.secret.capabilities` advertises this as `prompt_handling: "unsupported"` and `prompt_policy: "dismiss_and_report"`.
 
 ## Tests and contract ownership
 

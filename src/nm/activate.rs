@@ -7,9 +7,7 @@ use super::wifi_settings::{
     hidden_wifi_connection_settings, owe_wifi_connection_settings, psk_wifi_connection_settings,
     wep_wifi_connection_settings,
 };
-use super::{
-    ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_IFACE, NM_PATH, Nm, owned_value,
-};
+use super::{ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, Nm, owned_value};
 use crate::auth::WifiAuthentication;
 use crate::error::DomainError;
 use crate::model::{WepKeyType, WifiConnectTarget};
@@ -61,7 +59,7 @@ impl Nm {
             specific_object = %specific_object,
             "activating saved Wi-Fi connection over D-Bus"
         );
-        let nm = self.proxy(NM_PATH, NM_IFACE)?;
+        let nm = self.root_proxy();
         let _active_connection: OwnedObjectPath = nm
             .call(
                 "ActivateConnection",
@@ -155,7 +153,7 @@ impl Nm {
         specific_object: OwnedObjectPath,
     ) -> Result<OwnedObjectPath> {
         tracing::info!(ssid, device = %device_path, specific_object = %specific_object, "calling NetworkManager AddAndActivateConnection");
-        let nm = self.proxy(NM_PATH, NM_IFACE)?;
+        let nm = self.root_proxy();
         let (connection_path, _active_path): (OwnedObjectPath, OwnedObjectPath) = nm
             .call(
                 "AddAndActivateConnection",

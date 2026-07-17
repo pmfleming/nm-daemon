@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
@@ -11,7 +11,7 @@ use crate::daemon::{emit_json_event, emit_json_event_nonfatal};
 use crate::daemon_event::next_request_id;
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{ErrorOperation, ErrorReport};
-use crate::model::{WepKeyType, WifiConnectTarget};
+use crate::model::{WepKeyType, WifiConnectTarget, ssid_for_network_key};
 use crate::nm::Nm;
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
@@ -21,11 +21,56 @@ const STREAM: Stream = Stream::WifiConnect;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DbusConnectTargetParams {
-    target: WifiConnectTarget,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    target: Option<WifiConnectTarget>,
     #[serde(default)]
     password: Option<String>,
     #[serde(default)]
     wep_key_type: Option<WepKeyType>,
+    #[serde(default)]
+    enterprise_identity: Option<String>,
+}
+
+impl DbusConnectTargetParams {
+    fn validate(&self) -> Result<()> {
+        match (&self.key, &self.target) {
+            (Some(key), None) => {
+                ssid_for_network_key(key)?;
+                Ok(())
+            }
+            (None, Some(target)) => target.validate(),
+            (Some(_), Some(_)) => {
+                bail!("connect request must provide either key or target, not both")
+            }
+            (None, None) => bail!("connect request must provide key or target"),
+        }
+    }
+
+    fn target_ssid(&self) -> Result<Vec<u8>> {
+        match (&self.key, &self.target) {
+            (Some(key), None) => Ok(ssid_for_network_key(key)?.as_bytes().to_vec()),
+            (None, Some(target)) => Ok(target.ssid_bytes().to_vec()),
+            _ => bail!("invalid connect target selector"),
+        }
+    }
+
+    fn into_request(self, nm: &Nm) -> Result<ConnectRequest> {
+        if let Some(target) = self.target {
+            return Ok(ConnectRequest {
+                target,
+                password: self.password,
+                wep_key_type: self.wep_key_type,
+            });
+        }
+        Application::new(nm).connect_request_for_key(
+            self.key.as_deref().unwrap_or_default(),
+            self.password,
+            self.wep_key_type,
+            self.enterprise_identity,
+        )
+    }
 }
 
 pub(crate) fn start_connect_target(
@@ -33,26 +78,23 @@ pub(crate) fn start_connect_target(
     params: DbusConnectTargetParams,
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
-    let request = ConnectRequest::from(params);
-    request.validate()?;
+    params.validate()?;
+    let target_ssid = params.target_ssid()?;
     let request_id = next_request_id("connect");
     tracing::info!(
         request_id = %request_id,
-        ssid = %request.target.ssid,
-        ap_path = ?request.target.ap_path,
-        bssid = ?request.target.bssid,
-        ifname = ?request.target.ifname,
+        network_key = ?params.key,
+        ssid = %crate::model::display_ssid(&target_ssid),
         "accepted correlated Wi-Fi connection request"
     );
     let worker_request_id = request_id.clone();
-    let target_ssid = request.target.ssid_bytes().to_vec();
     runtime.start_cancellable(
         request_id.clone(),
         TaskKind::Connect,
         Some(target_ssid),
         move |nm, cancel_flag| {
             if let Err(err) =
-                run_connect_worker(nm, &worker_request_id, request, cancel_flag, &emitter)
+                run_connect_worker(nm, &worker_request_id, params, cancel_flag, &emitter)
             {
                 let report = ErrorReport::from_error(&err, ErrorOperation::Connect);
                 emit_connect_failure(&emitter, &worker_request_id, &report);
@@ -71,23 +113,14 @@ pub(crate) fn start_connect_target(
     )
 }
 
-impl From<DbusConnectTargetParams> for ConnectRequest {
-    fn from(params: DbusConnectTargetParams) -> Self {
-        Self {
-            target: params.target,
-            password: params.password,
-            wep_key_type: params.wep_key_type,
-        }
-    }
-}
-
 fn run_connect_worker(
     nm: &Nm,
     request_id: &str,
-    request: ConnectRequest,
+    params: DbusConnectTargetParams,
     cancel_flag: &AtomicBool,
     emitter: &SignalEmitter<'static>,
 ) -> Result<()> {
+    let request = params.into_request(nm)?;
     Application::new(nm)
         .connect(&request, Some(cancel_flag), |event| {
             emit_connect_event(emitter, request_id, event)
@@ -141,6 +174,7 @@ fn emit_connect_event(
                 "failed",
                 json!({
                     "request_id": request_id,
+                    "result": result.clone(),
                     "reason": result.reason,
                     "message": result.message,
                     "code": error.code,
@@ -174,4 +208,28 @@ fn emit_connect_failure(emitter: &SignalEmitter<'static>, request_id: &str, repo
             "details": report.api_details(),
         }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DbusConnectTargetParams;
+
+    #[test]
+    fn opaque_key_and_legacy_target_requests_are_both_supported() {
+        let keyed: DbusConnectTargetParams =
+            serde_json::from_str(r#"{"key":"ssid-hex:4578616d706c65","password":"secret"}"#)
+                .unwrap();
+        keyed.validate().unwrap();
+        assert_eq!(keyed.target_ssid().unwrap(), b"Example");
+
+        let legacy: DbusConnectTargetParams =
+            serde_json::from_str(r#"{"target":{"ssid":"Example"}}"#).unwrap();
+        legacy.validate().unwrap();
+
+        let ambiguous: DbusConnectTargetParams = serde_json::from_str(
+            r#"{"key":"ssid-hex:4578616d706c65","target":{"ssid":"Example"}}"#,
+        )
+        .unwrap();
+        assert!(ambiguous.validate().is_err());
+    }
 }

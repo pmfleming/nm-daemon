@@ -4,7 +4,7 @@ use std::fs;
 use anyhow::{Context, Result};
 use zvariant::OwnedObjectPath;
 
-use super::{AP_IFACE, DEVICE_IFACE, NM_DEVICE_TYPE_WIFI, NM_IFACE, NM_PATH, Nm, WIFI_IFACE};
+use super::{AP_IFACE, DEVICE_IFACE, NM_DEVICE_TYPE_WIFI, Nm, WIFI_IFACE};
 use crate::model::{
     AccessPoint, Bssid, InterfaceName, NmObjectPath, WifiConnectTarget, WifiDevice, display_ssid,
     frequency_band, frequency_channel, security_flags_label, security_label, ssid_hex,
@@ -13,7 +13,7 @@ use crate::model::{
 
 impl Nm {
     pub(crate) fn wifi_devices(&self) -> Result<Vec<WifiDevice>> {
-        let nm = self.proxy(NM_PATH, NM_IFACE)?;
+        let nm = self.root_proxy();
         let devices: Vec<OwnedObjectPath> = nm.call("GetDevices", &()).context("GetDevices")?;
         let wifi_devices: Vec<_> = devices
             .into_iter()

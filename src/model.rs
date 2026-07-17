@@ -1065,13 +1065,103 @@ fn unsupported_auth_reason(access_point: &AccessPoint) -> String {
 }
 
 fn network_key_for(access_point: &AccessPoint) -> String {
-    if !access_point.path.is_empty() {
-        return access_point.path.clone();
+    format!("ssid-hex:{}", ssid_hex(access_point.ssid_bytes().as_ref()))
+}
+
+pub(crate) fn ssid_for_network_key(key: &str) -> Result<Ssid> {
+    let encoded = key
+        .strip_prefix("ssid-hex:")
+        .ok_or_else(|| anyhow::anyhow!("invalid Wi-Fi network key"))?;
+    if encoded.len() % 2 != 0 {
+        bail!("invalid Wi-Fi network key");
     }
-    if !access_point.ssid_hex.is_empty() {
-        return format!("ssid-hex:{}", access_point.ssid_hex);
+    let bytes = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let octet = std::str::from_utf8(pair)
+                .map_err(|_| anyhow::anyhow!("invalid Wi-Fi network key"))?;
+            u8::from_str_radix(octet, 16).map_err(|_| anyhow::anyhow!("invalid Wi-Fi network key"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ssid::from_bytes(bytes)
+}
+
+pub(crate) fn connect_target_for_network(
+    network: &NetworkEntry,
+    enterprise_identity: Option<String>,
+) -> Result<WifiConnectTarget> {
+    let access_point = &network.access_point;
+    let mut target =
+        connect_target_for_ssid(Ssid::from_bytes(access_point.ssid_bytes().into_owned())?);
+    target.ap_path = (!access_point.path.is_empty())
+        .then(|| NmObjectPath::parse(access_point.path.clone()))
+        .transpose()?;
+    target.bssid = (!access_point.bssid.is_empty())
+        .then(|| Bssid::parse(access_point.bssid.clone()))
+        .transpose()?;
+    target.ifname = (!access_point.device_iface.is_empty())
+        .then(|| InterfaceName::parse(access_point.device_iface.clone()))
+        .transpose()?;
+    target.device_path = (!access_point.device_path.is_empty())
+        .then(|| NmObjectPath::parse(access_point.device_path.clone()))
+        .transpose()?;
+    target.security = Some(access_point.security.clone());
+    target.key_mgmt = network.auth.key_management.first().cloned();
+    target.enterprise = enterprise_auth_for_network(network, enterprise_identity);
+    Ok(target)
+}
+
+pub(crate) fn connect_target_for_network_key(
+    key: &str,
+    enterprise_identity: Option<String>,
+) -> Result<WifiConnectTarget> {
+    let mut target = connect_target_for_ssid(ssid_for_network_key(key)?);
+    if let Some(identity) = enterprise_identity {
+        target.enterprise = Some(default_enterprise_auth(identity));
     }
-    format!("ssid:{}", access_point.ssid)
+    Ok(target)
+}
+
+fn connect_target_for_ssid(ssid: Ssid) -> WifiConnectTarget {
+    WifiConnectTarget {
+        ssid,
+        ap_path: None,
+        bssid: None,
+        ifname: None,
+        device_path: None,
+        connection_name: None,
+        private: false,
+        hidden: false,
+        security: None,
+        key_mgmt: None,
+        enterprise: None,
+        profile: TargetProfileSettings::default(),
+    }
+}
+
+fn enterprise_auth_for_network(
+    network: &NetworkEntry,
+    identity: Option<String>,
+) -> Option<EnterpriseAuth> {
+    identity.map(|identity| {
+        let mut enterprise = network
+            .connect_prompt
+            .enterprise_defaults
+            .clone()
+            .unwrap_or_else(|| default_enterprise_auth(identity.clone()));
+        enterprise.identity = Some(identity);
+        enterprise
+    })
+}
+
+fn default_enterprise_auth(identity: String) -> EnterpriseAuth {
+    EnterpriseAuth {
+        eap: vec!["peap".to_string()],
+        identity: Some(identity),
+        phase2_auth: Some("mschapv2".to_string()),
+        ..EnterpriseAuth::default()
+    }
 }
 
 fn auth_capability_for(access_point: &AccessPoint, has_profile: bool) -> NetworkAuth {

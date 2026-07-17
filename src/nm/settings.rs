@@ -3,10 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use zvariant::{OwnedObjectPath, OwnedValue};
 
-use super::{
-    ConnectionSettings, DEVICE_IFACE, Nm, SETTINGS_CONNECTION_IFACE, SETTINGS_IFACE, SETTINGS_PATH,
-    owned_value,
-};
+use super::{ConnectionSettings, DEVICE_IFACE, Nm, SETTINGS_CONNECTION_IFACE, owned_value};
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     AccessPoint, NetworkEntry, ProfileIpSettings, ProfilePrivacy, SavedWifiConnection,
@@ -453,7 +450,7 @@ impl Nm {
     }
 
     fn saved_connections(&self) -> Result<Vec<OwnedObjectPath>> {
-        let settings = self.proxy(SETTINGS_PATH, SETTINGS_IFACE)?;
+        let settings = self.settings_proxy();
         settings
             .call("ListConnections", &())
             .context("ListConnections")

@@ -330,12 +330,15 @@ fn lookup_stored_secret(
     request: &PendingSecretRequest,
     connection: &ConnectionSettings,
 ) -> Option<crate::keyring::KeyringSecret> {
-    match crate::keyring::lookup_secret(
-        &request.connection_path,
-        connection,
-        &request.setting_name,
-        &request.secret_keys,
-    ) {
+    let result = crate::keyring::Keyring::new().and_then(|keyring| {
+        keyring.lookup_secret(
+            &request.connection_path,
+            connection,
+            &request.setting_name,
+            &request.secret_keys,
+        )
+    });
+    match result {
         Ok(crate::keyring::KeyringOutcome::Completed(secret)) => secret,
         Ok(crate::keyring::KeyringOutcome::PromptUnsupported {
             operation, prompt, ..
@@ -406,9 +409,13 @@ fn persistence_outcome(
     connection: &ConnectionSettings,
     values: &HashMap<String, String>,
 ) -> SecretPersistenceOutcome {
+    let keyring = match crate::keyring::Keyring::new() {
+        Ok(keyring) => keyring,
+        Err(error) => return SecretPersistenceOutcome::Failed(format!("{error:#}")),
+    };
     values
         .iter()
-        .map(|(key, value)| store_secret_outcome(request, connection, key, value))
+        .map(|(key, value)| store_secret_outcome(&keyring, request, connection, key, value))
         .find(|outcome| !matches!(outcome, SecretPersistenceOutcome::Stored))
         .unwrap_or(SecretPersistenceOutcome::Stored)
 }
@@ -427,12 +434,13 @@ fn apply_password(
 }
 
 fn store_secret_outcome(
+    keyring: &crate::keyring::Keyring,
     request: &PendingSecretRequest,
     connection: &ConnectionSettings,
     key: &str,
     password: &str,
 ) -> SecretPersistenceOutcome {
-    match crate::keyring::store_secret(
+    match keyring.store_secret(
         &request.connection_path,
         connection,
         &request.setting_name,
@@ -454,6 +462,12 @@ fn store_secret_outcome(
 }
 
 fn save_connection_secrets(connection_path: &OwnedObjectPath, connection: &ConnectionSettings) {
+    let Some(keyring) = best_effort(
+        format!("failed to open keyring while saving NetworkManager secrets for {connection_path}"),
+        crate::keyring::Keyring::new,
+    ) else {
+        return;
+    };
     connection_secret_values(connection)
         .into_iter()
         .flat_map(|(setting, secrets)| {
@@ -462,11 +476,19 @@ fn save_connection_secrets(connection_path: &OwnedObjectPath, connection: &Conne
                 .map(move |(key, password)| (setting.clone(), key, password))
         })
         .for_each(|(setting, key, password)| {
-            save_connection_secret(connection_path, connection, &setting, &key, &password)
+            save_connection_secret(
+                &keyring,
+                connection_path,
+                connection,
+                &setting,
+                &key,
+                &password,
+            )
         });
 }
 
 fn save_connection_secret(
+    keyring: &crate::keyring::Keyring,
     connection_path: &OwnedObjectPath,
     connection: &ConnectionSettings,
     setting_name: &str,
@@ -476,7 +498,7 @@ fn save_connection_secret(
     let outcome = best_effort(
         format!("failed to save NetworkManager secret {setting_name}.{key} for {connection_path}"),
         || {
-            crate::keyring::store_secret(
+            keyring.store_secret(
                 connection_path.as_str(),
                 connection,
                 setting_name,
@@ -494,6 +516,14 @@ fn save_connection_secret(
 }
 
 fn delete_connection_secrets(connection_path: &OwnedObjectPath, connection: &ConnectionSettings) {
+    let Some(keyring) = best_effort(
+        format!(
+            "failed to open keyring while deleting NetworkManager secrets for {connection_path}"
+        ),
+        crate::keyring::Keyring::new,
+    ) else {
+        return;
+    };
     connection
         .keys()
         .flat_map(|setting| {
@@ -503,11 +533,12 @@ fn delete_connection_secrets(connection_path: &OwnedObjectPath, connection: &Con
                 .map(move |key| (setting.as_str(), key))
         })
         .for_each(|(setting, key)| {
-            delete_connection_secret(connection_path, connection, setting, key)
+            delete_connection_secret(&keyring, connection_path, connection, setting, key)
         });
 }
 
 fn delete_connection_secret(
+    keyring: &crate::keyring::Keyring,
     connection_path: &OwnedObjectPath,
     connection: &ConnectionSettings,
     setting_name: &str,
@@ -517,7 +548,7 @@ fn delete_connection_secret(
         format!(
             "failed to delete NetworkManager secret {setting_name}.{key} for {connection_path}"
         ),
-        || crate::keyring::delete_secret(connection_path.as_str(), connection, setting_name, key),
+        || keyring.delete_secret(connection_path.as_str(), connection, setting_name, key),
     );
     match outcome {
         Some(crate::keyring::KeyringOutcome::Completed(deleted)) => {

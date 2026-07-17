@@ -65,6 +65,8 @@ impl WifiActivationStatus {
 pub(crate) struct Nm {
     conn: Connection,
     destination: String,
+    root_proxy: Proxy<'static>,
+    settings_proxy: Proxy<'static>,
     commands: Arc<dyn CommandRunner>,
     events: Arc<events::NetworkEvents>,
     wireless_telemetry: Arc<dyn WirelessTelemetry>,
@@ -107,10 +109,27 @@ impl Nm {
         destination: impl Into<String>,
         wireless_telemetry: Arc<dyn WirelessTelemetry>,
     ) -> Self {
+        let destination = destination.into();
+        let root_proxy = Proxy::new_owned(
+            conn.clone(),
+            destination.clone(),
+            NM_PATH.to_string(),
+            NM_IFACE.to_string(),
+        )
+        .expect("NetworkManager root proxy constants must be valid");
+        let settings_proxy = Proxy::new_owned(
+            conn.clone(),
+            destination.clone(),
+            SETTINGS_PATH.to_string(),
+            SETTINGS_IFACE.to_string(),
+        )
+        .expect("NetworkManager settings proxy constants must be valid");
         Self {
             events: events::NetworkEvents::start(conn.clone()),
             conn,
-            destination: destination.into(),
+            destination,
+            root_proxy,
+            settings_proxy,
             commands,
             wireless_telemetry,
         }
@@ -142,6 +161,14 @@ impl Nm {
 
     pub(crate) fn wake_waiters(&self) {
         self.events.notify();
+    }
+
+    pub(super) fn root_proxy(&self) -> Proxy<'static> {
+        self.root_proxy.clone()
+    }
+
+    pub(super) fn settings_proxy(&self) -> Proxy<'static> {
+        self.settings_proxy.clone()
     }
 
     pub(super) fn proxy<'a>(&'a self, path: &'a str, iface: &'a str) -> Result<Proxy<'a>> {

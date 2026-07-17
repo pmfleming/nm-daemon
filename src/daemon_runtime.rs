@@ -17,6 +17,8 @@ use crate::protocol::Stream;
 
 type Job = Box<dyn FnOnce(&Nm) + Send + 'static>;
 
+const FAST_WORKER_COUNT: usize = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskKind {
     Connect,
@@ -44,6 +46,7 @@ struct TaskHandle {
 pub(crate) struct DaemonRuntime {
     nm: Arc<Nm>,
     work: SyncSender<Job>,
+    fast_work: SyncSender<Job>,
     control: SyncSender<Control>,
     tasks: Mutex<HashMap<String, TaskHandle>>,
     tasks_changed: Condvar,
@@ -54,12 +57,20 @@ impl DaemonRuntime {
     pub(crate) fn start(nm: Nm) -> Arc<Self> {
         let nm = Arc::new(nm);
         let (work_tx, work_rx) = mpsc::sync_channel(WORK_QUEUE_CAPACITY);
+        let (fast_work_tx, fast_work_rx) = mpsc::sync_channel(WORK_QUEUE_CAPACITY);
         let (control_tx, control_rx) = mpsc::sync_channel(CONTROL_QUEUE_CAPACITY);
-        start_workers(Arc::clone(&nm), work_rx);
+        start_workers(Arc::clone(&nm), work_rx, "nm-worker", WORKER_COUNT);
+        start_workers(
+            Arc::clone(&nm),
+            fast_work_rx,
+            "nm-fast-worker",
+            FAST_WORKER_COUNT,
+        );
 
         let runtime = Arc::new(Self {
             nm,
             work: work_tx,
+            fast_work: fast_work_tx,
             control: control_tx,
             tasks: Mutex::new(HashMap::new()),
             tasks_changed: Condvar::new(),
@@ -86,7 +97,7 @@ impl DaemonRuntime {
         T: Send + 'static,
     {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        self.submit(
+        self.submit_fast(
             operation,
             Box::new(move |nm| {
                 let _ = reply_tx.send(task(nm));
@@ -239,7 +250,7 @@ impl DaemonRuntime {
     }
 
     fn submit_activation_abort(&self, request_id: String) -> Result<()> {
-        self.submit(
+        self.submit_fast(
             ErrorOperation::Disconnect,
             Box::new(move |nm| {
                 log_activation_abort(&request_id, Application::new(nm).disconnect())
@@ -326,6 +337,12 @@ impl DaemonRuntime {
             .try_send(job)
             .map_err(|error| queue_error(operation, "work", error))
     }
+
+    fn submit_fast(&self, operation: ErrorOperation, job: Job) -> Result<()> {
+        self.fast_work
+            .try_send(job)
+            .map_err(|error| queue_error(operation, "fast-work", error))
+    }
 }
 
 pub(crate) struct RuntimeBackgroundScan {
@@ -367,13 +384,18 @@ pub(crate) struct SharedPayloads {
     pub(crate) connectivity: Option<Value>,
 }
 
-fn start_workers(nm: Arc<Nm>, receiver: Receiver<Job>) {
+fn start_workers(
+    nm: Arc<Nm>,
+    receiver: Receiver<Job>,
+    thread_name: &'static str,
+    worker_count: usize,
+) {
     let receiver = Arc::new(Mutex::new(receiver));
-    for index in 0..WORKER_COUNT {
+    for index in 0..worker_count {
         let nm = Arc::clone(&nm);
         let receiver = Arc::clone(&receiver);
         std::thread::Builder::new()
-            .name(format!("nm-worker-{index}"))
+            .name(format!("{thread_name}-{index}"))
             .spawn(move || {
                 loop {
                     let job = receiver
@@ -518,7 +540,7 @@ fn submit_shared_refresh(
     need_connectivity: bool,
 ) {
     let control = runtime.control.clone();
-    match runtime.submit(
+    match runtime.submit_fast(
         ErrorOperation::Status,
         Box::new(move |nm| {
             let payloads = refresh_payloads(nm, need_status, need_connectivity);

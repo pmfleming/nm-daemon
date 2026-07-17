@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{
-    ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_IFACE, NM_PATH, Nm,
-    SETTINGS_CONNECTION_IFACE, WIFI_IFACE,
+    ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, Nm, SETTINGS_CONNECTION_IFACE,
+    WIFI_IFACE,
 };
 use crate::command::nmcli::Nmcli;
 use crate::error::ErrorOperation;
@@ -109,7 +109,7 @@ impl Nm {
         };
 
         tracing::info!(connection = %active_connection_path, "deactivating active Wi-Fi connection");
-        let nm = self.proxy(NM_PATH, NM_IFACE)?;
+        let nm = self.root_proxy();
         nm.call::<_, _, ()>("DeactivateConnection", &(active_connection_path,))
             .context("DeactivateConnection for active Wi-Fi connection")?;
         Ok(DisconnectResult {

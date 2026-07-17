@@ -212,23 +212,33 @@ impl<'a> ConnectionMachine<'a> {
                     VerificationKind::CreatedProfile,
                 )))
             }
-            Ok(None) if self.should_rescan() => Ok(StateTransition::Next(ConnectionState::Rescan)),
-            Ok(None) => Err(self.unavailable_activation_error()),
+            Ok(None) => {
+                let target_visible = self.target_visibility();
+                if self.should_rescan(target_visible) {
+                    Ok(StateTransition::Next(ConnectionState::Rescan))
+                } else {
+                    Err(self.unavailable_activation_error(target_visible))
+                }
+            }
             Err(err) => self.finish_dbus_failure(attempt, err),
         }
     }
 
-    fn should_rescan(&self) -> bool {
-        if self.rescanned || self.target.hidden {
-            return false;
+    fn target_visibility(&self) -> Option<bool> {
+        if self.target.hidden {
+            return Some(false);
         }
         match self.nm.target_access_point_visible(self.target) {
-            Ok(visible) => !visible,
+            Ok(visible) => Some(visible),
             Err(err) => {
                 tracing::debug!(ssid = %self.target.ssid, error = %crate::error::err_chain(&err), "could not verify target AP visibility before rescan");
-                true
+                None
             }
         }
+    }
+
+    fn should_rescan(&self, target_visible: Option<bool>) -> bool {
+        !self.rescanned && !self.target.hidden && target_visible != Some(true)
     }
 
     fn rescan(&mut self) -> Result<StateTransition> {
@@ -266,14 +276,11 @@ impl<'a> ConnectionMachine<'a> {
         Err(error)
     }
 
-    fn unavailable_activation_error(&self) -> anyhow::Error {
-        let reason = if self.target.hidden {
-            ConnectFailureReason::NotFound
+    fn unavailable_activation_error(&self, target_visible: Option<bool>) -> anyhow::Error {
+        let reason = if !self.target.hidden && target_visible == Some(true) {
+            ConnectFailureReason::UnsupportedAuth
         } else {
-            match self.nm.target_access_point_visible(self.target) {
-                Ok(true) => ConnectFailureReason::UnsupportedAuth,
-                Ok(false) | Err(_) => ConnectFailureReason::NotFound,
-            }
+            ConnectFailureReason::NotFound
         };
         connect_failure(
             reason,

@@ -10,7 +10,7 @@ use crate::model::{
     AccessPoint, ConnectResult, ConnectivityStatus, DisconnectResult, InterfaceName, NetworkEntry,
     NmObjectPath, SavedWifiConnection, ScanRequestOptions, WepKeyType, WifiConnectTarget,
     WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload, WifiStatus,
-    validate_ssid_bytes,
+    connect_target_for_network, connect_target_for_network_key, validate_ssid_bytes,
 };
 use crate::nm::Nm;
 use anyhow::Result;
@@ -164,6 +164,36 @@ impl<'a> Application<'a> {
             networks_found,
         })?;
         Ok(access_points)
+    }
+
+    pub(crate) fn connect_request_for_key(
+        &self,
+        key: &str,
+        password: Option<String>,
+        wep_key_type: Option<WepKeyType>,
+        enterprise_identity: Option<String>,
+    ) -> Result<ConnectRequest> {
+        operation_result(
+            ErrorOperation::Connect,
+            (|| {
+                let networks = self
+                    .nm
+                    .network_entries_for_access_points(self.nm.list_all_access_points()?)?;
+                let target =
+                    if let Some(network) = networks.iter().find(|network| network.key == key) {
+                        connect_target_for_network(network, enterprise_identity)?
+                    } else {
+                        connect_target_for_network_key(key, enterprise_identity)?
+                    };
+                let request = ConnectRequest {
+                    target,
+                    password,
+                    wep_key_type,
+                };
+                request.validate()?;
+                Ok(request)
+            })(),
+        )
     }
 
     pub(crate) fn connect(

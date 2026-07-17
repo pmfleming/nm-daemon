@@ -4,8 +4,9 @@ use super::{
     NM_AP_SEC_KEY_MGMT_OWE_TM, NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, NetworkAuth,
     NetworkCapabilities, NmObjectPath, ProfilePrivacy, SavedWifiConnection, Security,
     WifiConnectTarget, ap_is_passwordless, ap_supports_enterprise, ap_supports_psk, ap_uses_owe,
-    ap_uses_wep, frequency_band, frequency_channel, network_entries_with_profile_matches,
-    security_flags_label, security_label,
+    ap_uses_wep, connect_target_for_network_key, frequency_band, frequency_channel,
+    network_entries_with_profile_matches, security_flags_label, security_label,
+    ssid_for_network_key,
 };
 
 #[test]
@@ -266,6 +267,28 @@ fn authentication_kind_derives_the_v1_supported_flag() {
     let mut contradictory = wire;
     contradictory["supported"] = serde_json::json!(true);
     assert!(serde_json::from_value::<NetworkAuth>(contradictory).is_err());
+}
+
+#[test]
+fn opaque_network_keys_are_stable_and_resolve_exact_ssid_bytes() {
+    let [entry] = network_entries_with_profile_matches(
+        vec![test_ap(0, 0, 0)],
+        &std::collections::BTreeMap::new(),
+    )
+    .try_into()
+    .expect("one entry");
+    assert_eq!(entry.key, "ssid-hex:4578616d706c65");
+    assert_eq!(
+        ssid_for_network_key(&entry.key).unwrap().as_bytes(),
+        b"Example"
+    );
+    assert_eq!(
+        connect_target_for_network_key(&entry.key, None)
+            .unwrap()
+            .ssid_bytes(),
+        b"Example"
+    );
+    assert!(ssid_for_network_key("/org/freedesktop/NetworkManager/AccessPoint/1").is_err());
 }
 
 fn capabilities_for(flags: u32, wpa_flags: u32, rsn_flags: u32) -> super::NetworkCapabilities {

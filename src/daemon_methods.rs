@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use crate::application::{Application, NetworksRequest, ProfileOperation, ProfileOperationResult};
 use crate::daemon_runtime::DaemonRuntime;
 use crate::error::ErrorOperation;
-use crate::model::{NmObjectPath, WifiConnectTarget, WifiProfileUpdate};
+use crate::model::{
+    NmObjectPath, WifiConnectTarget, WifiProfileUpdate, connect_target_for_network_key,
+};
 use crate::output::api_data_value;
 use crate::protocol::Method;
 
@@ -74,7 +76,12 @@ pub(crate) fn call_profile_operation(
         }
         ProfileOperationParams::RevealSecret { path } => ProfileOperation::RevealSecret { path },
         ProfileOperationParams::Delete { path } => ProfileOperation::Delete { path },
-        ProfileOperationParams::Forget { request_id, target } => {
+        ProfileOperationParams::Forget {
+            request_id,
+            key,
+            target,
+        } => {
+            let target = forget_target(key, target)?;
             let result = crate::forget::execute(runtime, request_id, target)?;
             return serialize_forget_result(&result);
         }
@@ -146,7 +153,10 @@ pub(crate) enum ProfileOperationParams {
     Forget {
         #[serde(default)]
         request_id: String,
-        target: Box<WifiConnectTarget>,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        target: Option<Box<WifiConnectTarget>>,
     },
     SetAutoconnect {
         path: NmObjectPath,
@@ -163,4 +173,18 @@ pub(crate) enum ProfileOperationParams {
         path: NmObjectPath,
         enabled: bool,
     },
+}
+
+fn forget_target(
+    key: Option<String>,
+    target: Option<Box<WifiConnectTarget>>,
+) -> Result<Box<WifiConnectTarget>> {
+    match (key, target) {
+        (Some(key), None) => Ok(Box::new(connect_target_for_network_key(&key, None)?)),
+        (None, Some(target)) => Ok(target),
+        (Some(_), Some(_)) => {
+            anyhow::bail!("forget request must provide either key or target, not both")
+        }
+        (None, None) => anyhow::bail!("forget request must provide key or target"),
+    }
 }
