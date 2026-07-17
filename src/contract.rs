@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 
 use crate::model::{
     AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectResult, ConnectivityStatus,
-    Ip4Status, MeteredStatus, NetworkEntry, ProfilePrivacy, SavedWifiConnection, WifiSharePayload,
-    WifiStatus, WirelessStatus, network_entries_with_profile_matches, security_flags_label,
-    security_label,
+    DhcpLeaseStatus, Ip4Status, MeteredStatus, NetworkEntry, ProfilePrivacy, SavedWifiConnection,
+    WifiSharePayload, WifiStatus, WirelessStatus, network_entries_with_profile_matches,
+    security_flags_label, security_label,
 };
 use crate::protocol::{Method, Stream};
 
@@ -96,6 +96,12 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
                 prefix: Some(24),
                 gateway: Some("192.0.2.1".to_string()),
                 dns: vec!["192.0.2.1".to_string(), "1.1.1.1".to_string()],
+                dhcp_lease: Some(DhcpLeaseStatus {
+                    server_identifier: Some("192.0.2.1".to_string()),
+                    domain_name: Some("example.test".to_string()),
+                    lease_time_seconds: Some(86_400),
+                    expires_at_ms: Some(1_762_086_400_000),
+                }),
             }),
             wireless: Some(WirelessStatus {
                 bitrate_mbps: Some(144),
@@ -286,6 +292,8 @@ mod tests {
             "/network/auth/note",
             "/network/connect_prompt/kind",
             "/status/connectivity/state",
+            "/status/ip4/dhcp_lease/server_identifier",
+            "/status/ip4/dhcp_lease/domain_name",
             "/status/metered/state",
             "/connect_success/path",
             "/connect_error/reason",
@@ -295,11 +303,16 @@ mod tests {
                 "{pointer}"
             );
         }
-        assert!(
-            value
-                .pointer("/status/wireless/tx_bitrate_mbps")
-                .is_some_and(Value::is_number)
-        );
+        for pointer in [
+            "/status/ip4/dhcp_lease/lease_time_seconds",
+            "/status/ip4/dhcp_lease/expires_at_ms",
+            "/status/wireless/tx_bitrate_mbps",
+        ] {
+            assert!(
+                value.pointer(pointer).is_some_and(Value::is_number),
+                "{pointer}"
+            );
+        }
     }
 
     #[test]

@@ -11,10 +11,11 @@ use super::{
 use crate::command::nmcli::Nmcli;
 use crate::error::ErrorOperation;
 use crate::model::{
-    DisconnectResult, Ip4Status, MeteredStatus, SavedWifiConnection, WifiDevice, WifiStatus,
-    WirelessStatus,
+    DhcpLeaseStatus, DisconnectResult, Ip4Status, MeteredStatus, SavedWifiConnection, WifiDevice,
+    WifiStatus, WirelessStatus,
 };
 
+const DHCP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.DHCP4Config";
 const IP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.IP4Config";
 
 impl Nm {
@@ -202,7 +203,24 @@ impl Nm {
             prefix,
             gateway,
             dns,
+            dhcp_lease: self.dhcp4_lease(device_path).ok().flatten(),
         }))
+    }
+
+    fn dhcp4_lease(&self, device_path: &OwnedObjectPath) -> Result<Option<DhcpLeaseStatus>> {
+        let device = self.proxy_path(device_path, DEVICE_IFACE)?;
+        let dhcp4_config_path: OwnedObjectPath = device
+            .get_property("Dhcp4Config")
+            .with_context(|| format!("read Dhcp4Config for {device_path}"))?;
+        if dhcp4_config_path.as_str() == "/" {
+            return Ok(None);
+        }
+
+        let dhcp4 = self.proxy_path(&dhcp4_config_path, DHCP4_CONFIG_IFACE)?;
+        let options: HashMap<String, OwnedValue> = dhcp4
+            .get_property("Options")
+            .with_context(|| format!("read DHCP options for {device_path}"))?;
+        Ok(dhcp_lease_from_options(&options))
     }
 
     fn wireless_status(&self, device: &crate::model::WifiDevice) -> Result<WirelessStatus> {
@@ -240,6 +258,33 @@ fn first_address_data(
         first.get("address").and_then(value_string),
         first.get("prefix").and_then(value_u32),
     ))
+}
+
+fn dhcp_lease_from_options(options: &HashMap<String, OwnedValue>) -> Option<DhcpLeaseStatus> {
+    let option_string = |key: &str| {
+        options
+            .get(key)
+            .and_then(value_string)
+            .filter(|value| !value.is_empty())
+    };
+    let option_u64 = |key: &str| {
+        options.get(key).and_then(|value| {
+            value_u64(value)
+                .or_else(|| value_u32(value).map(u64::from))
+                .or_else(|| value_string(value)?.parse().ok())
+        })
+    };
+    let lease = DhcpLeaseStatus {
+        server_identifier: option_string("dhcp_server_identifier"),
+        domain_name: option_string("domain_name"),
+        lease_time_seconds: option_u64("dhcp_lease_time"),
+        expires_at_ms: option_u64("expiry").map(|seconds| seconds.saturating_mul(1000)),
+    };
+    (lease.server_identifier.is_some()
+        || lease.domain_name.is_some()
+        || lease.lease_time_seconds.is_some()
+        || lease.expires_at_ms.is_some())
+    .then_some(lease)
 }
 
 fn nameserver_data(entries: &[HashMap<String, OwnedValue>]) -> Vec<String> {
@@ -338,12 +383,40 @@ mod tests {
 
     use zvariant::{DynamicType, OwnedValue, Value};
 
-    use super::{gateway_from_route_data, ip4_status_needs_nmcli_fill, legacy_nameservers};
+    use super::{
+        dhcp_lease_from_options, gateway_from_route_data, ip4_status_needs_nmcli_fill,
+        legacy_nameservers,
+    };
     use crate::model::Ip4Status;
 
     #[test]
     fn parses_legacy_ipv4_nameservers_from_network_byte_order() {
         assert_eq!(legacy_nameservers(vec![0xd3acb90a]), vec!["10.185.172.211"]);
+    }
+
+    #[test]
+    fn parses_networkmanager_dhcp_lease_options() {
+        let options = HashMap::from([
+            (
+                "dhcp_server_identifier".to_string(),
+                owned_value("192.0.2.1".to_string()),
+            ),
+            (
+                "domain_name".to_string(),
+                owned_value("example.test".to_string()),
+            ),
+            (
+                "dhcp_lease_time".to_string(),
+                owned_value("86400".to_string()),
+            ),
+            ("expiry".to_string(), owned_value("1762086400".to_string())),
+        ]);
+
+        let lease = dhcp_lease_from_options(&options).expect("DHCP lease");
+        assert_eq!(lease.server_identifier.as_deref(), Some("192.0.2.1"));
+        assert_eq!(lease.domain_name.as_deref(), Some("example.test"));
+        assert_eq!(lease.lease_time_seconds, Some(86_400));
+        assert_eq!(lease.expires_at_ms, Some(1_762_086_400_000));
     }
 
     #[test]
@@ -354,12 +427,14 @@ mod tests {
             prefix: Some(24),
             gateway: None,
             dns: vec!["10.0.0.1".to_string()],
+            dhcp_lease: None,
         })));
         assert!(!ip4_status_needs_nmcli_fill(&Some(Ip4Status {
             address: Some("10.0.0.2".to_string()),
             prefix: Some(24),
             gateway: Some("10.0.0.1".to_string()),
             dns: vec!["10.0.0.1".to_string()],
+            dhcp_lease: None,
         })));
     }
 

@@ -18,6 +18,7 @@ Current status: the first high-impact parity gaps are closed. `debug diagnose` i
 | IPv4 address | `nmcli -t device show <iface>` | `data.status.ip4.address` | Connection details card. |
 | Gateway | same | `data.status.ip4.gateway` | Connection details card. |
 | DNS | same | `data.status.ip4.dns` | Connection details card. |
+| DHCP lease | `nmcli -f DHCP4 device show <iface>` | `data.status.ip4.dhcp_lease` | Server, domain, duration, and expiry for the active lease. |
 | Active enriched network | n/a, derived | active grouped entry in `data.networks` | Shelllist selection/detail consistency. |
 | Remembered details | n/a, nm-daemon cache | `data.networks[].last_connection` | Details for previously connected networks. |
 

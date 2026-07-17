@@ -100,7 +100,7 @@ These fields are considered frontend contract fields once emitted in v1 fixtures
 - Saved profiles: `primary_profile`, `profiles`, profile `path`, `id`, `autoconnect`, `privacy`.
 - Capabilities: `can_connect`, `can_connect_now`, `can_connect_with_password`, `needs_password`, `can_connect_with_credentials`, `needs_credentials`, `supported_auth`, `unsupported_reason`.
 - Auth descriptors: `auth.kind`, `auth.key_management`, `auth.required_fields`, `auth.optional_fields`, `auth.note`.
-- Status: `active`, `access_point`, `network`, `profile`, `connectivity`, `ip4`, `wireless`, `metered`, `active_since_ms`.
+- Status: `active`, `access_point`, `network`, `profile`, `connectivity`, `ip4` (including active DHCP lease metadata), `wireless`, `metered`, `active_since_ms`.
 - Results: `result.status`, `result.message`, typed failure `reason`, connect engine `path`, `connectivity`, `suggest_open_portal`.
 
 ## Typed frontend error codes

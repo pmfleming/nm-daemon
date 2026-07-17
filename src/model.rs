@@ -166,6 +166,15 @@ pub(crate) struct Ip4Status {
     pub(crate) prefix: Option<u32>,
     pub(crate) gateway: Option<String>,
     pub(crate) dns: Vec<String>,
+    pub(crate) dhcp_lease: Option<DhcpLeaseStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct DhcpLeaseStatus {
+    pub(crate) server_identifier: Option<String>,
+    pub(crate) domain_name: Option<String>,
+    pub(crate) lease_time_seconds: Option<u64>,
+    pub(crate) expires_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

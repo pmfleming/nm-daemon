@@ -64,6 +64,7 @@ pub(crate) fn parse_device_ip4(output: &str) -> Option<Ip4Status> {
         prefix: None,
         gateway: None,
         dns: Vec::new(),
+        dhcp_lease: None,
     };
     output
         .lines()
