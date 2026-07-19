@@ -90,6 +90,10 @@
           LLVM_COV = "${pkgs.llvmPackages.llvm}/bin/llvm-cov";
           LLVM_PROFDATA = "${pkgs.llvmPackages.llvm}/bin/llvm-profdata";
           RUST_BACKTRACE = "1";
+
+          shellHook = ''
+            ${pkgs.bash}/bin/bash "$PWD/tools/trim-target.sh"
+          '';
         };
       });
 
