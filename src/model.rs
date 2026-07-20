@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::qr::wifi_qr_payload;
@@ -358,6 +359,14 @@ pub(crate) struct WifiProfileSecret {
     pub(crate) available: bool,
     pub(crate) kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) setting_name: Option<String>,
+    pub(crate) secret_keys: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) primary_secret_key: Option<String>,
+    /// Named secret values for multi-field WEP and 802.1X profile editors.
+    pub(crate) values: BTreeMap<String, String>,
+    /// Compatibility alias for the primary secret value.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) password: Option<String>,
 }
 
@@ -371,7 +380,10 @@ pub(crate) struct WifiProfileUpdate {
     pub(crate) send_hostname: bool,
     pub(crate) ipv4: TargetIpSettings,
     pub(crate) ipv6: TargetIpSettings,
+    /// Compatibility input for replacing the profile's primary secret.
     pub(crate) password: Option<String>,
+    /// Named replacements for supported security-setting secrets.
+    pub(crate) secrets: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

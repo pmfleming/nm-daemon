@@ -7,6 +7,81 @@
     "status": "error",
     "suggest_open_portal": false
   },
+  "connect_stream": {
+    "events": [
+      {
+        "event": "subscribed",
+        "protocol": "nm-api",
+        "request_id": "connect-contract",
+        "stream": "wifi.connect",
+        "subscription_id": "subscription-contract",
+        "version": 1
+      },
+      {
+        "event": "started",
+        "message": "starting Wi-Fi connection",
+        "protocol": "nm-api",
+        "request_id": "connect-contract",
+        "stream": "wifi.connect",
+        "version": 1
+      },
+      {
+        "event": "progress",
+        "message": "activating NetworkManager connection",
+        "protocol": "nm-api",
+        "request_id": "connect-contract",
+        "stream": "wifi.connect",
+        "version": 1
+      },
+      {
+        "event": "succeeded",
+        "protocol": "nm-api",
+        "request_id": "connect-contract",
+        "result": {
+          "connectivity": {
+            "captive_portal": false,
+            "code": 4,
+            "full": true,
+            "state": "full"
+          },
+          "message": "Connected to Example via D-Bus",
+          "path": "dbus",
+          "ssid": "Example",
+          "status": "connected",
+          "suggest_open_portal": false
+        },
+        "stream": "wifi.connect",
+        "version": 1
+      },
+      {
+        "code": "secret-required",
+        "details": {},
+        "event": "failed",
+        "message": "password required for Example",
+        "protocol": "nm-api",
+        "reason": "secret-required",
+        "request_id": "connect-contract",
+        "result": {
+          "connectivity": null,
+          "message": "password required for Example",
+          "reason": "secret-required",
+          "ssid": "Example",
+          "status": "error",
+          "suggest_open_portal": false
+        },
+        "stream": "wifi.connect",
+        "version": 1
+      },
+      {
+        "event": "cancelled",
+        "message": "connection attempt was cancelled",
+        "protocol": "nm-api",
+        "request_id": "connect-contract",
+        "stream": "wifi.connect",
+        "version": 1
+      }
+    ]
+  },
   "connect_success": {
     "connectivity": {
       "captive_portal": false,
@@ -19,6 +94,12 @@
     "ssid": "Example",
     "status": "connected",
     "suggest_open_portal": false
+  },
+  "disconnect": {
+    "result": {
+      "message": "Wi-Fi disconnected",
+      "status": "disconnected"
+    }
   },
   "enterprise_network": {
     "auth": {
@@ -142,15 +223,103 @@
       ]
     }
   },
+  "profile_details": {
+    "result": {
+      "autoconnect": true,
+      "hidden": false,
+      "id": "Example",
+      "ipv4": {
+        "addresses": [],
+        "dns": [
+          "1.1.1.1"
+        ],
+        "dns_search": [],
+        "gateway": null,
+        "ignore_auto_dns": false,
+        "method": "auto",
+        "route_metric": null,
+        "routes": []
+      },
+      "ipv6": {
+        "addresses": [],
+        "dns": [],
+        "dns_search": [],
+        "gateway": null,
+        "ignore_auto_dns": false,
+        "method": "auto",
+        "route_metric": null,
+        "routes": []
+      },
+      "mac_address_policy": "stable",
+      "metered": "auto",
+      "path": "/org/freedesktop/NetworkManager/Settings/1",
+      "security_type": "WPA Enterprise",
+      "send_hostname": false,
+      "ssid": "Example"
+    }
+  },
+  "profile_forget": {
+    "result": {
+      "cancelled_connect_requests": [
+        "connect-contract"
+      ],
+      "deleted_profiles": [
+        {
+          "id": "Example",
+          "path": "/org/freedesktop/NetworkManager/Settings/1"
+        }
+      ],
+      "disconnected": true,
+      "failed_profiles": [],
+      "message": "Disconnected and forgot 1 saved profile for Example",
+      "operation": "forget",
+      "pending_connect_requests": [],
+      "portal_note": "The hotspot may continue to recognize this device until its captive-portal session expires.",
+      "portal_session_reset": false,
+      "profiles_found": 1,
+      "request_id": "forget-contract",
+      "ssid": "Example",
+      "status": "forgotten",
+      "warnings": [],
+      "was_active": true
+    }
+  },
+  "profile_secret": {
+    "result": {
+      "available": true,
+      "kind": "enterprise",
+      "password": "enterprise-password",
+      "path": "/org/freedesktop/NetworkManager/Settings/1",
+      "primary_secret_key": "password",
+      "secret_keys": [
+        "password",
+        "private-key-password",
+        "pin"
+      ],
+      "setting_name": "802-1x",
+      "values": {
+        "password": "enterprise-password",
+        "private-key-password": "private-key-secret"
+      }
+    }
+  },
   "profile_share": {
-    "auth_type": "WPA",
-    "id": "Example",
-    "path": "/org/freedesktop/NetworkManager/Settings/1",
-    "qr_payload": "WIFI:T:WPA;S:Example;P:correct horse battery staple;;",
-    "reason": null,
-    "shareable": true,
-    "ssid": "Example",
-    "status": "ok"
+    "result": {
+      "auth_type": "WPA",
+      "id": "Example",
+      "path": "/org/freedesktop/NetworkManager/Settings/1",
+      "qr_payload": "WIFI:T:WPA;S:Example;P:correct horse battery staple;;",
+      "reason": null,
+      "shareable": true,
+      "ssid": "Example",
+      "status": "ok"
+    }
+  },
+  "profile_update": {
+    "result": {
+      "message": "Saved Wi-Fi profile settings updated",
+      "status": "ok"
+    }
   },
   "saved_network": {
     "auth": {
@@ -189,13 +358,308 @@
       "shareable": false
     }
   },
-  "scan_status_event": {
-    "event": "status",
-    "message": "Scanning Wi-Fi networks",
-    "protocol": "nm-api",
-    "request_id": "scan-contract",
-    "stream": "wifi.scan",
-    "version": 1
+  "saved_profiles": {
+    "profiles": [
+      {
+        "autoconnect": true,
+        "id": "Example",
+        "path": "/org/freedesktop/NetworkManager/Settings/1",
+        "privacy": {
+          "mac_address_policy": "stable",
+          "randomized_mac": true,
+          "send_hostname": false
+        },
+        "ssid": "Example",
+        "ssid_bytes": [
+          69,
+          120,
+          97,
+          109,
+          112,
+          108,
+          101
+        ]
+      }
+    ]
+  },
+  "scan_stream": {
+    "events": [
+      {
+        "event": "subscribed",
+        "protocol": "nm-api",
+        "request_id": "scan-contract",
+        "stream": "wifi.scan",
+        "subscription_id": "subscription-contract",
+        "version": 1
+      },
+      {
+        "event": "status",
+        "message": "Scanning Wi-Fi networks",
+        "protocol": "nm-api",
+        "request_id": "scan-contract",
+        "stream": "wifi.scan",
+        "version": 1
+      },
+      {
+        "code": "timeout",
+        "details": {},
+        "event": "warning",
+        "message": "Scan timed out",
+        "protocol": "nm-api",
+        "request_id": "scan-contract",
+        "stream": "wifi.scan",
+        "version": 1
+      },
+      {
+        "event": "snapshot",
+        "networks": [
+          {
+            "access_points": [
+              {
+                "active": false,
+                "band": "5 GHz",
+                "bandwidth_mhz": 80,
+                "bssid": "00:11:22:33:44:55",
+                "channel": 36,
+                "device_iface": "wlan0",
+                "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+                "flags": 1,
+                "frequency": 5180,
+                "last_seen": 1234,
+                "last_seen_age_ms": 2500,
+                "max_bitrate_mbps": 866,
+                "mode": "Infra",
+                "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+                "rsn_flags": 256,
+                "rsn_flags_label": "psk",
+                "security": "WPA2/3",
+                "ssid": "Example",
+                "ssid_bytes": [
+                  69,
+                  120,
+                  97,
+                  109,
+                  112,
+                  108,
+                  101
+                ],
+                "ssid_hex": "4578616d706c65",
+                "strength": 82,
+                "wpa_flags": 0,
+                "wpa_flags_label": "(none)"
+              }
+            ],
+            "active": false,
+            "auth": {
+              "key_management": [
+                "wpa-psk"
+              ],
+              "kind": "wpa-personal",
+              "note": null,
+              "optional_fields": [],
+              "required_fields": [
+                "password"
+              ],
+              "supported": true
+            },
+            "band": "5 GHz",
+            "bandwidth_mhz": 80,
+            "bssid": "00:11:22:33:44:55",
+            "capabilities": {
+              "can_connect": true,
+              "can_connect_now": false,
+              "can_connect_with_credentials": false,
+              "can_connect_with_password": true,
+              "can_forget": false,
+              "can_set_mac_randomization": false,
+              "can_set_send_hostname": false,
+              "can_share_qr": false,
+              "can_toggle_autoconnect": false,
+              "needs_credentials": false,
+              "needs_password": true,
+              "supported_auth": true,
+              "unsupported_reason": null
+            },
+            "channel": 36,
+            "connect_prompt": {
+              "kind": "password",
+              "message": "Enter the Wi-Fi password, then press Enter.",
+              "optional_fields": [],
+              "required_fields": [
+                "password"
+              ]
+            },
+            "device_iface": "wlan0",
+            "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+            "flags": 1,
+            "frequency": 5180,
+            "key": "ssid-hex:4578616d706c65",
+            "last_seen": 1234,
+            "last_seen_age_ms": 2500,
+            "max_bitrate_mbps": 866,
+            "mode": "Infra",
+            "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+            "portal_hint": {
+              "auto_open_on_connect": false,
+              "reason": null
+            },
+            "primary_profile": null,
+            "profiles": [],
+            "rsn_flags": 256,
+            "rsn_flags_label": "psk",
+            "security": "WPA2/3",
+            "share": {
+              "reason": "Wi-Fi QR sharing requires an open network or a saved profile with a readable password.",
+              "requires_profile_secret_check": false,
+              "shareable": false
+            },
+            "ssid": "Example",
+            "ssid_bytes": [
+              69,
+              120,
+              97,
+              109,
+              112,
+              108,
+              101
+            ],
+            "ssid_hex": "4578616d706c65",
+            "strength": 82,
+            "wpa_flags": 0,
+            "wpa_flags_label": "(none)"
+          }
+        ],
+        "networks_found": 1,
+        "protocol": "nm-api",
+        "request_id": "scan-contract",
+        "scanning": false,
+        "stream": "wifi.scan",
+        "version": 1
+      },
+      {
+        "event": "complete",
+        "networks_found": 1,
+        "protocol": "nm-api",
+        "request_id": "scan-contract",
+        "stream": "wifi.scan",
+        "timed_out": false,
+        "version": 1
+      },
+      {
+        "event": "cancelled",
+        "message": "Wi-Fi scan cancelled",
+        "protocol": "nm-api",
+        "request_id": "scan-contract",
+        "stream": "wifi.scan",
+        "version": 1
+      },
+      {
+        "code": "internal-error",
+        "details": {},
+        "event": "failed",
+        "message": "Scan failed",
+        "protocol": "nm-api",
+        "request_id": "scan-contract",
+        "stream": "wifi.scan",
+        "version": 1
+      }
+    ]
+  },
+  "secret_capabilities": {
+    "secret_agent": {
+      "agent_path": "/org/laufan/NmDaemon/SecretAgent",
+      "events": {
+        "implemented": true,
+        "persistence_outcomes": true,
+        "stream": "wifi.secret"
+      },
+      "keyring": {
+        "available": true,
+        "default_save": false,
+        "persistence_supported": true,
+        "prompt_handling": "unsupported",
+        "prompt_policy": "dismiss_and_report"
+      },
+      "message": "SecretAgent is registered when NetworkManager is available; save:true persists only when the user's Secret Service keyring can complete without a desktop prompt",
+      "registered": true
+    }
+  },
+  "secret_provide": {
+    "result": {
+      "accepted": true,
+      "message": "Secret provided to pending NetworkManager request; the wifi.secret stream reports the persistence outcome",
+      "persistence_status": "pending",
+      "request_id": "secret-contract",
+      "save_requested": true,
+      "status": "accepted"
+    }
+  },
+  "secret_stream": {
+    "events": [
+      {
+        "event": "subscribed",
+        "protocol": "nm-api",
+        "request_id": "secret-contract",
+        "stream": "wifi.secret",
+        "subscription_id": "subscription-contract",
+        "version": 1
+      },
+      {
+        "connection_path": "/org/freedesktop/NetworkManager/Settings/1",
+        "event": "requested",
+        "flags": 0,
+        "hints": [
+          "password",
+          "private-key-password"
+        ],
+        "primary_secret_key": "password",
+        "protocol": "nm-api",
+        "request_id": "secret-contract",
+        "save_supported": true,
+        "secret_keys": [
+          "password",
+          "private-key-password"
+        ],
+        "setting_name": "802-1x",
+        "stream": "wifi.secret",
+        "timeout_ms": 120000,
+        "version": 1
+      },
+      {
+        "event": "cancelled",
+        "protocol": "nm-api",
+        "request_id": "secret-contract",
+        "stream": "wifi.secret",
+        "version": 1
+      },
+      {
+        "event": "persistence",
+        "protocol": "nm-api",
+        "request_id": "secret-contract",
+        "status": "stored",
+        "stream": "wifi.secret",
+        "version": 1
+      },
+      {
+        "event": "persistence",
+        "operation": "create",
+        "prompt": "/org/freedesktop/secrets/prompt/1",
+        "protocol": "nm-api",
+        "request_id": "secret-contract",
+        "status": "prompt_unsupported",
+        "stream": "wifi.secret",
+        "version": 1
+      },
+      {
+        "error": "keyring unavailable",
+        "event": "persistence",
+        "protocol": "nm-api",
+        "request_id": "secret-contract",
+        "status": "failed",
+        "stream": "wifi.secret",
+        "version": 1
+      }
+    ]
   },
   "status": {
     "connectivity": {

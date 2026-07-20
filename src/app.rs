@@ -23,6 +23,9 @@ fn run_inner() -> Result<()> {
     if !direct && std::env::var_os("NM_DAEMON_DIRECT").is_none() {
         match crate::daemon::try_forward_command(&command)? {
             crate::daemon::ForwardOutcome::Handled => return Ok(()),
+            crate::daemon::ForwardOutcome::DirectConnect(request) => {
+                return with_nm(|nm| actions::print_connect_attempt(nm, *request));
+            }
             crate::daemon::ForwardOutcome::NotForwardable
             | crate::daemon::ForwardOutcome::Unavailable => {}
         }

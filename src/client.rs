@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -122,9 +122,7 @@ fn handle_request(
         ClientRequest::Cancel { id, request_id } => {
             let result = proxy.call::<_, _, ()>("Cancel", &(request_id.as_str(),));
             if result.is_ok() {
-                state
-                    .lock()
-                    .expect("frontend client state poisoned")
+                recover_lock(state, "frontend client state")
                     .active_ids
                     .remove(&request_id);
             }
@@ -158,7 +156,7 @@ fn emit_dbus_response(
                 )?;
                 if let Some(active_id) = active_id {
                     let pending = {
-                        let mut state = state.lock().expect("frontend client state poisoned");
+                        let mut state = recover_lock(state, "frontend client state");
                         state.active_ids.insert(active_id.clone());
                         state.take_pending_events(&active_id)
                     };
@@ -250,7 +248,7 @@ fn forward_event(
         "wifi.status" | "network.connectivity" | "wifi.scan" | "wifi.connect"
     ) || event.get("event").and_then(Value::as_str) == Some("subscribed");
     if correlated && let Some(request_id) = request_id {
-        let mut state = state.lock().expect("frontend client state poisoned");
+        let mut state = recover_lock(state, "frontend client state");
         if !state.active_ids.contains(request_id) {
             state.buffer_event(request_id.to_string(), stream, event);
             return Ok(());
@@ -273,18 +271,14 @@ fn forget_terminal_id(state: &Mutex<ClientState>, event: &Value) {
         return;
     }
     if let Some(request_id) = event.get("request_id").and_then(Value::as_str) {
-        state
-            .lock()
-            .expect("frontend client state poisoned")
+        recover_lock(state, "frontend client state")
             .active_ids
             .remove(request_id);
     }
 }
 
 fn cancel_all(proxy: &Proxy<'_>, state: &Mutex<ClientState>) {
-    let ids = state
-        .lock()
-        .expect("frontend client state poisoned")
+    let ids = recover_lock(state, "frontend client state")
         .active_ids
         .drain()
         .collect::<Vec<_>>();
@@ -293,8 +287,18 @@ fn cancel_all(proxy: &Proxy<'_>, state: &Mutex<ClientState>) {
     }
 }
 
+fn recover_lock<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!(resource = name, "recovering poisoned frontend client lock");
+            poisoned.into_inner()
+        }
+    }
+}
+
 fn emit(output_lock: &Mutex<()>, value: &Value) -> Result<()> {
-    let _guard = output_lock.lock().expect("frontend output lock poisoned");
+    let _guard = recover_lock(output_lock, "frontend output");
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     serde_json::to_writer(&mut stdout, value).context("serialize frontend JSON Line")?;

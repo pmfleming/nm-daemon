@@ -16,7 +16,7 @@
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
-            checkFlags = [ "--" "--test-threads=1" ];
+            checkFlags = [ "--test-threads=1" ];
             nativeBuildInputs = with pkgs; [ pkg-config ];
             postInstall = ''
               install -Dm644 ${./packaging/systemd/nm-daemon.service} $out/share/systemd/user/nm-daemon.service
@@ -30,6 +30,7 @@
             meta = {
               description = "NetworkManager JSON/JSONL adapter and user D-Bus daemon";
               mainProgram = "nm-daemon";
+              license = pkgs.lib.licenses.mit;
               platforms = pkgs.lib.platforms.linux;
             };
           };
@@ -58,6 +59,11 @@
             };
           };
         });
+
+      checks = forAllSystems (system: pkgs: {
+        package = self.packages.${system}.default;
+        connectParityProbe = self.packages.${system}.connectParityProbe;
+      });
 
       apps = forAllSystems (system: pkgs: {
         default = {

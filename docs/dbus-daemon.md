@@ -43,6 +43,7 @@ signal Event(s stream, s event_json)
 | `wifi.status` | `{}` (`Empty`) | `status` | `wifi.status` | Current active Wi-Fi status and connection details. |
 | `network.connectivity` | `{}` (`Empty`) | `connectivity` | `network.connectivity` | NetworkManager connectivity and captive-portal state. |
 | `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `—` | Visible networks enriched with saved-profile and capability details. |
+| `wifi.saved` | `{}` (`Empty`) | `profiles` | `—` | All saved Wi-Fi NetworkManager profiles. |
 | `wifi.scan` | `{"timeout":12,"strict":false,"cache":false,"ifname":null,"ssids":[]}` (`Scan`) | `result` | `wifi.scan` | Starts an event-driven scan and returns its request id. |
 | `wifi.connectTarget` | `{"key":"ssid-hex:4578616d706c65","password":null,"enterprise_identity":null,"wep_key_type":null}` (`ConnectTarget`) | `result` | `wifi.connect` | Starts an event-driven Wi-Fi connection by opaque network key and returns its request id; legacy target requests remain accepted. |
 | `wifi.disconnect` | `{}` (`Empty`) | `result` | `—` | Disconnects the active Wi-Fi connection. |
@@ -170,17 +171,21 @@ Pending SecretAgent calls live in one registry. A registration guard removes ent
 
 ## CLI forwarding status
 
-The CLI tries the daemon first for these compatible methods:
+The CLI tries the daemon first for all stable Wi-Fi/network operations:
 
 ```bash
 nm-daemon wifi status
 nm-daemon wifi networks [--cached] [--refresh-cache] [--refresh-timeout <seconds>]
+nm-daemon wifi saved
+nm-daemon wifi scan ...
+nm-daemon wifi connect ...
+nm-daemon wifi connect-target ...
 nm-daemon network connectivity
 nm-daemon wifi disconnect
 nm-daemon wifi profile delete|autoconnect|mac-randomization|share|send-hostname ...
 ```
 
-If the session bus/service is unavailable, those commands fall back to the direct in-process implementation. Use `--direct` or `NM_DAEMON_DIRECT=1` to force direct mode. One-shot CLI scans, connects, and debug fixtures still run directly; continuous scan events are provided by the daemon subscription API.
+The one-shot scan/connect adapters correlate daemon events by `request_id` and rebuild the same final CLI envelope. If the session bus/service is unavailable, commands fall back to the direct in-process implementation. Use `--direct` or `NM_DAEMON_DIRECT=1` to force direct mode. Debug fixtures and diagnosis remain direct.
 
 ## Startup/install status
 
@@ -205,7 +210,7 @@ Implemented here:
 1. `nm-daemon daemon` session-bus service.
 2. D-Bus `Call`, `Subscribe`, `Cancel`, and `Event`.
 3. Typed method/stream registry validation and generated contract documentation.
-4. Method keys for status, connectivity, networks, disconnect, and saved-profile operations.
+4. Method keys for status, connectivity, networks, saved profiles, disconnect, and saved-profile operations.
 5. Event-driven `wifi.scan` and `wifi.connectTarget`.
 6. Signal-driven `wifi.status` and `network.connectivity` subscription events.
 7. Deep best-effort connect/scan cancellation through the shared runtime and command gateway, with active-profile identity checks before a connect abort can deactivate NetworkManager state.
@@ -225,7 +230,8 @@ Implemented here:
 Still open:
 
 - Optional desktop integration for completing Secret Service prompts; the daemon currently dismisses and reports them as unsupported.
-- Rich multi-field frontend forms for requests that contain several `secret_keys`.
+
+Advanced profile `reveal-secret` responses expose the NetworkManager `setting_name`, all editable `secret_keys`, the `primary_secret_key`, and a named `values` object. Profile `update` accepts matching named values under `settings.secrets`; the legacy `settings.password` field updates the primary key. This covers WPA Personal, all WEP key slots, LEAP, and 802.1X password/private-key-password/PIN fields, allowing frontends to build multi-field forms without flattening credentials into one password.
 
 ## Shelllist integration
 

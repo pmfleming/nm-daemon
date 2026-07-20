@@ -2,8 +2,11 @@ set dotenv-load := false
 
 check:
     cargo fmt -- --check
-    cargo clippy -- -D warnings
+    cargo clippy --all-targets -- -D warnings
     cargo test
+
+coverage:
+    cargo llvm-cov --summary-only --fail-under-lines 40
 
 fmt:
     cargo fmt

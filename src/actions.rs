@@ -20,6 +20,11 @@ use crate::output::{
 use serde::Deserialize;
 
 pub(crate) fn connect_ssid(nm: &Nm, options: ConnectOptions) -> Result<()> {
+    let request = connect_ssid_request(options)?;
+    print_connect_attempt(nm, request)
+}
+
+pub(crate) fn connect_ssid_request(options: ConnectOptions) -> Result<ConnectRequest> {
     let target = WifiConnectTarget {
         ssid: Ssid::from_display(options.ssid).map_err(|error| {
             DomainError::validation(ErrorOperation::Connect, &error)
@@ -38,12 +43,11 @@ pub(crate) fn connect_ssid(nm: &Nm, options: ConnectOptions) -> Result<()> {
         enterprise: None,
         profile: Default::default(),
     };
-    let request = ConnectRequest {
+    Ok(ConnectRequest {
         target,
         password: resolve_password(options.password_stdin)?,
         wep_key_type: options.wep_key_type,
-    };
-    print_connect_attempt(nm, request)
+    })
 }
 
 pub(crate) fn connect_target(nm: &Nm, options: ConnectTargetOptions) -> Result<()> {
@@ -51,7 +55,7 @@ pub(crate) fn connect_target(nm: &Nm, options: ConnectTargetOptions) -> Result<(
     print_connect_attempt(nm, request)
 }
 
-fn print_connect_attempt(nm: &Nm, request: ConnectRequest) -> Result<()> {
+pub(crate) fn print_connect_attempt(nm: &Nm, request: ConnectRequest) -> Result<()> {
     match Application::new(nm).connect(&request, None, |_| Ok(()))? {
         ConnectOutcome::Succeeded(result) => print_connect_result(&result),
         ConnectOutcome::Failed { result, error } => {
@@ -222,7 +226,7 @@ struct ConnectTargetStdinRequest {
     wep_key_type: Option<WepKeyType>,
 }
 
-fn connect_target_request(options: ConnectTargetOptions) -> Result<ConnectRequest> {
+pub(crate) fn connect_target_request(options: ConnectTargetOptions) -> Result<ConnectRequest> {
     let request_json = read_connect_target_json()?;
     parse_connect_target_request(&request_json, options.wep_key_type)
 }

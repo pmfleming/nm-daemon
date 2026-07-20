@@ -55,6 +55,16 @@ pub(crate) fn call_networks(runtime: &Arc<DaemonRuntime>, params: NetworksParams
     })
 }
 
+pub(crate) fn call_saved(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
+    runtime.call(ErrorOperation::ProfileOperation, |nm| {
+        api_data_value(
+            Method::WifiSaved.spec().response_key,
+            &Application::new(nm).saved_profiles()?,
+            "serialize saved Wi-Fi profile response JSON",
+        )
+    })
+}
+
 pub(crate) fn call_disconnect(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
     runtime.call(ErrorOperation::Disconnect, |nm| {
         api_data_value(

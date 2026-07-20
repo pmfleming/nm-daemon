@@ -8,7 +8,7 @@ Local NetworkManager JSON/JSONL adapter and user D-Bus service for Shelllist and
 
 - Long-lived user D-Bus service is implemented at `org.laufan.NmDaemon` and packaged as `nm-daemon.service`.
 - The package includes both a systemd user unit and session D-Bus activation, so Hyprland/Quickshell clients can start the daemon on their first call without login-service ordering.
-- Read-only, disconnect, and saved-profile CLI calls forward through the daemon; scan/connect/debug commands retain direct implementations.
+- Stable Wi-Fi CLI calls—including saved profiles and event-driven scan/connect—forward through the daemon while preserving their one-shot CLI envelopes; they fall back to the shared direct implementation when the session service is unavailable. Debug commands remain direct.
 - CLI and D-Bus adapters share one typed application layer for status, network listing, scan, connect, disconnect, and saved-profile operations. The frontend `forget` profile operation is a daemon-owned disconnect-and-forget workflow rather than a sequence of UI calls.
 - Connection orchestration is an explicit NetworkManager D-Bus state machine with SSID-based activation verification, target-guarded cancellation, and failed-profile cleanup; BSSID and AP paths are selection hints rather than post-activation invariants. Cancellation deactivates only the captured active-connection object whose profile still has the requested SSID, so a previously healthy profile reactivated after a failed attempt is not torn down.
 - The daemon owns one NetworkManager connection, bounded background work, and signal-driven shared subscriptions; it does not create a polling thread per subscriber.
@@ -68,7 +68,7 @@ The canonical method/stream registry—including parameter shapes, response keys
 
 Frontends that cannot conveniently maintain an arbitrary D-Bus client can run `nm-daemon client`. It accepts JSONL `call`, `subscribe`, `cancel`, and `shutdown` messages on stdin and emits correlated `response` and `event` messages on stdout. It filters operation events to IDs started by that session, preserves response-before-event ordering, and cancels owned requests/subscriptions when stdin closes. Frontend process restart policy remains client-owned; Shelllist currently applies bounded exponential backoff.
 
-`wifi.profile.operation` accepts `details`, `update`, and `reveal-secret` operations for Shelllist's advanced saved-profile editor. Advanced updates atomically replace the editable NetworkManager profile fields for metered/hidden state, MAC policy, hostname privacy, IPv4/IPv6 assignment and DNS, with optional WPA Personal password replacement. Secret reveal and replacement remain stdin/JSONL transported and are never logged. The same method accepts `{"operation":"forget","request_id":"forget-…","key":"…"}` for frontend network removal; explicit legacy targets remain available for compatibility. The daemon cancels matching in-flight connects, waits for cancellation, resolves every saved profile with the target's exact SSID bytes, disables autoconnect, disconnects an active target, waits for confirmed deactivation, then deletes the profiles. Its structured result reports cancelled requests, active/disconnected state, deleted and failed profile paths, warnings, and `portal_session_reset:false`. Logs carry the supplied request ID through acceptance, cancellation, profile resolution, deactivation, each mutation, cache refresh, and the final summary. Forget does not revoke a hotspot's network-side captive-portal authorization.
+`wifi.profile.operation` accepts `details`, `update`, and `reveal-secret` operations for Shelllist's advanced saved-profile editor. Advanced updates atomically replace the editable NetworkManager profile fields for metered/hidden state, MAC policy, hostname privacy, IPv4/IPv6 assignment and DNS. Secret updates accept the compatibility `password` field for the profile's primary secret and a named `secrets` object for WPA Personal, active/all WEP keys, LEAP, and 802.1X `password`, `private-key-password`, and `pin` values. Secret reveal returns `setting_name`, `secret_keys`, `primary_secret_key`, and all readable named `values`, while preserving `password` as the primary-value compatibility alias. Secret reveal and replacement remain JSON/JSONL transported and are never logged. The same method accepts `{"operation":"forget","request_id":"forget-…","key":"…"}` for frontend network removal; explicit legacy targets remain available for compatibility. The daemon cancels matching in-flight connects, waits for cancellation, resolves every saved profile with the target's exact SSID bytes, disables autoconnect, disconnects an active target, waits for confirmed deactivation, then deletes the profiles. Its structured result reports cancelled requests, active/disconnected state, deleted and failed profile paths, warnings, and `portal_session_reset:false`. Logs carry the supplied request ID through acceptance, cancellation, profile resolution, deactivation, each mutation, cache refresh, and the final summary. Forget does not revoke a hotspot's network-side captive-portal authorization.
 
 Contract fixtures derive network/authentication readiness through the production model constructors. Tests lock their serialized v1 boundary in [`test_support/contract-v1.json`](./test_support/contract-v1.json) and exercise the real daemon D-Bus lifecycle against in-process fake NetworkManager and Secret Service peers, alongside command-gateway and concurrent cache I/O coverage.
 
@@ -92,6 +92,10 @@ Forwarded today:
 
 - `nm-daemon wifi status`
 - `nm-daemon wifi networks ...`
+- `nm-daemon wifi saved`
+- `nm-daemon wifi scan ...`
+- `nm-daemon wifi connect ...`
+- `nm-daemon wifi connect-target ...`
 - `nm-daemon network connectivity`
 - `nm-daemon wifi disconnect`
 - `nm-daemon wifi profile delete|autoconnect|mac-randomization|share|send-hostname ...`
@@ -157,6 +161,6 @@ nix build .#default
 
 `nix build .#default` refreshes the ignored `result` symlink to the current `nm-daemon` package. Scripts and contract checks should prefer `nix build .#default --no-link --print-out-paths` and use the printed store path rather than assuming an old `result` link is valid.
 
-`just check` runs formatting verification, Clippy with warnings denied, and the complete test suite. Use `cargo test serialized_v1_boundary_matches_checked_in_snapshot` when intentionally reviewing the checked-in protocol snapshot, and update the production constructors before changing the snapshot.
+`just check` runs formatting verification, Clippy with warnings denied, and the complete test suite. CI also runs the Nix flake checks and enforces a minimum 40% Rust line-coverage floor. Use `cargo test serialized_v1_boundary_matches_checked_in_snapshot` when intentionally reviewing the checked-in protocol snapshot, and update the production constructors before changing the snapshot.
 
 See [PLAN.md](./PLAN.md) for current status and the remaining Shelllist migration plan, [the architecture guide](./docs/architecture.md) for implementation boundaries, and [the D-Bus guide](./docs/dbus-daemon.md) for frontend integration.

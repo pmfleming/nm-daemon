@@ -4,6 +4,9 @@ use anyhow::{Context, Result};
 use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{ConnectionSettings, DEVICE_IFACE, Nm, SETTINGS_CONNECTION_IFACE, owned_value};
+
+mod profile_secrets;
+
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     AccessPoint, NetworkEntry, ProfileIpSettings, ProfilePrivacy, SavedWifiConnection,
@@ -11,6 +14,10 @@ use crate::model::{
     WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload,
     ap_supports_enterprise, ap_supports_psk, ap_uses_wep, display_ssid,
     network_entries_with_profile_matches,
+};
+use profile_secrets::{
+    enterprise_secret_needs_agent, profile_secret_spec, profile_secret_values,
+    required_secret_needs_agent, setting_secret_string, update_profile_secrets,
 };
 
 const NM_SECRET_FLAG_AGENT_OWNED: u32 = 0x1;
@@ -158,34 +165,24 @@ impl Nm {
             )
             .into());
         }
-        let secrets = self
-            .connection_secrets(&path, "802-11-wireless-security")
-            .ok();
-        let key_mgmt = settings
-            .get("802-11-wireless-security")
-            .and_then(|section| setting_string(section, "key-mgmt"))
-            .unwrap_or_default();
-        let (kind, key) = match key_mgmt.as_str() {
-            "wpa-psk" | "sae" => ("password", "psk".to_string()),
-            "none" | "" if has_wep_settings(&settings, secrets.as_ref()) => {
-                let index = settings
-                    .get("802-11-wireless-security")
-                    .and_then(|section| section.get("wep-tx-keyidx"))
-                    .and_then(setting_u32)
-                    .unwrap_or(0)
-                    .min(3);
-                ("wep-key", format!("wep-key{index}"))
-            }
-            value if value.contains("eap") => ("enterprise", "password".to_string()),
-            _ => ("none", String::new()),
-        };
-        let password = (!key.is_empty())
-            .then(|| secret_string(&settings, secrets.as_ref(), &key))
-            .flatten();
+        let spec = profile_secret_spec(&settings);
+        let secrets = spec
+            .setting_name
+            .and_then(|setting_name| self.connection_secrets(&path, setting_name).ok());
+        let values = profile_secret_values(&settings, secrets.as_ref(), &spec);
+        let password = spec
+            .primary_secret_key
+            .as_ref()
+            .and_then(|key| values.get(key))
+            .cloned();
         Ok(WifiProfileSecret {
             path: path.to_string(),
-            available: password.is_some(),
-            kind: kind.to_string(),
+            available: !values.is_empty(),
+            kind: spec.kind.to_string(),
+            setting_name: spec.setting_name.map(str::to_string),
+            secret_keys: spec.secret_keys.clone(),
+            primary_secret_key: spec.primary_secret_key,
+            values,
             password,
         })
     }
@@ -212,10 +209,7 @@ impl Nm {
             super::ip_settings::set_send_hostname(settings, "ipv6", update.send_hostname)?;
             super::ip_settings::replace(settings, "ipv4", &update.ipv4)?;
             super::ip_settings::replace(settings, "ipv6", &update.ipv6)?;
-            if let Some(password) = update.password.as_deref().filter(|value| !value.is_empty()) {
-                update_personal_password(settings, password)?;
-            }
-            Ok(())
+            update_profile_secrets(settings, update)
         })
     }
 
@@ -276,9 +270,9 @@ impl Nm {
         ap: Option<&AccessPoint>,
     ) -> Result<bool> {
         let settings = self.connection_settings(path)?;
-        let secrets = self
-            .connection_secrets(path, "802-11-wireless-security")
-            .ok();
+        let secret_setting = profile_secret_spec(&settings).setting_name;
+        let secrets =
+            secret_setting.and_then(|setting| self.connection_secrets(path, setting).ok());
         Ok(wifi_settings_need_secret_agent(
             &settings,
             secrets.as_ref(),
@@ -654,15 +648,7 @@ fn secret_string(
     secrets: Option<&ConnectionSettings>,
     key: &str,
 ) -> Option<String> {
-    secrets
-        .and_then(|secrets| secrets.get("802-11-wireless-security"))
-        .and_then(|section| setting_string(section, key))
-        .or_else(|| {
-            settings
-                .get("802-11-wireless-security")
-                .and_then(|section| setting_string(section, key))
-        })
-        .filter(|value| !value.is_empty())
+    setting_secret_string(settings, secrets, "802-11-wireless-security", key)
 }
 
 fn wifi_settings_need_secret_agent(
@@ -677,9 +663,29 @@ fn wifi_settings_need_secret_agent(
     if key_mgmt == "owe" {
         return false;
     }
+    if key_mgmt == "ieee8021x"
+        && setting_string(security, "auth-alg").is_some_and(|auth| auth == "leap")
+    {
+        return required_secret_needs_agent(
+            settings,
+            secrets,
+            "802-11-wireless-security",
+            "leap-password",
+            "leap-password-flags",
+        );
+    }
 
+    if key_mgmt.contains("eap") {
+        return enterprise_secret_needs_agent(settings, secrets);
+    }
     if personal_security(&key_mgmt, ap) {
-        return required_secret_needs_agent(settings, secrets, "psk", "psk-flags");
+        return required_secret_needs_agent(
+            settings,
+            secrets,
+            "802-11-wireless-security",
+            "psk",
+            "psk-flags",
+        );
     }
     if wep_security(&key_mgmt, ap) {
         return wep_secret_needs_agent(settings, secrets, security);
@@ -716,22 +722,13 @@ fn wep_secret_needs_agent(
         .unwrap_or(0)
         .min(3);
     let key = format!("wep-key{key_index}");
-    required_secret_needs_agent(settings, secrets, &key, &format!("{key}-flags"))
-}
-
-fn enterprise_secret_needs_agent(
-    settings: &ConnectionSettings,
-    secrets: Option<&ConnectionSettings>,
-) -> bool {
-    [
-        ("password", "password-flags"),
-        ("private-key-password", "private-key-password-flags"),
-        ("pin", "pin-flags"),
-    ]
-    .into_iter()
-    .any(|(secret_key, flags_key)| {
-        required_secret_needs_agent(settings, secrets, secret_key, flags_key)
-    })
+    required_secret_needs_agent(
+        settings,
+        secrets,
+        "802-11-wireless-security",
+        &key,
+        &format!("{key}-flags"),
+    )
 }
 
 fn wifi_device_for_access_point(access_point: &AccessPoint) -> Option<WifiDevice> {
@@ -742,30 +739,6 @@ fn wifi_device_for_access_point(access_point: &AccessPoint) -> Option<WifiDevice
         path: device_path,
         iface: access_point.device_iface.clone(),
     })
-}
-
-fn required_secret_needs_agent(
-    settings: &ConnectionSettings,
-    secrets: Option<&ConnectionSettings>,
-    secret_key: &str,
-    flags_key: &str,
-) -> bool {
-    let flags = secret_flags(settings, flags_key);
-    if flags & NM_SECRET_FLAG_NOT_REQUIRED != 0 {
-        return false;
-    }
-    if flags & (NM_SECRET_FLAG_AGENT_OWNED | NM_SECRET_FLAG_NOT_SAVED) != 0 {
-        return true;
-    }
-    secrets.is_some() && secret_string(settings, secrets, secret_key).is_none()
-}
-
-fn secret_flags(settings: &ConnectionSettings, flags_key: &str) -> u32 {
-    settings
-        .get("802-11-wireless-security")
-        .and_then(|section| section.get(flags_key))
-        .and_then(setting_u32)
-        .unwrap_or(0)
 }
 
 fn section_has_key(settings: &ConnectionSettings, section: &str, key: &str) -> bool {
@@ -984,30 +957,6 @@ fn validate_ip_value(section: &str, field: &str, value: &str, ipv6: bool) -> Res
         .with_detail("field", format!("{section}.{field}"))
         .into());
     }
-    Ok(())
-}
-
-fn update_personal_password(settings: &mut ConnectionSettings, password: &str) -> Result<()> {
-    let security = settings
-        .get("802-11-wireless-security")
-        .and_then(|section| setting_string(section, "key-mgmt"))
-        .unwrap_or_default();
-    match security.as_str() {
-        "wpa-psk" | "sae" => crate::nm::wifi_settings::validate_wpa_psk(password)?,
-        _ => {
-            return Err(DomainError::validation(
-                ErrorOperation::ProfileOperation,
-                "password updates are currently supported only for WPA personal profiles",
-            )
-            .with_detail("field", "password")
-            .into());
-        }
-    }
-    let section = settings
-        .entry("802-11-wireless-security".to_string())
-        .or_default();
-    section.insert("psk".to_string(), owned_value(password.to_string())?);
-    section.insert("psk-flags".to_string(), owned_value(0_u32)?);
     Ok(())
 }
 

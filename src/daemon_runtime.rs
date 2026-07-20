@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -119,7 +119,7 @@ impl DaemonRuntime {
         task: impl FnOnce(&Nm, &AtomicBool) + Send + 'static,
     ) -> Result<()> {
         let cancellation = Arc::new(AtomicBool::new(false));
-        self.tasks.lock().expect("daemon task map poisoned").insert(
+        recover_lock(&self.tasks, "daemon task map").insert(
             request_id.clone(),
             TaskHandle {
                 kind,
@@ -135,19 +135,13 @@ impl DaemonRuntime {
             Box::new(move |nm| {
                 task(nm, &task_cancellation);
                 if let Some(runtime) = runtime.upgrade() {
-                    runtime
-                        .tasks
-                        .lock()
-                        .expect("daemon task map poisoned")
-                        .remove(&request_id);
+                    recover_lock(&runtime.tasks, "daemon task map").remove(&request_id);
                     runtime.tasks_changed.notify_all();
                 }
             }),
         );
         if submit.is_err() {
-            self.tasks
-                .lock()
-                .expect("daemon task map poisoned")
+            recover_lock(&self.tasks, "daemon task map")
                 .retain(|_, handle| !Arc::ptr_eq(&handle.cancellation, &cancellation));
             self.tasks_changed.notify_all();
         }
@@ -159,7 +153,7 @@ impl DaemonRuntime {
         forget_request_id: &str,
         ssid: &[u8],
     ) -> Vec<String> {
-        let mut tasks = self.tasks.lock().expect("daemon task map poisoned");
+        let mut tasks = recover_lock(&self.tasks, "daemon task map");
         let mut request_ids = tasks
             .iter_mut()
             .filter_map(|(request_id, handle)| {
@@ -189,7 +183,7 @@ impl DaemonRuntime {
             return Vec::new();
         }
         let deadline = Instant::now() + timeout;
-        let mut tasks = self.tasks.lock().expect("daemon task map poisoned");
+        let mut tasks = recover_lock(&self.tasks, "daemon task map");
         loop {
             let mut pending = request_ids
                 .iter()
@@ -201,10 +195,16 @@ impl DaemonRuntime {
                 return pending;
             }
             let wait = deadline.saturating_duration_since(Instant::now());
-            let (next_tasks, _) = self
-                .tasks_changed
-                .wait_timeout(tasks, wait)
-                .expect("daemon task map poisoned while waiting for cancellation");
+            let waited = self.tasks_changed.wait_timeout(tasks, wait);
+            let (next_tasks, _) = match waited {
+                Ok(waited) => waited,
+                Err(poisoned) => {
+                    tracing::error!(
+                        "recovering poisoned daemon task map while waiting for cancellation"
+                    );
+                    poisoned.into_inner()
+                }
+            };
             tasks = next_tasks;
         }
     }
@@ -236,9 +236,7 @@ impl DaemonRuntime {
     }
 
     fn cancel_task(&self, request_id: &str) -> Option<CancelledTask> {
-        self.tasks
-            .lock()
-            .expect("daemon task map poisoned")
+        recover_lock(&self.tasks, "daemon task map")
             .get(request_id)
             .map(|task| {
                 task.cancellation.store(true, Ordering::Relaxed);
@@ -399,6 +397,16 @@ pub(crate) struct SharedPayloads {
     pub(crate) connectivity: Option<Value>,
 }
 
+fn recover_lock<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!(resource = name, "recovering poisoned daemon runtime lock");
+            poisoned.into_inner()
+        }
+    }
+}
+
 fn start_workers(
     nm: Arc<Nm>,
     receiver: Receiver<Job>,
@@ -413,10 +421,7 @@ fn start_workers(
             .name(format!("{thread_name}-{index}"))
             .spawn(move || {
                 loop {
-                    let job = receiver
-                        .lock()
-                        .expect("daemon work receiver poisoned")
-                        .recv();
+                    let job = recover_lock(&receiver, "daemon work receiver").recv();
                     let Ok(job) = job else {
                         break;
                     };
@@ -640,7 +645,9 @@ fn runtime_stopped(operation: ErrorOperation) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::RefreshGate;
+    use std::sync::{Arc, Mutex};
+
+    use super::{RefreshGate, recover_lock};
 
     #[test]
     fn refresh_gate_coalesces_invalidations_without_losing_a_change() {
@@ -655,5 +662,20 @@ mod tests {
         assert!(refresh.invalidate());
         refresh.started();
         assert!(!refresh.complete());
+    }
+
+    #[test]
+    fn poisoned_runtime_locks_recover_the_last_consistent_value() {
+        let value = Arc::new(Mutex::new(7_u32));
+        let poisoned = Arc::clone(&value);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("initial lock");
+            panic!("poison test lock");
+        })
+        .join();
+
+        assert_eq!(*recover_lock(&value, "test lock"), 7);
+        *recover_lock(&value, "test lock") = 8;
+        assert_eq!(*recover_lock(&value, "test lock"), 8);
     }
 }

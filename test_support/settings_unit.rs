@@ -1,12 +1,12 @@
 use super::{
     ConnectionSettings, apply_mac_address_policy, privacy_from_settings, profile_ip_settings,
-    saved_wifi_profile_candidate_from_settings, settings_match_access_point,
-    settings_match_wifi_ssid, ssid_bytes_match, validate_profile_update,
-    wifi_settings_need_secret_agent,
+    profile_secret_spec, profile_secret_values, saved_wifi_profile_candidate_from_settings,
+    setting_string, settings_match_access_point, settings_match_wifi_ssid, ssid_bytes_match,
+    update_profile_secrets, validate_profile_update, wifi_settings_need_secret_agent,
 };
 use crate::model::{AccessPoint, TargetIpAddress, TargetIpSettings, WifiProfileUpdate};
 use crate::nm::ip_settings::replace as replace_ip_settings;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 #[test]
@@ -102,6 +102,7 @@ fn advanced_profile_ip_settings_round_trip_and_validate_address_families() {
             ..Default::default()
         },
         password: None,
+        secrets: BTreeMap::new(),
     };
     validate_profile_update(&update).expect("valid advanced profile");
 
@@ -123,6 +124,131 @@ fn advanced_profile_ip_settings_round_trip_and_validate_address_families() {
         ..update
     };
     assert!(validate_profile_update(&invalid).is_err());
+}
+
+#[test]
+fn enterprise_profile_secrets_use_the_8021x_section_and_support_named_updates() {
+    let mut settings = wifi_settings("Example", "802-11-wireless");
+    settings.insert(
+        "802-11-wireless-security".to_string(),
+        HashMap::from([(
+            "key-mgmt".to_string(),
+            owned_value(Value::new("wpa-eap".to_string())),
+        )]),
+    );
+    settings.insert(
+        "802-1x".to_string(),
+        HashMap::from([("password-flags".to_string(), owned_value(Value::new(1_u32)))]),
+    );
+    let mut readable = ConnectionSettings::new();
+    readable.insert(
+        "802-1x".to_string(),
+        HashMap::from([
+            (
+                "password".to_string(),
+                owned_value(Value::new("old-password".to_string())),
+            ),
+            (
+                "pin".to_string(),
+                owned_value(Value::new("1234".to_string())),
+            ),
+        ]),
+    );
+
+    let spec = profile_secret_spec(&settings);
+    assert_eq!(spec.setting_name, Some("802-1x"));
+    assert_eq!(spec.primary_secret_key.as_deref(), Some("password"));
+    let values = profile_secret_values(&settings, Some(&readable), &spec);
+    assert_eq!(
+        values.get("password").map(String::as_str),
+        Some("old-password")
+    );
+    assert_eq!(values.get("pin").map(String::as_str), Some("1234"));
+    assert!(wifi_settings_need_secret_agent(
+        &settings,
+        Some(&readable),
+        None
+    ));
+
+    let update = WifiProfileUpdate {
+        password: Some("new-password".to_string()),
+        secrets: BTreeMap::from([(
+            "private-key-password".to_string(),
+            "private-secret".to_string(),
+        )]),
+        ..Default::default()
+    };
+    update_profile_secrets(&mut settings, &update).expect("update enterprise secrets");
+    let enterprise = settings.get("802-1x").expect("802.1X section");
+    assert_eq!(
+        setting_string(enterprise, "password").as_deref(),
+        Some("new-password")
+    );
+    assert_eq!(
+        setting_string(enterprise, "private-key-password").as_deref(),
+        Some("private-secret")
+    );
+    assert_eq!(
+        enterprise
+            .get("private-key-password-flags")
+            .and_then(|value| value.try_clone().ok())
+            .and_then(|value| u32::try_from(value).ok()),
+        Some(0)
+    );
+}
+
+#[test]
+fn wep_profile_updates_validate_and_replace_the_active_named_key() {
+    let mut settings = wifi_settings("Example", "802-11-wireless");
+    settings.insert(
+        "802-11-wireless-security".to_string(),
+        HashMap::from([
+            (
+                "key-mgmt".to_string(),
+                owned_value(Value::new("none".to_string())),
+            ),
+            ("wep-tx-keyidx".to_string(), owned_value(Value::new(2_u32))),
+            ("wep-key-type".to_string(), owned_value(Value::new(1_u32))),
+        ]),
+    );
+    let spec = profile_secret_spec(&settings);
+    assert_eq!(spec.primary_secret_key.as_deref(), Some("wep-key2"));
+
+    let update = WifiProfileUpdate {
+        password: Some("abcde".to_string()),
+        ..Default::default()
+    };
+    update_profile_secrets(&mut settings, &update).expect("update active WEP key");
+    assert_eq!(
+        settings
+            .get("802-11-wireless-security")
+            .and_then(|section| setting_string(section, "wep-key2"))
+            .as_deref(),
+        Some("abcde")
+    );
+
+    let invalid = WifiProfileUpdate {
+        secrets: BTreeMap::from([("wep-key0".to_string(), "bad".to_string())]),
+        ..Default::default()
+    };
+    assert!(update_profile_secrets(&mut settings, &invalid).is_err());
+}
+
+#[test]
+fn profile_secret_updates_reject_keys_for_another_security_type() {
+    let mut settings = wifi_settings("Example", "802-11-wireless");
+    settings.insert(
+        "802-11-wireless-security".to_string(),
+        HashMap::from([(
+            "key-mgmt".to_string(),
+            owned_value(Value::new("wpa-psk".to_string())),
+        )]),
+    );
+    let update = WifiProfileUpdate {
+        secrets: BTreeMap::from([("pin".to_string(), "1234".to_string())]),
+        ..Default::default()
+    };
+    assert!(update_profile_secrets(&mut settings, &update).is_err());
 }
 
 #[test]

@@ -139,17 +139,15 @@ Per-method fixture payloads are emitted as `data.fixtures` from:
 nm-daemon debug contract-fixtures
 ```
 
-The fixture map currently covers:
+The fixture map covers every registered method family and every declared operation-event name, including:
 
-- `wifi-networks.saved`
-- `wifi-networks.password-required`
-- `wifi-networks.enterprise-required`
-- `wifi-status.active`
-- `wifi-status.inactive`
-- `wifi-connect.success`
-- `wifi-connect.secret-required`
-- `wifi-scan.stream`
-- `wifi-profile.share`
+- saved/password/enterprise network readiness;
+- active/inactive status and full connectivity;
+- connect success/failure plus all connect stream events;
+- all scan stream events;
+- disconnect;
+- profile details/update/reveal-secret/forget/share;
+- SecretAgent capabilities/provide plus requested/cancelled/persistence events.
 
 Fixtures are built through production constructors, serialized through the real compatibility boundary, schema-checked, and compared with [`test_support/contract-v1.json`](./test_support/contract-v1.json). Shelllist checks should validate envelopes and contract fields before runtime.
 
@@ -177,8 +175,8 @@ Implemented in this repository:
 7. Improved connection parity: AP re-resolution by SSID/BSSID, one targeted rescan before the final D-Bus attempt, `not-found` classification, signal-assisted activation waits, shorter post-connect waits, background cache refresh, and structured connect-attempt history.
 8. Added `nm-daemon daemon`, exporting a session-bus service at `org.laufan.NmDaemon` `/org/laufan/NmDaemon` with interface `org.laufan.NmDaemon1`.
 9. Implemented D-Bus `Call`, `Subscribe`, `Cancel`, and `Event(stream, event_json)`.
-10. Implemented D-Bus method keys: `wifi.status`, `network.connectivity`, `wifi.networks`, `wifi.scan`, `wifi.connectTarget`, `wifi.disconnect`, `wifi.profile.operation`, `wifi.secret.capabilities`, and `wifi.secret.provide`.
-11. Added CLI forwarding for compatible status, connectivity, networks, disconnect, and profile commands through the daemon, with `--direct` and `NM_DAEMON_DIRECT=1` as recovery/debug escape hatches.
+10. Implemented D-Bus method keys: `wifi.status`, `network.connectivity`, `wifi.networks`, `wifi.saved`, `wifi.scan`, `wifi.connectTarget`, `wifi.disconnect`, `wifi.profile.operation`, `wifi.secret.capabilities`, and `wifi.secret.provide`.
+11. Added CLI forwarding for stable status, connectivity, networks, saved-profile listing, scan, connect, disconnect, and profile commands through the daemon, with one-shot event correlation for scan/connect and `--direct` / `NM_DAEMON_DIRECT=1` as recovery/debug escape hatches.
 12. Added event streams for scan/status/connectivity/connect flows. Scan and connect calls return immediately with a `request_id`; clients consume follow-up `Event` signals.
 13. Added real NetworkManager SecretAgent registration on the system bus at `/org/laufan/NmDaemon/SecretAgent`, bridging `GetSecrets`/`CancelGetSecrets` to `wifi.secret` requested/cancelled events and `wifi.secret.provide` responses.
 14. Added Secret Service keyring lookup/store/delete support for `wifi.secret.provide save:true`, NetworkManager `SaveSecrets`, and `DeleteSecrets`. Secret lookup prefers stable NetworkManager UUIDs and falls back to connection paths.
@@ -203,6 +201,8 @@ Implemented in this repository:
 33. Split validated network identity types into `model::identity` to reduce the central model module's change surface.
 34. Replaced `iw` command execution and text parsing with a direct typed `nl80211` generic-netlink station query for directional transmit/receive bitrate enrichment.
 35. Added session D-Bus activation backed by the packaged `Type=dbus` systemd user unit, allowing Hyprland/Quickshell clients to start the daemon on first use without depending on login-service ordering.
+36. Expanded advanced profile secret reveal/update to named WPA, WEP, LEAP, and 802.1X values while retaining the primary `password` compatibility field; enterprise secrets now use NetworkManager's correct `802-1x` setting section.
+37. Expanded contract fixtures across every registered method family and declared operation event, added CI/Nix flake checks with a coverage floor, and made daemon runtime/frontend mutexes recover from poisoned worker state instead of cascading panics.
 
 ## Remaining open items
 

@@ -11,7 +11,7 @@ use crate::daemon_connect::DbusConnectTargetParams;
 use crate::daemon_event::next_request_id;
 use crate::daemon_methods::{
     ProfileOperationParams, call_connectivity, call_disconnect, call_networks,
-    call_profile_operation, call_status,
+    call_profile_operation, call_saved, call_status,
 };
 use crate::daemon_runtime::DaemonRuntime;
 use crate::daemon_scan::DbusScanParams;
@@ -64,6 +64,10 @@ fn dispatch_method(
         Method::WifiDisconnect => {
             parse_params::<EmptyParams>(params_json)?;
             call_disconnect(runtime)
+        }
+        Method::WifiSaved => {
+            parse_params::<EmptyParams>(params_json)?;
+            call_saved(runtime)
         }
         Method::WifiNetworks => call_networks(runtime, parse_params(params_json)?),
         Method::WifiProfileOperation => call_profile_operation(

@@ -4,11 +4,13 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::forget::{ForgetProfile, ForgetResult, ForgetStatus};
 use crate::model::{
     AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectResult, ConnectivityStatus,
-    DhcpLeaseStatus, Ip4Status, MeteredStatus, NetworkEntry, ProfilePrivacy, SavedWifiConnection,
-    WifiSharePayload, WifiStatus, WirelessStatus, network_entries_with_profile_matches,
-    security_flags_label, security_label,
+    DhcpLeaseStatus, DisconnectResult, Ip4Status, MeteredStatus, NetworkEntry, ProfileIpSettings,
+    ProfilePrivacy, SavedWifiConnection, WifiProfileDetails, WifiProfileSecret, WifiSharePayload,
+    WifiStatus, WirelessStatus, network_entries_with_profile_matches, security_flags_label,
+    security_label,
 };
 use crate::protocol::{Method, Stream};
 
@@ -51,21 +53,45 @@ fn method_contract_fixtures() -> Value {
         "wifi-networks.saved": response_fixture(Method::WifiNetworks, json!([combined.network])),
         "wifi-networks.password-required": response_fixture(Method::WifiNetworks, json!([password_network])),
         "wifi-networks.enterprise-required": response_fixture(Method::WifiNetworks, json!([enterprise_network])),
+        "wifi-saved.profiles": response_fixture(Method::WifiSaved, json!([contract_profile()])),
         "wifi-status.active": response_fixture(Method::WifiStatus, json!(combined.status)),
         "wifi-status.inactive": response_fixture(Method::WifiStatus, json!(inactive_status())),
+        "network-connectivity.full": response_fixture(Method::NetworkConnectivity, json!(ConnectivityStatus::from_nm_code(4))),
         "wifi-connect.success": response_fixture(Method::WifiConnectTarget, json!(combined.connect_success)),
         "wifi-connect.secret-required": response_fixture(Method::WifiConnectTarget, json!(combined.connect_error)),
-        "wifi-scan.stream": {
-            "events": scan_stream_events(),
-        },
-        "wifi-profile.share": {
-            "payload": WifiSharePayload::shareable(
+        "wifi-connect.stream": { "events": connect_stream_events() },
+        "wifi-scan.stream": { "events": scan_stream_events() },
+        "wifi-disconnect.success": response_fixture(
+            Method::WifiDisconnect,
+            json!(DisconnectResult { status: "disconnected", message: "Wi-Fi disconnected".to_string() }),
+        ),
+        "wifi-profile.details": response_fixture(Method::WifiProfileOperation, json!(contract_profile_details())),
+        "wifi-profile.update": response_fixture(Method::WifiProfileOperation, json!({
+            "status": "ok",
+            "message": "Saved Wi-Fi profile settings updated",
+        })),
+        "wifi-profile.reveal-secret": response_fixture(Method::WifiProfileOperation, json!(contract_profile_secret())),
+        "wifi-profile.forget": response_fixture(Method::WifiProfileOperation, forget_result_fixture()),
+        "wifi-profile.share": response_fixture(
+            Method::WifiProfileOperation,
+            json!(WifiSharePayload::shareable(
                 &contract_profile(),
                 "WPA",
                 Some("correct horse battery staple"),
                 false,
-            ),
-        },
+            )),
+        ),
+        "wifi-secret.capabilities": response_fixture(Method::WifiSecretCapabilities, secret_capabilities_fixture()),
+        "wifi-secret.provide": response_fixture(Method::WifiSecretProvide, json!({
+            "status": "accepted",
+            "request_id": "secret-contract",
+            "accepted": true,
+            "save_requested": true,
+            "persistence_status": "pending",
+            "message": "Secret provided to pending NetworkManager request; the wifi.secret stream reports the persistence outcome",
+        })),
+        "wifi-secret.stream": { "events": secret_stream_events() },
+        "continuous.streams": { "events": continuous_stream_events() },
     })
 }
 
@@ -182,28 +208,161 @@ fn inactive_status() -> WifiStatus {
 
 fn scan_stream_events() -> Vec<Value> {
     let network = canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_PSK, false, false);
-    [
-        ("status", json!({ "message": "Scanning Wi-Fi networks" })),
-        (
-            "snapshot",
-            json!({ "scanning": true, "networks_found": 1, "networks": [network] }),
-        ),
-        (
-            "complete",
-            json!({ "timed_out": false, "networks_found": 1 }),
-        ),
-    ]
-    .into_iter()
-    .map(|(event, data)| {
-        serde_json::from_str(&crate::daemon_event::event_json(
-            Stream::WifiScan,
-            Some("scan-contract"),
-            event,
-            data,
-        ))
-        .expect("canonical scan event JSON")
-    })
-    .collect()
+    stream_events(
+        Stream::WifiScan,
+        "scan-contract",
+        vec![
+            (
+                "subscribed",
+                json!({ "subscription_id": "subscription-contract" }),
+            ),
+            ("status", json!({ "message": "Scanning Wi-Fi networks" })),
+            (
+                "warning",
+                json!({ "code": "timeout", "message": "Scan timed out", "details": {} }),
+            ),
+            (
+                "snapshot",
+                json!({ "scanning": false, "networks_found": 1, "networks": [network] }),
+            ),
+            (
+                "complete",
+                json!({ "timed_out": false, "networks_found": 1 }),
+            ),
+            ("cancelled", json!({ "message": "Wi-Fi scan cancelled" })),
+            (
+                "failed",
+                json!({ "code": "internal-error", "message": "Scan failed", "details": {} }),
+            ),
+        ],
+    )
+}
+
+fn connect_stream_events() -> Vec<Value> {
+    stream_events(
+        Stream::WifiConnect,
+        "connect-contract",
+        vec![
+            (
+                "subscribed",
+                json!({ "subscription_id": "subscription-contract" }),
+            ),
+            ("started", json!({ "message": "starting Wi-Fi connection" })),
+            (
+                "progress",
+                json!({ "message": "activating NetworkManager connection" }),
+            ),
+            (
+                "succeeded",
+                json!({
+                    "result": ConnectResult::connected(
+                        "Example",
+                        "Connected to Example via D-Bus",
+                        ConnectEnginePath::Dbus,
+                        Some(ConnectivityStatus::from_nm_code(4)),
+                    ),
+                }),
+            ),
+            (
+                "failed",
+                json!({
+                    "result": ConnectResult::failed(
+                        "Example",
+                        ConnectFailureReason::SecretRequired,
+                        "password required for Example",
+                    ),
+                    "reason": "secret-required",
+                    "code": "secret-required",
+                    "message": "password required for Example",
+                    "details": {},
+                }),
+            ),
+            (
+                "cancelled",
+                json!({ "message": "connection attempt was cancelled" }),
+            ),
+        ],
+    )
+}
+
+fn secret_stream_events() -> Vec<Value> {
+    stream_events(
+        Stream::WifiSecret,
+        "secret-contract",
+        vec![
+            (
+                "subscribed",
+                json!({ "subscription_id": "subscription-contract" }),
+            ),
+            (
+                "requested",
+                json!({
+                    "connection_path": "/org/freedesktop/NetworkManager/Settings/1",
+                    "setting_name": "802-1x",
+                    "hints": ["password", "private-key-password"],
+                    "secret_keys": ["password", "private-key-password"],
+                    "primary_secret_key": "password",
+                    "flags": 0,
+                    "save_supported": true,
+                    "timeout_ms": 120000,
+                }),
+            ),
+            ("cancelled", json!({})),
+            ("persistence", json!({ "status": "stored" })),
+            (
+                "persistence",
+                json!({ "status": "prompt_unsupported", "operation": "create", "prompt": "/org/freedesktop/secrets/prompt/1" }),
+            ),
+            (
+                "persistence",
+                json!({ "status": "failed", "error": "keyring unavailable" }),
+            ),
+        ],
+    )
+}
+
+fn continuous_stream_events() -> Vec<Value> {
+    let mut events = stream_events(
+        Stream::WifiStatus,
+        "status-contract",
+        vec![
+            (
+                "subscribed",
+                json!({ "subscription_id": "status-subscription" }),
+            ),
+            ("changed", json!({ "status": inactive_status() })),
+        ],
+    );
+    events.extend(stream_events(
+        Stream::NetworkConnectivity,
+        "connectivity-contract",
+        vec![
+            (
+                "subscribed",
+                json!({ "subscription_id": "connectivity-subscription" }),
+            ),
+            (
+                "changed",
+                json!({ "connectivity": ConnectivityStatus::from_nm_code(4) }),
+            ),
+        ],
+    ));
+    events
+}
+
+fn stream_events(stream: Stream, request_id: &str, events: Vec<(&str, Value)>) -> Vec<Value> {
+    events
+        .into_iter()
+        .map(|(event, data)| {
+            serde_json::from_str(&crate::daemon_event::event_json(
+                stream,
+                Some(request_id),
+                event,
+                data,
+            ))
+            .expect("canonical stream event JSON")
+        })
+        .collect()
 }
 
 fn contract_profile() -> SavedWifiConnection {
@@ -219,6 +378,95 @@ fn contract_profile() -> SavedWifiConnection {
             send_hostname: false,
         },
     }
+}
+
+fn contract_profile_details() -> WifiProfileDetails {
+    WifiProfileDetails {
+        path: "/org/freedesktop/NetworkManager/Settings/1".to_string(),
+        id: "Example".to_string(),
+        ssid: "Example".to_string(),
+        autoconnect: true,
+        metered: "auto".to_string(),
+        hidden: false,
+        mac_address_policy: "stable".to_string(),
+        send_hostname: false,
+        security_type: "WPA Enterprise".to_string(),
+        ipv4: ProfileIpSettings {
+            method: "auto".to_string(),
+            dns: vec!["1.1.1.1".to_string()],
+            ..Default::default()
+        },
+        ipv6: ProfileIpSettings {
+            method: "auto".to_string(),
+            ..Default::default()
+        },
+    }
+}
+
+fn contract_profile_secret() -> WifiProfileSecret {
+    WifiProfileSecret {
+        path: "/org/freedesktop/NetworkManager/Settings/1".to_string(),
+        available: true,
+        kind: "enterprise".to_string(),
+        setting_name: Some("802-1x".to_string()),
+        secret_keys: vec![
+            "password".to_string(),
+            "private-key-password".to_string(),
+            "pin".to_string(),
+        ],
+        primary_secret_key: Some("password".to_string()),
+        values: BTreeMap::from([
+            ("password".to_string(), "enterprise-password".to_string()),
+            (
+                "private-key-password".to_string(),
+                "private-key-secret".to_string(),
+            ),
+        ]),
+        password: Some("enterprise-password".to_string()),
+    }
+}
+
+fn forget_result_fixture() -> Value {
+    json!(ForgetResult {
+        operation: "forget",
+        status: ForgetStatus::Forgotten,
+        request_id: "forget-contract".to_string(),
+        ssid: "Example".to_string(),
+        message: "Disconnected and forgot 1 saved profile for Example".to_string(),
+        was_active: true,
+        disconnected: true,
+        profiles_found: 1,
+        deleted_profiles: vec![ForgetProfile {
+            id: "Example".to_string(),
+            path: "/org/freedesktop/NetworkManager/Settings/1".to_string(),
+        }],
+        failed_profiles: Vec::new(),
+        cancelled_connect_requests: vec!["connect-contract".to_string()],
+        pending_connect_requests: Vec::new(),
+        warnings: Vec::new(),
+        portal_session_reset: false,
+        portal_note: "The hotspot may continue to recognize this device until its captive-portal session expires.",
+    })
+}
+
+fn secret_capabilities_fixture() -> Value {
+    json!({
+        "registered": true,
+        "agent_path": "/org/laufan/NmDaemon/SecretAgent",
+        "keyring": {
+            "available": true,
+            "persistence_supported": true,
+            "default_save": false,
+            "prompt_handling": "unsupported",
+            "prompt_policy": "dismiss_and_report",
+        },
+        "events": {
+            "stream": Stream::WifiSecret,
+            "implemented": true,
+            "persistence_outcomes": true,
+        },
+        "message": "SecretAgent is registered when NetworkManager is available; save:true persists only when the user's Secret Service keyring can complete without a desktop prompt",
+    })
 }
 
 #[cfg(test)]
@@ -249,8 +497,18 @@ fn serialized_boundary_snapshot() -> Value {
         },
         "connect_success": shell["connect_success"],
         "connect_error": shell["connect_error"],
-        "scan_status_event": methods["wifi-scan.stream"]["events"][0],
-        "profile_share": methods["wifi-profile.share"]["payload"],
+        "connect_stream": methods["wifi-connect.stream"],
+        "scan_stream": methods["wifi-scan.stream"],
+        "saved_profiles": methods["wifi-saved.profiles"],
+        "disconnect": methods["wifi-disconnect.success"],
+        "profile_details": methods["wifi-profile.details"],
+        "profile_update": methods["wifi-profile.update"],
+        "profile_secret": methods["wifi-profile.reveal-secret"],
+        "profile_forget": methods["wifi-profile.forget"],
+        "profile_share": methods["wifi-profile.share"],
+        "secret_capabilities": methods["wifi-secret.capabilities"],
+        "secret_provide": methods["wifi-secret.provide"],
+        "secret_stream": methods["wifi-secret.stream"],
     })
 }
 
@@ -323,6 +581,23 @@ mod tests {
             value["protocol-registry"]["metadata"]["methods"][0]["name"],
             "wifi.status"
         );
+        let covered_methods = std::collections::HashSet::from([
+            crate::protocol::Method::WifiStatus,
+            crate::protocol::Method::NetworkConnectivity,
+            crate::protocol::Method::WifiNetworks,
+            crate::protocol::Method::WifiSaved,
+            crate::protocol::Method::WifiScan,
+            crate::protocol::Method::WifiConnectTarget,
+            crate::protocol::Method::WifiDisconnect,
+            crate::protocol::Method::WifiProfileOperation,
+            crate::protocol::Method::WifiSecretCapabilities,
+            crate::protocol::Method::WifiSecretProvide,
+        ]);
+        let registered_methods = crate::protocol::METHOD_REGISTRY
+            .iter()
+            .map(|spec| spec.method)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(covered_methods, registered_methods);
         assert!(value["wifi-networks.saved"]["networks"].is_array());
         assert_eq!(
             value["wifi-networks.password-required"]["networks"][0]["capabilities"]["needs_password"],
@@ -337,11 +612,68 @@ mod tests {
             "enterprise"
         );
         assert_eq!(value["wifi-status.inactive"]["status"]["active"], false);
+        assert_eq!(value["wifi-saved.profiles"]["profiles"][0]["id"], "Example");
         assert_eq!(
             value["wifi-connect.secret-required"]["result"]["reason"],
             "secret-required"
         );
         assert_eq!(value["wifi-scan.stream"]["events"][0]["protocol"], "nm-api");
-        assert_eq!(value["wifi-profile.share"]["payload"]["shareable"], true);
+        assert_eq!(
+            value["network-connectivity.full"]["connectivity"]["state"],
+            "full"
+        );
+        assert_eq!(
+            value["wifi-disconnect.success"]["result"]["status"],
+            "disconnected"
+        );
+        assert_eq!(
+            value["wifi-profile.details"]["result"]["security_type"],
+            "WPA Enterprise"
+        );
+        assert_eq!(
+            value["wifi-profile.reveal-secret"]["result"]["primary_secret_key"],
+            "password"
+        );
+        assert_eq!(
+            value["wifi-profile.reveal-secret"]["result"]["values"]["private-key-password"],
+            "private-key-secret"
+        );
+        assert_eq!(
+            value["wifi-profile.forget"]["result"]["status"],
+            "forgotten"
+        );
+        assert_eq!(value["wifi-profile.share"]["result"]["shareable"], true);
+        assert_eq!(
+            value["wifi-secret.capabilities"]["secret_agent"]["keyring"]["prompt_handling"],
+            "unsupported"
+        );
+        assert_eq!(
+            value["wifi-secret.provide"]["result"]["persistence_status"],
+            "pending"
+        );
+        for fixture in [
+            "wifi-connect.stream",
+            "wifi-scan.stream",
+            "wifi-secret.stream",
+        ] {
+            let stream = match fixture {
+                "wifi-connect.stream" => crate::protocol::Stream::WifiConnect,
+                "wifi-scan.stream" => crate::protocol::Stream::WifiScan,
+                _ => crate::protocol::Stream::WifiSecret,
+            };
+            let actual = value[fixture]["events"]
+                .as_array()
+                .expect("stream fixture events")
+                .iter()
+                .filter_map(|event| event["event"].as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let expected = stream
+                .spec()
+                .events
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(actual, expected, "{fixture}");
+        }
     }
 }
