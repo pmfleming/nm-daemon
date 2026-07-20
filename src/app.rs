@@ -20,26 +20,35 @@ fn run_inner() -> Result<()> {
     let log_path = logging::init(verbose, log_file.clone())?;
     tracing::debug!(path = %log_path.display(), "using log file");
 
-    if !direct && std::env::var_os("NM_DAEMON_DIRECT").is_none() {
-        match crate::daemon::try_forward_command(&command)? {
-            crate::daemon::ForwardOutcome::Handled => return Ok(()),
-            crate::daemon::ForwardOutcome::DirectConnect(request) => {
-                return with_nm(|nm| actions::print_connect_attempt(nm, *request));
-            }
-            crate::daemon::ForwardOutcome::NotForwardable
-            | crate::daemon::ForwardOutcome::Unavailable => {}
+    if try_forward(&command, direct)? {
+        return Ok(());
+    }
+    run_command(command, verbose, &log_file)
+}
+
+fn try_forward(command: &Command, direct: bool) -> Result<bool> {
+    if direct || std::env::var_os("NM_DAEMON_DIRECT").is_some() {
+        return Ok(false);
+    }
+    match crate::daemon_forward::try_forward_command(command)? {
+        crate::daemon_forward::ForwardOutcome::Handled => Ok(true),
+        crate::daemon_forward::ForwardOutcome::DirectConnect(request) => {
+            with_nm(|nm| actions::print_connect_attempt(nm, *request))?;
+            Ok(true)
         }
+        crate::daemon_forward::ForwardOutcome::NotForwardable
+        | crate::daemon_forward::ForwardOutcome::Unavailable => Ok(false),
     }
+}
 
+fn run_command(command: Command, verbose: u8, log_file: &Option<std::path::PathBuf>) -> Result<()> {
     match command {
-        Command::Daemon => crate::daemon::run_daemon()?,
-        Command::Client => crate::client::run()?,
-        Command::Wifi { command } => run_wifi_command(command, verbose, &log_file)?,
-        Command::Network { command } => run_network_command(command)?,
-        Command::Debug { command } => run_debug_command(command)?,
+        Command::Daemon => crate::daemon::run_daemon(),
+        Command::Client => crate::client::run(),
+        Command::Wifi { command } => run_wifi_command(command, verbose, log_file),
+        Command::Network { command } => run_network_command(command),
+        Command::Debug { command } => run_debug_command(command),
     }
-
-    Ok(())
 }
 
 fn run_wifi_command(

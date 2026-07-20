@@ -53,27 +53,6 @@ fn dispatch_method(
     runtime: &Arc<DaemonRuntime>,
 ) -> Result<Value> {
     match method {
-        Method::WifiStatus => {
-            parse_params::<EmptyParams>(params_json)?;
-            call_status(runtime)
-        }
-        Method::NetworkConnectivity => {
-            parse_params::<EmptyParams>(params_json)?;
-            call_connectivity(runtime)
-        }
-        Method::WifiDisconnect => {
-            parse_params::<EmptyParams>(params_json)?;
-            call_disconnect(runtime)
-        }
-        Method::WifiSaved => {
-            parse_params::<EmptyParams>(params_json)?;
-            call_saved(runtime)
-        }
-        Method::WifiNetworks => call_networks(runtime, parse_params(params_json)?),
-        Method::WifiProfileOperation => call_profile_operation(
-            runtime,
-            parse_required_params::<ProfileOperationParams>(params_json)?,
-        ),
         Method::WifiScan => crate::daemon_scan::start_scan(
             runtime,
             parse_params::<DbusScanParams>(params_json)?,
@@ -84,6 +63,25 @@ fn dispatch_method(
             parse_required_params::<DbusConnectTargetParams>(params_json)?,
             emitter,
         ),
+        _ => dispatch_immediate(method, params_json, runtime),
+    }
+}
+
+fn dispatch_immediate(
+    method: Method,
+    params_json: &str,
+    runtime: &Arc<DaemonRuntime>,
+) -> Result<Value> {
+    match method {
+        Method::WifiStatus => empty_call(params_json, || call_status(runtime)),
+        Method::NetworkConnectivity => empty_call(params_json, || call_connectivity(runtime)),
+        Method::WifiDisconnect => empty_call(params_json, || call_disconnect(runtime)),
+        Method::WifiSaved => empty_call(params_json, || call_saved(runtime)),
+        Method::WifiNetworks => call_networks(runtime, parse_params(params_json)?),
+        Method::WifiProfileOperation => call_profile_operation(
+            runtime,
+            parse_required_params::<ProfileOperationParams>(params_json)?,
+        ),
         Method::WifiSecretCapabilities => {
             crate::daemon_secret::capabilities(parse_params::<SecretCapabilitiesParams>(
                 params_json,
@@ -92,7 +90,23 @@ fn dispatch_method(
         Method::WifiSecretProvide => crate::daemon_secret::provide(parse_required_params::<
             SecretProvideParams,
         >(params_json)?),
+        _ => invalid_dispatch_group(method, "immediate"),
     }
+}
+
+fn empty_call(params_json: &str, call: impl FnOnce() -> Result<Value>) -> Result<Value> {
+    parse_params::<EmptyParams>(params_json)?;
+    call()
+}
+
+fn invalid_dispatch_group(method: Method, group: &str) -> Result<Value> {
+    Err(DomainError::new(
+        crate::error::ErrorCode::InternalError,
+        method.spec().operation,
+        crate::error::ErrorSource::Internal,
+        format!("method {method} entered the wrong {group} dispatch group"),
+    )
+    .into())
 }
 
 pub(crate) fn subscribe_streams(

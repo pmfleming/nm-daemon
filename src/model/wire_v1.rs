@@ -6,6 +6,19 @@ use super::{
     NetworkCapabilities, NmObjectPath, Security, Ssid, TargetProfileSettings, WifiConnectTarget,
 };
 
+macro_rules! serialize_via_ref {
+    ($model:ty, $wire:ident) => {
+        impl Serialize for $model {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                $wire::from(self).serialize(serializer)
+            }
+        }
+    };
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WifiConnectTargetV1 {
@@ -73,14 +86,7 @@ impl<'a> From<&'a WifiConnectTarget> for WifiConnectTargetRef<'a> {
     }
 }
 
-impl Serialize for WifiConnectTarget {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        WifiConnectTargetRef::from(self).serialize(serializer)
-    }
-}
+serialize_via_ref!(WifiConnectTarget, WifiConnectTargetRef);
 
 impl<'de> Deserialize<'de> for WifiConnectTarget {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -176,14 +182,7 @@ impl<'a> From<&'a NetworkCapabilities> for NetworkCapabilitiesRef<'a> {
     }
 }
 
-impl Serialize for NetworkCapabilities {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        NetworkCapabilitiesRef::from(self).serialize(serializer)
-    }
-}
+serialize_via_ref!(NetworkCapabilities, NetworkCapabilitiesRef);
 
 impl<'de> Deserialize<'de> for NetworkCapabilities {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

@@ -3,8 +3,7 @@ use std::time::Duration;
 use crate::application::{Application, BackgroundScanScheduler, ScanRequest};
 use crate::nm::Nm;
 
-/// Direct-mode cache refresher. The daemon uses its bounded runtime instead;
-/// direct CLI mode completes the refresh in-process before exiting.
+/// Refreshes the cache in-process for direct CLI mode.
 pub(crate) struct InlineBackgroundScan<'a> {
     nm: &'a Nm,
 }

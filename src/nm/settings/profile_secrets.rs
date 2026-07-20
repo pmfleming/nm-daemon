@@ -108,7 +108,7 @@ pub(super) fn profile_secret_values(
         .iter()
         .filter_map(|key| {
             setting_secret_string(settings, secrets, setting_name, key)
-                .map(|value| (key.clone(), value))
+                .map(|value| (key.to_string(), value))
         })
         .collect()
 }
@@ -118,15 +118,7 @@ pub(super) fn update_profile_secrets(
     update: &WifiProfileUpdate,
 ) -> Result<()> {
     let spec = profile_secret_spec(settings);
-    let mut replacements = update.secrets.clone();
-    if let (Some(primary), Some(password)) = (
-        spec.primary_secret_key.as_ref(),
-        update.password.as_ref().filter(|value| !value.is_empty()),
-    ) {
-        replacements
-            .entry(primary.clone())
-            .or_insert_with(|| password.clone());
-    }
+    let replacements = secret_replacements(&spec, update);
     if replacements.is_empty() {
         return Ok(());
     }
@@ -139,31 +131,63 @@ pub(super) fn update_profile_secrets(
         .into());
     };
     for (key, value) in &replacements {
-        if !spec.secret_keys.contains(key) {
-            return Err(DomainError::validation(
-                ErrorOperation::ProfileOperation,
-                format!("secret '{key}' is not valid for this Wi-Fi profile"),
-            )
-            .with_detail("field", format!("secrets.{key}"))
-            .with_detail("allowed_secret_keys", spec.secret_keys.clone())
-            .into());
-        }
-        if value.is_empty() {
-            return Err(DomainError::validation(
-                ErrorOperation::ProfileOperation,
-                format!("secret '{key}' must not be empty"),
-            )
-            .with_detail("field", format!("secrets.{key}"))
-            .into());
-        }
-        validate_profile_secret(settings, &spec, key, value)?;
+        validate_replacement(settings, &spec, key, value)?;
     }
     let section = settings.entry(setting_name.to_string()).or_default();
     for (key, value) in replacements {
-        section.insert(key.clone(), owned_value(value)?);
+        section.insert(key.to_string(), owned_value(value.to_string())?);
         section.insert(format!("{key}-flags"), owned_value(0_u32)?);
     }
     Ok(())
+}
+
+fn secret_replacements<'a>(
+    spec: &'a ProfileSecretSpec,
+    update: &'a WifiProfileUpdate,
+) -> Vec<(&'a str, &'a str)> {
+    let mut replacements = update
+        .secrets
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let Some((primary, password)) = spec.primary_secret_key.as_deref().zip(
+        update
+            .password
+            .as_deref()
+            .filter(|password| !password.is_empty()),
+    ) else {
+        return replacements;
+    };
+    if !update.secrets.contains_key(primary) {
+        replacements.push((primary, password));
+    }
+    replacements
+}
+
+fn validate_replacement(
+    settings: &ConnectionSettings,
+    spec: &ProfileSecretSpec,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    if !spec.secret_keys.iter().any(|allowed| allowed == key) {
+        return Err(DomainError::validation(
+            ErrorOperation::ProfileOperation,
+            format!("secret '{key}' is not valid for this Wi-Fi profile"),
+        )
+        .with_detail("field", format!("secrets.{key}"))
+        .with_detail("allowed_secret_keys", spec.secret_keys.clone())
+        .into());
+    }
+    if value.is_empty() {
+        return Err(DomainError::validation(
+            ErrorOperation::ProfileOperation,
+            format!("secret '{key}' must not be empty"),
+        )
+        .with_detail("field", format!("secrets.{key}"))
+        .into());
+    }
+    validate_profile_secret(settings, spec, key, value)
 }
 
 fn validate_profile_secret(

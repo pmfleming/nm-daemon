@@ -37,8 +37,7 @@ impl ActivationOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Explicit phases of one connection attempt. A successful rescan loops back through
-/// `SavedProfile` and `CreateProfile` once before proceeding to fallback.
+/// Connection phases; a successful rescan retries saved/new profiles once.
 enum ConnectionState {
     AlreadyActive,
     SavedProfile,

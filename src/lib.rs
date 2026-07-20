@@ -16,6 +16,7 @@ mod daemon;
 mod daemon_connect;
 mod daemon_dispatch;
 mod daemon_event;
+mod daemon_forward;
 mod daemon_methods;
 mod daemon_runtime;
 mod daemon_scan;

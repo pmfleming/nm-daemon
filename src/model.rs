@@ -466,9 +466,7 @@ pub(crate) struct WifiConnectTarget {
     pub(crate) private: bool,
     pub(crate) hidden: bool,
     pub(crate) security: Option<Security>,
-    /// Optional key-management/security hint for hidden or otherwise ambiguous targets.
-    /// Values follow NetworkManager setting names where possible: open/none, owe,
-    /// wpa-psk, sae, wep, wpa-eap, or wpa-eap-suite-b-192.
+    /// NetworkManager key-management hint for hidden or ambiguous targets.
     pub(crate) key_mgmt: Option<String>,
     /// Optional structured 802.1X/EAP credentials for enterprise Wi-Fi creation.
     pub(crate) enterprise: Option<EnterpriseAuth>,
@@ -710,11 +708,9 @@ pub(crate) struct NetworkPortalHint {
 pub(crate) struct NetworkEntry {
     #[serde(flatten)]
     pub(crate) access_point: AccessPoint,
-    /// Stable frontend key for preserving selection without reimplementing AP matching.
+    /// Stable frontend selection key.
     pub(crate) key: String,
-    /// Exact APs for this displayed network group. The flattened access_point is
-    /// the preferred/default AP; frontends can use this list for exact BSSID,
-    /// band, and device selection.
+    /// Exact APs in this group; `access_point` is the preferred AP.
     #[serde(default)]
     pub(crate) access_points: Vec<AccessPoint>,
     pub(crate) primary_profile: Option<SavedWifiConnection>,

@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use zbus::blocking::{Connection, Proxy};
 
-use crate::daemon::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH};
+use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
@@ -61,10 +61,7 @@ impl ClientState {
     }
 }
 
-/// Run one frontend-owned D-Bus session over newline-delimited JSON.
-///
-/// Calls and events share stdout, so each emitted line is an atomic JSON object. The process keeps
-/// a single session-bus connection and cancels every known request/subscription when stdin closes.
+/// Runs one frontend D-Bus session over atomic newline-delimited JSON messages.
 pub(crate) fn run() -> Result<()> {
     let connection = Connection::session().context("connect frontend client to session D-Bus")?;
     let proxy = Proxy::new(&connection, DBUS_BUS_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE)
@@ -80,26 +77,34 @@ pub(crate) fn run() -> Result<()> {
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let line = line.context("read frontend client request")?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let request = match serde_json::from_str::<ClientRequest>(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                emit(
-                    &output_lock,
-                    &json!({ "kind": "protocol-error", "error": error.to_string() }),
-                )?;
-                continue;
-            }
-        };
-        if handle_request(&proxy, request, &output_lock, &state)? {
+        if handle_line(&proxy, &line, &output_lock, &state)? {
             break;
         }
     }
 
     cancel_all(&proxy, &state);
     Ok(())
+}
+
+fn handle_line(
+    proxy: &Proxy<'_>,
+    line: &str,
+    output_lock: &Mutex<()>,
+    state: &Mutex<ClientState>,
+) -> Result<bool> {
+    if line.trim().is_empty() {
+        return Ok(false);
+    }
+    match serde_json::from_str::<ClientRequest>(line) {
+        Ok(request) => handle_request(proxy, request, output_lock, state),
+        Err(error) => {
+            emit(
+                output_lock,
+                &json!({ "kind": "protocol-error", "error": error.to_string() }),
+            )?;
+            Ok(false)
+        }
+    }
 }
 
 fn handle_request(
@@ -146,40 +151,57 @@ fn emit_dbus_response(
     id: &str,
     result: zbus::Result<String>,
 ) -> Result<()> {
-    match result {
-        Ok(response_json) => match serde_json::from_str::<Value>(&response_json) {
-            Ok(response) => {
-                let active_id = response_active_id(&response).map(ToString::to_string);
-                emit(
-                    output_lock,
-                    &json!({ "kind": "response", "id": id, "ok": true, "response": response }),
-                )?;
-                if let Some(active_id) = active_id {
-                    let pending = {
-                        let mut state = recover_lock(state, "frontend client state");
-                        state.active_ids.insert(active_id.clone());
-                        state.take_pending_events(&active_id)
-                    };
-                    for (stream, event) in pending {
-                        emit(
-                            output_lock,
-                            &json!({ "kind": "event", "stream": stream, "event": event }),
-                        )?;
-                        forget_terminal_id(state, &event);
-                    }
-                }
-                Ok(())
-            }
-            Err(error) => emit(
+    let response_json = match result {
+        Ok(response) => response,
+        Err(error) => return emit_response_error(output_lock, id, error.to_string()),
+    };
+    let response = match serde_json::from_str::<Value>(&response_json) {
+        Ok(response) => response,
+        Err(error) => {
+            return emit_response_error(
                 output_lock,
-                &json!({ "kind": "response", "id": id, "ok": false, "error": format!("invalid nm-api response: {error}") }),
-            ),
-        },
-        Err(error) => emit(
+                id,
+                format!("invalid nm-api response: {error}"),
+            );
+        }
+    };
+    let active_id = response_active_id(&response).map(ToString::to_string);
+    emit(
+        output_lock,
+        &json!({ "kind": "response", "id": id, "ok": true, "response": response }),
+    )?;
+    flush_pending_events(output_lock, state, active_id)
+}
+
+fn emit_response_error(output_lock: &Mutex<()>, id: &str, error: String) -> Result<()> {
+    emit(
+        output_lock,
+        &json!({ "kind": "response", "id": id, "ok": false, "error": error }),
+    )
+}
+
+fn flush_pending_events(
+    output_lock: &Mutex<()>,
+    state: &Mutex<ClientState>,
+    active_id: Option<String>,
+) -> Result<()> {
+    let Some(active_id) = active_id else {
+        return Ok(());
+    };
+    let pending = {
+        let mut state = recover_lock(state, "frontend client state");
+        let pending = state.take_pending_events(&active_id);
+        state.active_ids.insert(active_id);
+        pending
+    };
+    for (stream, event) in pending {
+        emit(
             output_lock,
-            &json!({ "kind": "response", "id": id, "ok": false, "error": error.to_string() }),
-        ),
+            &json!({ "kind": "event", "stream": stream, "event": event }),
+        )?;
+        forget_terminal_id(state, &event);
     }
+    Ok(())
 }
 
 fn emit_transport_response(
@@ -192,10 +214,7 @@ fn emit_transport_response(
             output_lock,
             &json!({ "kind": "response", "id": id, "ok": true, "response": response }),
         ),
-        Err(error) => emit(
-            output_lock,
-            &json!({ "kind": "response", "id": id, "ok": false, "error": error.to_string() }),
-        ),
+        Err(error) => emit_response_error(output_lock, id, error.to_string()),
     }
 }
 

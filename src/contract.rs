@@ -23,21 +23,15 @@ struct ShelllistContractFixture {
 }
 
 pub(crate) fn print_shelllist_contract_fixture() -> Result<()> {
-    let fixture = shelllist_contract_fixture();
-    crate::output::print_api_data(
-        "fixture",
-        &fixture,
-        "serialize Shelllist contract fixture response",
-    )
+    print_fixture(&shelllist_contract_fixture(), "fixture")
 }
 
 pub(crate) fn print_method_contract_fixtures() -> Result<()> {
-    let fixtures = method_contract_fixtures();
-    crate::output::print_api_data(
-        "fixtures",
-        &fixtures,
-        "serialize method contract fixtures response",
-    )
+    print_fixture(&method_contract_fixtures(), "fixtures")
+}
+
+fn print_fixture(fixture: &impl Serialize, key: &str) -> Result<()> {
+    crate::output::print_api_data(key, fixture, "serialize contract fixture response")
 }
 
 fn method_contract_fixtures() -> Value {
@@ -59,7 +53,7 @@ fn method_contract_fixtures() -> Value {
         "network-connectivity.full": response_fixture(Method::NetworkConnectivity, json!(ConnectivityStatus::from_nm_code(4))),
         "wifi-connect.success": response_fixture(Method::WifiConnectTarget, json!(combined.connect_success)),
         "wifi-connect.secret-required": response_fixture(Method::WifiConnectTarget, json!(combined.connect_error)),
-        "wifi-connect.stream": { "events": connect_stream_events() },
+        "wifi-connect.stream": { "events": operation_stream_events(Stream::WifiConnect) },
         "wifi-scan.stream": { "events": scan_stream_events() },
         "wifi-disconnect.success": response_fixture(
             Method::WifiDisconnect,
@@ -90,7 +84,7 @@ fn method_contract_fixtures() -> Value {
             "persistence_status": "pending",
             "message": "Secret provided to pending NetworkManager request; the wifi.secret stream reports the persistence outcome",
         })),
-        "wifi-secret.stream": { "events": secret_stream_events() },
+        "wifi-secret.stream": { "events": operation_stream_events(Stream::WifiSecret) },
         "continuous.streams": { "events": continuous_stream_events() },
     })
 }
@@ -138,18 +132,26 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
             metered: Some(MeteredStatus::from_nm_code(4)),
             active_since_ms: Some(1_762_000_000_000),
         },
-        connect_success: ConnectResult::connected(
-            "Example",
-            "Connected to Example via D-Bus",
-            ConnectEnginePath::Dbus,
-            Some(ConnectivityStatus::from_nm_code(4)),
-        ),
-        connect_error: ConnectResult::failed(
-            "Example",
-            ConnectFailureReason::SecretRequired,
-            "password required for Example",
-        ),
+        connect_success: connected_fixture(),
+        connect_error: connect_error_fixture(),
     }
+}
+
+fn connected_fixture() -> ConnectResult {
+    ConnectResult::connected(
+        "Example",
+        "Connected to Example via D-Bus",
+        ConnectEnginePath::Dbus,
+        Some(ConnectivityStatus::from_nm_code(4)),
+    )
+}
+
+fn connect_error_fixture() -> ConnectResult {
+    ConnectResult::failed(
+        "Example",
+        ConnectFailureReason::SecretRequired,
+        "password required for Example",
+    )
 }
 
 fn canonical_access_point(rsn_flags: u32, active: bool) -> AccessPoint {
@@ -212,10 +214,7 @@ fn scan_stream_events() -> Vec<Value> {
         Stream::WifiScan,
         "scan-contract",
         vec![
-            (
-                "subscribed",
-                json!({ "subscription_id": "subscription-contract" }),
-            ),
+            subscribed_event("subscription-contract"),
             ("status", json!({ "message": "Scanning Wi-Fi networks" })),
             (
                 "warning",
@@ -238,87 +237,75 @@ fn scan_stream_events() -> Vec<Value> {
     )
 }
 
-fn connect_stream_events() -> Vec<Value> {
-    stream_events(
-        Stream::WifiConnect,
-        "connect-contract",
-        vec![
-            (
-                "subscribed",
-                json!({ "subscription_id": "subscription-contract" }),
-            ),
-            ("started", json!({ "message": "starting Wi-Fi connection" })),
-            (
-                "progress",
-                json!({ "message": "activating NetworkManager connection" }),
-            ),
-            (
-                "succeeded",
-                json!({
-                    "result": ConnectResult::connected(
-                        "Example",
-                        "Connected to Example via D-Bus",
-                        ConnectEnginePath::Dbus,
-                        Some(ConnectivityStatus::from_nm_code(4)),
-                    ),
-                }),
-            ),
-            (
-                "failed",
-                json!({
-                    "result": ConnectResult::failed(
-                        "Example",
-                        ConnectFailureReason::SecretRequired,
-                        "password required for Example",
-                    ),
-                    "reason": "secret-required",
-                    "code": "secret-required",
-                    "message": "password required for Example",
-                    "details": {},
-                }),
-            ),
-            (
-                "cancelled",
-                json!({ "message": "connection attempt was cancelled" }),
-            ),
-        ],
-    )
+fn operation_stream_events(stream: Stream) -> Vec<Value> {
+    let (request_id, events) = match stream {
+        Stream::WifiConnect => (
+            "connect-contract",
+            vec![
+                subscribed_event("subscription-contract"),
+                ("started", json!({ "message": "starting Wi-Fi connection" })),
+                (
+                    "progress",
+                    json!({ "message": "activating NetworkManager connection" }),
+                ),
+                (
+                    "succeeded",
+                    json!({
+                        "result": connected_fixture(),
+                    }),
+                ),
+                (
+                    "failed",
+                    json!({
+                        "result": connect_error_fixture(),
+                        "reason": "secret-required",
+                        "code": "secret-required",
+                        "message": "password required for Example",
+                        "details": {},
+                    }),
+                ),
+                (
+                    "cancelled",
+                    json!({ "message": "connection attempt was cancelled" }),
+                ),
+            ],
+        ),
+        Stream::WifiSecret => (
+            "secret-contract",
+            vec![
+                subscribed_event("subscription-contract"),
+                (
+                    "requested",
+                    json!({
+                        "connection_path": "/org/freedesktop/NetworkManager/Settings/1",
+                        "setting_name": "802-1x",
+                        "hints": ["password", "private-key-password"],
+                        "secret_keys": ["password", "private-key-password"],
+                        "primary_secret_key": "password",
+                        "flags": 0,
+                        "save_supported": true,
+                        "timeout_ms": 120000,
+                    }),
+                ),
+                ("cancelled", json!({})),
+                ("persistence", json!({ "status": "stored" })),
+                (
+                    "persistence",
+                    json!({ "status": "prompt_unsupported", "operation": "create", "prompt": "/org/freedesktop/secrets/prompt/1" }),
+                ),
+                (
+                    "persistence",
+                    json!({ "status": "failed", "error": "keyring unavailable" }),
+                ),
+            ],
+        ),
+        _ => return Vec::new(),
+    };
+    stream_events(stream, request_id, events)
 }
 
-fn secret_stream_events() -> Vec<Value> {
-    stream_events(
-        Stream::WifiSecret,
-        "secret-contract",
-        vec![
-            (
-                "subscribed",
-                json!({ "subscription_id": "subscription-contract" }),
-            ),
-            (
-                "requested",
-                json!({
-                    "connection_path": "/org/freedesktop/NetworkManager/Settings/1",
-                    "setting_name": "802-1x",
-                    "hints": ["password", "private-key-password"],
-                    "secret_keys": ["password", "private-key-password"],
-                    "primary_secret_key": "password",
-                    "flags": 0,
-                    "save_supported": true,
-                    "timeout_ms": 120000,
-                }),
-            ),
-            ("cancelled", json!({})),
-            ("persistence", json!({ "status": "stored" })),
-            (
-                "persistence",
-                json!({ "status": "prompt_unsupported", "operation": "create", "prompt": "/org/freedesktop/secrets/prompt/1" }),
-            ),
-            (
-                "persistence",
-                json!({ "status": "failed", "error": "keyring unavailable" }),
-            ),
-        ],
-    )
+fn subscribed_event(subscription_id: &str) -> (&'static str, Value) {
+    ("subscribed", json!({ "subscription_id": subscription_id }))
 }
 
 fn continuous_stream_events() -> Vec<Value> {
@@ -326,10 +313,7 @@ fn continuous_stream_events() -> Vec<Value> {
         Stream::WifiStatus,
         "status-contract",
         vec![
-            (
-                "subscribed",
-                json!({ "subscription_id": "status-subscription" }),
-            ),
+            subscribed_event("status-subscription"),
             ("changed", json!({ "status": inactive_status() })),
         ],
     );
@@ -337,10 +321,7 @@ fn continuous_stream_events() -> Vec<Value> {
         Stream::NetworkConnectivity,
         "connectivity-contract",
         vec![
-            (
-                "subscribed",
-                json!({ "subscription_id": "connectivity-subscription" }),
-            ),
+            subscribed_event("connectivity-subscription"),
             (
                 "changed",
                 json!({ "connectivity": ConnectivityStatus::from_nm_code(4) }),

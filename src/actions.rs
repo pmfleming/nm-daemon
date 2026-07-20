@@ -145,24 +145,24 @@ pub(crate) fn print_saved_profiles(nm: &Nm) -> Result<()> {
 pub(crate) fn run_profile_command(nm: &Nm, command: ProfileCommand) -> Result<()> {
     let operation = match command {
         ProfileCommand::Delete { path } => {
-            tracing::info!(path = %path, "deleting saved Wi-Fi profile");
+            tracing::info!(path = %path.as_str(), "deleting saved Wi-Fi profile");
             ProfileOperation::Delete { path }
         }
         ProfileCommand::Autoconnect { path, enabled } => {
-            tracing::info!(path = %path, enabled, "setting saved Wi-Fi profile autoconnect");
+            tracing::info!(path = %path.as_str(), enabled, "setting saved Wi-Fi profile autoconnect");
             ProfileOperation::SetAutoconnect { path, enabled }
         }
         ProfileCommand::MacRandomization { path, randomized } => {
-            tracing::info!(path = %path, randomized, "setting saved Wi-Fi profile MAC privacy");
+            tracing::info!(path = %path.as_str(), randomized, "setting saved Wi-Fi profile MAC privacy");
             ProfileOperation::SetMacRandomization { path, randomized }
         }
         ProfileCommand::Share { path } => {
-            tracing::info!(path = %path, "building saved Wi-Fi profile share payload");
+            tracing::info!(path = %path.as_str(), "building saved Wi-Fi profile share payload");
             ProfileOperation::Share { path }
         }
         ProfileCommand::SendHostname { path, enabled } => {
             tracing::info!(
-                path = %path,
+                path = %path.as_str(),
                 enabled,
                 "setting saved Wi-Fi profile DHCP hostname privacy"
             );

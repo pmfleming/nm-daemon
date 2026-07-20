@@ -15,10 +15,7 @@ use crate::model::{
 use crate::nm::Nm;
 use anyhow::Result;
 
-/// Canonical, transport-neutral entry point for user-facing NetworkManager operations.
-///
-/// CLI commands and D-Bus handlers should only translate requests/results at their boundary;
-/// validation, cache policy, enrichment, and NetworkManager orchestration live here.
+/// Transport-neutral operations layer; boundaries only translate requests and results.
 pub(crate) struct Application<'a> {
     nm: &'a Nm,
     background_scans: Option<&'a dyn BackgroundScanScheduler>,

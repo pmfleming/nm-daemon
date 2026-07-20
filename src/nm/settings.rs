@@ -180,7 +180,7 @@ impl Nm {
             available: !values.is_empty(),
             kind: spec.kind.to_string(),
             setting_name: spec.setting_name.map(str::to_string),
-            secret_keys: spec.secret_keys.clone(),
+            secret_keys: spec.secret_keys,
             primary_secret_key: spec.primary_secret_key,
             values,
             password,

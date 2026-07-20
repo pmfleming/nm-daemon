@@ -5,6 +5,33 @@ use zvariant::OwnedObjectPath;
 
 use super::{display_ssid, validate_bssid, validate_ssid_bytes};
 
+macro_rules! string_identity {
+    ($identity:ty) => {
+        impl $identity {
+            pub(crate) fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $identity {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Self::parse(String::deserialize(deserializer)?).map_err(D::Error::custom)
+            }
+        }
+
+        impl std::str::FromStr for $identity {
+            type Err = anyhow::Error;
+
+            fn from_str(value: &str) -> Result<Self> {
+                Self::parse(value.to_string())
+            }
+        }
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Ssid {
     bytes: Vec<u8>,
@@ -46,34 +73,9 @@ impl Bssid {
         validate_bssid(&value)?;
         Ok(Self(value.replace('-', ":").to_ascii_uppercase()))
     }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
-impl std::fmt::Display for Bssid {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for Bssid {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::parse(String::deserialize(deserializer)?).map_err(D::Error::custom)
-    }
-}
-
-impl std::str::FromStr for Bssid {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::parse(value.to_string())
-    }
-}
+string_identity!(Bssid);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -91,34 +93,9 @@ impl InterfaceName {
         }
         Ok(Self(value))
     }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
-impl std::fmt::Display for InterfaceName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for InterfaceName {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::parse(String::deserialize(deserializer)?).map_err(D::Error::custom)
-    }
-}
-
-impl std::str::FromStr for InterfaceName {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::parse(value.to_string())
-    }
-}
+string_identity!(InterfaceName);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -130,31 +107,6 @@ impl NmObjectPath {
             .map_err(anyhow::Error::from)
             .map(|_| Self(value))
     }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
-impl std::fmt::Display for NmObjectPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for NmObjectPath {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::parse(String::deserialize(deserializer)?).map_err(D::Error::custom)
-    }
-}
-
-impl std::str::FromStr for NmObjectPath {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::parse(value.to_string())
-    }
-}
+string_identity!(NmObjectPath);

@@ -100,7 +100,7 @@ pub(crate) fn refresh_payloads(
                     .connectivity()
                     .map(|connectivity| json!(connectivity)),
             })
-            .and_then(log_refresh_error),
+            .and_then(log_typed_refresh_error),
     };
     tracing::debug!(
         need_status,
@@ -120,16 +120,6 @@ pub(crate) fn refresh_payloads(
 }
 
 fn log_typed_refresh_error<T>(result: anyhow::Result<T>) -> Option<T> {
-    match result {
-        Ok(value) => Some(value),
-        Err(error) => {
-            tracing::warn!(error = %crate::error::err_chain(&error), "shared subscription refresh failed");
-            None
-        }
-    }
-}
-
-fn log_refresh_error(result: anyhow::Result<Value>) -> Option<Value> {
     match result {
         Ok(value) => Some(value),
         Err(error) => {

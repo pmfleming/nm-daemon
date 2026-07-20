@@ -11,11 +11,12 @@ use zbus::blocking::{Connection, Proxy};
 use zbus::object_server::SignalEmitter;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
-use crate::daemon::{DBUS_OBJECT_PATH, emit_json_event_nonfatal};
+use crate::daemon::emit_json_event_nonfatal;
 use crate::error::best_effort;
 use crate::generated::SECRET_TIMEOUT;
 use crate::nm::{ConnectionSettings, NM_DEST};
 use crate::output::api_data_value;
+use crate::protocol::DBUS_OBJECT_PATH;
 use crate::protocol::{Method, Stream};
 use crate::variant::value_string;
 
