@@ -427,7 +427,11 @@ impl Nm {
         Ok(None)
     }
 
-    fn connection_matches_ssid(&self, path: &OwnedObjectPath, ssid_bytes: &[u8]) -> Result<bool> {
+    pub(super) fn connection_matches_ssid(
+        &self,
+        path: &OwnedObjectPath,
+        ssid_bytes: &[u8],
+    ) -> Result<bool> {
         self.connection_settings_match(path, |settings| {
             settings_match_wifi_ssid(settings, ssid_bytes)
         })

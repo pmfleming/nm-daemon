@@ -140,7 +140,7 @@ Events:
 - `failed`
 - `cancelled`
 
-Cancellation is deep and best-effort for the connect task: the daemon sets its cancellation flag, wakes activation waits, and queues a NetworkManager disconnect to abort an in-flight activation. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call, but transitions check cancellation before and after those calls. Cancellation is coordinated by the shared runtime; it does not add a watcher thread per connection.
+Cancellation is deep and best-effort for the connect task: the daemon sets its cancellation flag, wakes activation waits, and queues a target-guarded NetworkManager activation abort. Before deactivation it resolves the current active-connection object's profile and requires that profile's exact SSID bytes to match the cancelled request; it then deactivates the captured object path rather than re-querying whichever connection is active later. If the attempt has already failed and NetworkManager restored another profile, cancellation is a no-op. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call, but transitions check cancellation before and after those calls. Cancellation is coordinated by the shared runtime; it does not add a watcher thread per connection.
 
 The underlying connection workflow is the canonical `AlreadyActive → SavedProfile → CreateProfile → Rescan → Verify` NetworkManager D-Bus state machine. One targeted rescan is allowed for missing visible targets, terminal authentication/authorization failures remain terminal, and a failed profile created by the attempt is cleaned up centrally. Activation success requires exact SSID bytes; requested BSSID and AP object path are selection hints and are logged rather than enforced after NetworkManager may roam.
 
@@ -208,7 +208,7 @@ Implemented here:
 4. Method keys for status, connectivity, networks, disconnect, and saved-profile operations.
 5. Event-driven `wifi.scan` and `wifi.connectTarget`.
 6. Signal-driven `wifi.status` and `network.connectivity` subscription events.
-7. Deep best-effort connect/scan cancellation through the shared runtime and command gateway.
+7. Deep best-effort connect/scan cancellation through the shared runtime and command gateway, with active-profile identity checks before a connect abort can deactivate NetworkManager state.
 8. Real NetworkManager SecretAgent registration on the system bus.
 9. Secret Service keyring lookup/store/delete for known NetworkManager secret keys, with explicit pending/prompt-unsupported/failure outcomes.
 10. CLI forwarding for compatible methods with direct-mode recovery escape hatches.

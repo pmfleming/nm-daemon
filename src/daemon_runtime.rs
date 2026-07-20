@@ -43,6 +43,11 @@ struct TaskHandle {
     cancellation: Arc<AtomicBool>,
 }
 
+struct CancelledTask {
+    kind: TaskKind,
+    target_ssid: Option<Vec<u8>>,
+}
+
 pub(crate) struct DaemonRuntime {
     nm: Arc<Nm>,
     work: SyncSender<Job>,
@@ -224,36 +229,46 @@ impl DaemonRuntime {
     }
 
     pub(crate) fn cancel(&self, request_id: &str) -> CancelOutcome {
-        let task_kind = self.cancel_task(request_id);
+        let task = self.cancel_task(request_id);
         self.nm.wake_waiters();
-        self.abort_cancelled_connect(request_id, task_kind);
-        self.cancel_subscription(request_id, task_kind.is_some())
+        self.abort_cancelled_connect(request_id, task.as_ref());
+        self.cancel_subscription(request_id, task.is_some())
     }
 
-    fn cancel_task(&self, request_id: &str) -> Option<TaskKind> {
+    fn cancel_task(&self, request_id: &str) -> Option<CancelledTask> {
         self.tasks
             .lock()
             .expect("daemon task map poisoned")
             .get(request_id)
             .map(|task| {
                 task.cancellation.store(true, Ordering::Relaxed);
-                task.kind
+                CancelledTask {
+                    kind: task.kind,
+                    target_ssid: task.target_ssid.clone(),
+                }
             })
     }
 
-    fn abort_cancelled_connect(&self, request_id: &str, task_kind: Option<TaskKind>) {
-        if task_kind == Some(TaskKind::Connect)
-            && let Err(error) = self.submit_activation_abort(request_id.to_string())
-        {
+    fn abort_cancelled_connect(&self, request_id: &str, task: Option<&CancelledTask>) {
+        let Some(target_ssid) = task
+            .filter(|task| task.kind == TaskKind::Connect)
+            .and_then(|task| task.target_ssid.clone())
+        else {
+            return;
+        };
+        if let Err(error) = self.submit_activation_abort(request_id.to_string(), target_ssid) {
             tracing::warn!(error = %crate::error::err_chain(&error), "could not queue activation abort");
         }
     }
 
-    fn submit_activation_abort(&self, request_id: String) -> Result<()> {
+    fn submit_activation_abort(&self, request_id: String, target_ssid: Vec<u8>) -> Result<()> {
         self.submit_fast(
             ErrorOperation::Disconnect,
             Box::new(move |nm| {
-                log_activation_abort(&request_id, Application::new(nm).disconnect())
+                log_activation_abort(
+                    &request_id,
+                    Application::new(nm).disconnect_wifi_for_ssid(&target_ssid),
+                )
             }),
         )
     }
@@ -556,8 +571,11 @@ fn submit_shared_refresh(
 
 fn log_activation_abort(request_id: &str, result: Result<crate::model::DisconnectResult>) {
     match result {
-        Ok(result) => {
+        Ok(result) if result.status == "disconnected" => {
             tracing::info!(%request_id, message = %result.message, "aborted NetworkManager activation after cancellation")
+        }
+        Ok(result) => {
+            tracing::info!(%request_id, message = %result.message, "skipped activation abort after cancelled target stopped matching")
         }
         Err(error) => {
             tracing::warn!(%request_id, error = %crate::error::err_chain(&error), "failed to abort NetworkManager activation after cancellation")

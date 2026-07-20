@@ -1,7 +1,9 @@
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::application::Application;
 use crate::error::{DomainError, best_effort};
+use crate::model::WifiConnectTarget;
 use crate::nm::Nm;
 
 pub(crate) fn cancellation_is_set(cancellation: Option<&AtomicBool>) -> bool {
@@ -16,11 +18,15 @@ pub(crate) fn check_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
     }
 }
 
-pub(crate) fn check_cancelled_and_abort(nm: &Nm, cancellation: Option<&AtomicBool>) -> Result<()> {
+pub(crate) fn check_cancelled_and_abort(
+    nm: &Nm,
+    target: &WifiConnectTarget,
+    cancellation: Option<&AtomicBool>,
+) -> Result<()> {
     if !cancellation_is_set(cancellation) {
         return Ok(());
     }
-    abort_activation(nm);
+    abort_activation(nm, target);
     cancelled_error()
 }
 
@@ -28,11 +34,15 @@ pub(crate) fn cancelled_error<T>() -> Result<T> {
     Err(DomainError::cancelled("connection attempt cancelled").into())
 }
 
-pub(crate) fn abort_activation(nm: &Nm) {
+pub(crate) fn abort_activation(nm: &Nm, target: &WifiConnectTarget) {
     if let Some(result) = best_effort(
         "failed to abort Wi-Fi activation after cancellation",
-        || nm.disconnect_wifi(),
+        || Application::new(nm).disconnect_wifi_for_ssid(target.ssid_bytes()),
     ) {
-        tracing::info!(message = %result.message, "aborted Wi-Fi activation after cancellation");
+        if result.status == "disconnected" {
+            tracing::info!(ssid = %target.ssid, message = %result.message, "aborted Wi-Fi activation after cancellation");
+        } else {
+            tracing::info!(ssid = %target.ssid, message = %result.message, "skipped activation abort after cancelled target stopped matching");
+        }
     }
 }

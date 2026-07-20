@@ -109,14 +109,14 @@ Directional transmit and receive link rates bypass the command gateway. `src/nl8
 The daemon creates one shared `Nm` instance and therefore one NetworkManager system-bus connection. `DaemonRuntime` owns:
 
 - a bounded long-running work queue for cancellable scan/connect jobs;
-- a separate bounded fast lane for synchronous calls, status refreshes, and activation aborts so they do not queue behind multi-second jobs;
+- a separate bounded fast lane for synchronous calls, status refreshes, and target-guarded activation aborts so they do not queue behind multi-second jobs;
 - cancellable scan/connect task registrations;
 - one control/event loop for all subscriptions;
 - NetworkManager change notifications;
 - coalesced status/connectivity refreshes shared by all subscribers;
 - coalesced background cache refreshes.
 
-Continuous streams are signal-driven, not one polling thread per subscription. Each refresh is computed once for the set of interested subscribers, and duplicate invalidations are coalesced without losing the final change. `Cancel` marks a task, wakes activation waits, and queues a best-effort NetworkManager disconnect for connect cancellation.
+Continuous streams are signal-driven, not one polling thread per subscription. Each refresh is computed once for the set of interested subscribers, and duplicate invalidations are coalesced without losing the final change. `Cancel` marks a task, wakes activation waits, and queues a best-effort activation abort for connect cancellation. The task registration retains the requested SSID bytes; the abort resolves the current active-connection object and its profile, deactivates that captured object path only when the profile still matches those bytes, and otherwise returns a no-op. This closes the race where a failed target hands control back to NetworkManager and a late cancel could otherwise disconnect the healthy profile NetworkManager restored.
 
 ## SecretAgent and Secret Service
 

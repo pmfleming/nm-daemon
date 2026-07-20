@@ -107,15 +107,60 @@ impl Nm {
                 message: "No active Wi-Fi connection".to_string(),
             });
         };
+        self.deactivate_wifi_connection(active_connection_path, "Disconnected Wi-Fi".to_string())
+    }
 
+    pub(crate) fn disconnect_wifi_for_ssid(&self, target_ssid: &[u8]) -> Result<DisconnectResult> {
+        for device in self.wifi_devices()? {
+            let Some(active_connection_path) = self.device_active_connection_path(&device.path)?
+            else {
+                continue;
+            };
+            if !self.active_connection_matches_ssid(&active_connection_path, target_ssid)? {
+                continue;
+            }
+            return self.deactivate_wifi_connection(
+                active_connection_path,
+                format!(
+                    "Cancelled connection to {}",
+                    crate::model::display_ssid(target_ssid)
+                ),
+            );
+        }
+        Ok(DisconnectResult {
+            status: "noop",
+            message: format!(
+                "Cancelled target {} is no longer active or activating",
+                crate::model::display_ssid(target_ssid)
+            ),
+        })
+    }
+
+    fn deactivate_wifi_connection(
+        &self,
+        active_connection_path: OwnedObjectPath,
+        message: String,
+    ) -> Result<DisconnectResult> {
         tracing::info!(connection = %active_connection_path, "deactivating active Wi-Fi connection");
         let nm = self.root_proxy();
         nm.call::<_, _, ()>("DeactivateConnection", &(active_connection_path,))
             .context("DeactivateConnection for active Wi-Fi connection")?;
         Ok(DisconnectResult {
             status: "disconnected",
-            message: "Disconnected Wi-Fi".to_string(),
+            message,
         })
+    }
+
+    fn active_connection_matches_ssid(
+        &self,
+        active_connection_path: &OwnedObjectPath,
+        target_ssid: &[u8],
+    ) -> Result<bool> {
+        let Some(profile_path) = self.active_connection_profile_path(active_connection_path) else {
+            tracing::debug!(connection = %active_connection_path, "could not verify active Wi-Fi profile; skipping targeted disconnect");
+            return Ok(false);
+        };
+        self.connection_matches_ssid(&profile_path, target_ssid)
     }
 
     fn active_wifi_connection_path(&self) -> Result<Option<OwnedObjectPath>> {

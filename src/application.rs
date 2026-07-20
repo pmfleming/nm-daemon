@@ -349,6 +349,23 @@ impl<'a> Application<'a> {
         Ok(result)
     }
 
+    pub(crate) fn disconnect_wifi_for_ssid(&self, ssid: &[u8]) -> Result<DisconnectResult> {
+        let result = operation_result(
+            ErrorOperation::Disconnect,
+            self.nm.disconnect_wifi_for_ssid(ssid),
+        )?;
+        self.clear_disconnected_cache(&result);
+        Ok(result)
+    }
+
+    fn clear_disconnected_cache(&self, result: &DisconnectResult) {
+        if result.status == "disconnected" {
+            best_effort("failed to clear active Wi-Fi cache", || {
+                cache::clear_active_connection_cache()
+            });
+        }
+    }
+
     fn load_networks(
         &self,
         request: &NetworksRequest,

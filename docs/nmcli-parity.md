@@ -59,7 +59,7 @@ The local NetworkManager source was reviewed at commit `4114b664e9` (`meson.buil
 - Connect waits are signal-assisted by NetworkManager property changes and retain a bounded poll fallback for missed signals.
 - Connect caching waits briefly for DHCP/IP details before remembering the connection.
 - Enriched network JSON carries `last_connection` so Shelllist can show cached details for previously connected networks.
-- Connect cancellation is deep and best-effort: activation waits are interrupted and NetworkManager is asked to abort active Wi-Fi activation.
+- Connect cancellation is deep and best-effort: activation waits are interrupted, but deactivation occurs only when the current active-connection profile still matches the cancelled target's exact SSID bytes. The captured active-connection object path is deactivated, preventing a late cancel from tearing down a different profile that NetworkManager reactivated after failure.
 - Successful activation verification uses exact SSID bytes; requested BSSID/AP paths are logged as selection hints and do not cause false post-roaming timeouts.
 
 ## Subprocess boundary

@@ -31,13 +31,13 @@ pub(crate) fn wait_for_active_target(
     let mut wait = ActivationWait::default();
     let mut event_generation = nm.event_generation();
     while !deadline.expired() {
-        check_cancelled_and_abort(nm, cancellation)?;
+        check_cancelled_and_abort(nm, target, cancellation)?;
         let ssid_matches = active_ssid_matches(nm, activation_device.as_ref(), target)?;
         let status = activation_status(nm, activation_device.as_ref(), target)?;
         if wait.observe(target, status, ssid_matches)? {
             return Ok(());
         }
-        check_cancelled_and_abort(nm, cancellation)?;
+        check_cancelled_and_abort(nm, target, cancellation)?;
         event_generation = nm.wait_for_event(event_generation, deadline.wait(Duration::MAX));
     }
     Err(wait.timeout_error(target))
