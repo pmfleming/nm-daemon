@@ -6,12 +6,13 @@ use anyhow::Result;
 use zvariant::OwnedValue;
 
 use super::{ConnectionSettings, owned_value};
+use crate::auth::WifiAuthentication;
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     AccessPoint, EnterpriseAuth, WepKeyType, WifiConnectTarget, ap_uses_owe, enterprise_key_mgmt,
 };
 use crate::variant::{insert_optional_strings, insert_optional_u32s, insert_string};
-pub(super) use profile::apply_target_profile_settings;
+pub(super) use profile::{apply_target_connection_metadata, apply_target_profile_settings};
 
 pub(super) fn psk_wifi_connection_settings(
     ap: &AccessPoint,
@@ -31,6 +32,32 @@ pub(super) fn owe_wifi_connection_settings() -> Result<ConnectionSettings> {
         "key-mgmt".to_string(),
         owned_value("owe".to_string())?,
     )])))
+}
+
+pub(super) fn visible_connection_settings(
+    target: &WifiConnectTarget,
+    ap: &AccessPoint,
+    password: Option<&str>,
+    wep_key_type: Option<WepKeyType>,
+) -> Result<Option<ConnectionSettings>> {
+    match crate::auth::classify(ap.flags, ap.wpa_flags, ap.rsn_flags) {
+        WifiAuthentication::Open => Ok(Some(ConnectionSettings::new())),
+        WifiAuthentication::Owe => owe_wifi_connection_settings().map(Some),
+        WifiAuthentication::Personal => password
+            .map(|password| psk_wifi_connection_settings(ap, password))
+            .transpose(),
+        WifiAuthentication::Wep => password
+            .map(|password| {
+                wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key))
+            })
+            .transpose(),
+        WifiAuthentication::Enterprise => target
+            .enterprise
+            .as_ref()
+            .map(|enterprise| enterprise_wifi_connection_settings(ap, enterprise, password))
+            .transpose(),
+        WifiAuthentication::Unsupported => Ok(None),
+    }
 }
 
 pub(super) fn hidden_wifi_connection_settings(

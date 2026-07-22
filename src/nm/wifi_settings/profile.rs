@@ -5,6 +5,35 @@ use crate::model::{TargetProfileSettings, WifiConnectTarget};
 use crate::nm::ip_settings;
 use crate::nm::{ConnectionSettings, owned_value};
 
+pub(in crate::nm) fn apply_target_connection_metadata(
+    settings: &mut ConnectionSettings,
+    target: &WifiConnectTarget,
+) -> Result<()> {
+    if target.connection_name.is_none() && !target.private {
+        return Ok(());
+    }
+    let connection = settings.entry("connection".to_string()).or_default();
+    if let Some(name) = target
+        .connection_name
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        connection.insert("id".to_string(), owned_value(name.to_string())?);
+        connection
+            .entry("type".to_string())
+            .or_insert(owned_value("802-11-wireless".to_string())?);
+    }
+    if target.private
+        && let Some(user) = current_user_name()
+    {
+        connection.insert(
+            "permissions".to_string(),
+            owned_value(vec![format!("user:{user}:")])?,
+        );
+    }
+    Ok(())
+}
+
 pub(in crate::nm) fn apply_target_profile_settings(
     settings: &mut ConnectionSettings,
     target: &WifiConnectTarget,
@@ -43,6 +72,12 @@ fn apply_connection_settings(
         connection.insert("metered".to_string(), owned_value(metered_code(metered)?)?);
     }
     Ok(())
+}
+
+fn current_user_name() -> Option<String> {
+    ["USER", "LOGNAME"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
 }
 
 fn metered_code(value: &str) -> Result<u32> {

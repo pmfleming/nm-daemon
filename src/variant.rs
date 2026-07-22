@@ -57,19 +57,11 @@ where
     Ok(())
 }
 
-pub(crate) fn insert_optional_u32(
-    section: &mut HashMap<String, OwnedValue>,
-    key: &str,
-    value: Option<u32>,
-) -> Result<()> {
-    insert_optional_value(section, key, value)
-}
-
 pub(crate) fn insert_optional_u32s(
     section: &mut HashMap<String, OwnedValue>,
     values: &[(&str, Option<u32>)],
 ) -> Result<()> {
     values
         .iter()
-        .try_for_each(|(key, value)| insert_optional_u32(section, key, *value))
+        .try_for_each(|(key, value)| insert_optional_value(section, key, *value))
 }

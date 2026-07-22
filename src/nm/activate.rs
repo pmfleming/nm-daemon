@@ -2,13 +2,11 @@ use anyhow::{Context, Result};
 use zvariant::OwnedObjectPath;
 
 use super::wifi_settings::{
-    apply_saved_activation_settings, apply_target_profile_settings,
-    cloned_wifi_connection_settings, enterprise_wifi_connection_settings,
-    hidden_wifi_connection_settings, owe_wifi_connection_settings, psk_wifi_connection_settings,
-    wep_wifi_connection_settings,
+    apply_saved_activation_settings, apply_target_connection_metadata,
+    apply_target_profile_settings, cloned_wifi_connection_settings,
+    hidden_wifi_connection_settings, visible_connection_settings,
 };
-use super::{ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, Nm, owned_value};
-use crate::auth::WifiAuthentication;
+use super::{ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, Nm};
 use crate::error::DomainError;
 use crate::model::{WepKeyType, WifiConnectTarget};
 
@@ -24,34 +22,7 @@ impl Nm {
         else {
             return Ok(false);
         };
-        let supplied_credentials = password.is_some() || target.enterprise.is_some();
-        if supplied_credentials {
-            let visible_ap = self
-                .visible_access_point_for(target)?
-                .map(|(_device, _path, ap)| ap);
-            let mut settings = self.connection_settings(&connection_path)?;
-            apply_saved_activation_settings(
-                &mut settings,
-                target,
-                visible_ap.as_ref(),
-                password,
-                wep_key_type,
-            )?;
-            apply_target_connection_metadata(&mut settings, target)?;
-            tracing::info!(ssid = %target.ssid, connection = %connection_path, "updating compatible saved profile before activation");
-            self.update_connection_settings_for_activation(&connection_path, settings)?;
-        } else if self.saved_wifi_connection_needs_secret_agent(&connection_path, None)? {
-            tracing::info!(ssid = %target.ssid, connection = %connection_path, "saved Wi-Fi profile needs a secret agent before activation");
-            return Err(DomainError::connect(
-                crate::model::ConnectFailureReason::PasswordUnavailable,
-                format!(
-                    "saved Wi-Fi profile for {} requires a secret agent or a newly supplied password",
-                    target.ssid
-                ),
-            )
-            .with_detail("ssid", target.ssid.to_string())
-            .into());
-        }
+        self.prepare_saved_activation(&connection_path, target, password, wep_key_type)?;
         tracing::info!(
             ssid = %target.ssid,
             connection = %connection_path,
@@ -69,6 +40,36 @@ impl Nm {
                 format!("ActivateConnection for saved Wi-Fi profile {}", target.ssid)
             })?;
         Ok(true)
+    }
+
+    fn prepare_saved_activation(
+        &self,
+        connection_path: &OwnedObjectPath,
+        target: &WifiConnectTarget,
+        password: Option<&str>,
+        wep_key_type: Option<WepKeyType>,
+    ) -> Result<()> {
+        if password.is_some() || target.enterprise.is_some() {
+            let visible_ap = self
+                .visible_access_point_for(target)?
+                .map(|(_device, _path, ap)| ap);
+            let mut settings = self.connection_settings(connection_path)?;
+            apply_saved_activation_settings(
+                &mut settings,
+                target,
+                visible_ap.as_ref(),
+                password,
+                wep_key_type,
+            )?;
+            apply_target_connection_metadata(&mut settings, target)?;
+            tracing::info!(ssid = %target.ssid, connection = %connection_path, "updating compatible saved profile before activation");
+            return self.update_connection_settings_for_activation(connection_path, settings);
+        }
+        if !self.saved_wifi_connection_needs_secret_agent(connection_path, None)? {
+            return Ok(());
+        }
+        tracing::info!(ssid = %target.ssid, connection = %connection_path, "saved Wi-Fi profile needs a secret agent before activation");
+        Err(missing_saved_profile_password(target))
     }
 
     pub(crate) fn add_and_activate_wifi_connection_for(
@@ -95,33 +96,37 @@ impl Nm {
             rsn_flags = ap.rsn_flags,
             "preparing D-Bus add-and-activate for visible Wi-Fi network"
         );
-        if (password.is_some() || target.enterprise.is_some())
-            && let Some(saved_settings) =
-                self.saved_wifi_connection_settings_for_ap_on_device(&ap, &device)?
-        {
-            tracing::info!(ssid = %target.ssid, "cloning compatible saved profile settings for password/credential-supplied activation");
-            let mut settings = cloned_wifi_connection_settings(
-                saved_settings,
-                target,
-                &ap,
-                password,
-                wep_key_type,
-            )?;
-            apply_target_connection_metadata(&mut settings, target)?;
-            return self
-                .add_and_activate(target.ssid.as_str(), settings, device.path, ap_path)
-                .map(Some);
-        }
-
-        let Some(mut settings) = visible_connection_settings(target, &ap, password, wep_key_type)?
+        let Some(mut settings) =
+            self.visible_activation_settings(&device, target, &ap, password, wep_key_type)?
         else {
             return Ok(None);
         };
-
         apply_target_connection_metadata(&mut settings, target)?;
-        apply_target_profile_settings(&mut settings, target)?;
         self.add_and_activate(target.ssid.as_str(), settings, device.path, ap_path)
             .map(Some)
+    }
+
+    fn visible_activation_settings(
+        &self,
+        device: &crate::model::WifiDevice,
+        target: &WifiConnectTarget,
+        ap: &crate::model::AccessPoint,
+        password: Option<&str>,
+        wep_key_type: Option<WepKeyType>,
+    ) -> Result<Option<ConnectionSettings>> {
+        if (password.is_some() || target.enterprise.is_some())
+            && let Some(saved) = self.saved_wifi_connection_settings_for_ap_on_device(ap, device)?
+        {
+            tracing::info!(ssid = %target.ssid, "cloning compatible saved profile settings for password/credential-supplied activation");
+            return cloned_wifi_connection_settings(saved, target, ap, password, wep_key_type)
+                .map(Some);
+        }
+        let Some(mut settings) = visible_connection_settings(target, ap, password, wep_key_type)?
+        else {
+            return Ok(None);
+        };
+        apply_target_profile_settings(&mut settings, target)?;
+        Ok(Some(settings))
     }
 
     fn add_and_activate_hidden_wifi_connection(
@@ -228,105 +233,16 @@ impl Nm {
     }
 }
 
-fn visible_connection_settings(
-    target: &WifiConnectTarget,
-    ap: &crate::model::AccessPoint,
-    password: Option<&str>,
-    wep_key_type: Option<WepKeyType>,
-) -> Result<Option<ConnectionSettings>> {
-    match crate::auth::classify(ap.flags, ap.wpa_flags, ap.rsn_flags) {
-        WifiAuthentication::Open => {
-            tracing::debug!(ssid = %target.ssid, "network is open/passwordless");
-            Ok(Some(ConnectionSettings::new()))
-        }
-        WifiAuthentication::Owe => {
-            tracing::debug!(ssid = %target.ssid, "network uses OWE passwordless encryption");
-            owe_wifi_connection_settings().map(Some)
-        }
-        WifiAuthentication::Personal => personal_connection_settings(target, ap, password),
-        WifiAuthentication::Wep => wep_connection_settings(target, password, wep_key_type),
-        WifiAuthentication::Enterprise => enterprise_connection_settings(target, ap, password),
-        WifiAuthentication::Unsupported => {
-            tracing::info!(ssid = %target.ssid, security = %ap.security, "unsupported visible network security for D-Bus add-and-activate");
-            Ok(None)
-        }
-    }
-}
-
-fn personal_connection_settings(
-    target: &WifiConnectTarget,
-    ap: &crate::model::AccessPoint,
-    password: Option<&str>,
-) -> Result<Option<ConnectionSettings>> {
-    let Some(password) = password else {
-        tracing::info!(ssid = %target.ssid, "WPA/SAE network needs a password; no password supplied to D-Bus add-and-activate");
-        return Ok(None);
-    };
-    tracing::debug!(ssid = %target.ssid, key_mgmt = %crate::auth::personal_key_management(ap.wpa_flags, ap.rsn_flags), "network supports WPA/SAE personal authentication");
-    psk_wifi_connection_settings(ap, password).map(Some)
-}
-
-fn wep_connection_settings(
-    target: &WifiConnectTarget,
-    password: Option<&str>,
-    wep_key_type: Option<WepKeyType>,
-) -> Result<Option<ConnectionSettings>> {
-    let Some(password) = password else {
-        tracing::info!(ssid = %target.ssid, "WEP network needs a key/passphrase; no password supplied to D-Bus add-and-activate");
-        return Ok(None);
-    };
-    tracing::debug!(ssid = %target.ssid, wep_key_type = ?wep_key_type, "network appears to use WEP authentication");
-    wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key)).map(Some)
-}
-
-fn enterprise_connection_settings(
-    target: &WifiConnectTarget,
-    ap: &crate::model::AccessPoint,
-    password: Option<&str>,
-) -> Result<Option<ConnectionSettings>> {
-    let Some(enterprise) = &target.enterprise else {
-        tracing::info!(ssid = %target.ssid, "enterprise network needs structured 802.1X credentials; none supplied to D-Bus add-and-activate");
-        return Ok(None);
-    };
-    tracing::debug!(ssid = %target.ssid, eap = ?enterprise.eap, "network supports WPA-Enterprise authentication");
-    enterprise_wifi_connection_settings(ap, enterprise, password).map(Some)
-}
-
-fn apply_target_connection_metadata(
-    settings: &mut ConnectionSettings,
-    target: &WifiConnectTarget,
-) -> Result<()> {
-    if target.connection_name.is_none() && !target.private {
-        return Ok(());
-    }
-    let connection = settings.entry("connection".to_string()).or_default();
-    if let Some(name) = target
-        .connection_name
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        connection.insert("id".to_string(), owned_value(name.to_string())?);
-        connection
-            .entry("type".to_string())
-            .or_insert(owned_value("802-11-wireless".to_string())?);
-    }
-    if target.private
-        && let Some(user) = current_user_name()
-    {
-        connection.insert(
-            "permissions".to_string(),
-            owned_value(vec![format!("user:{user}:")])?,
-        );
-    }
-    Ok(())
-}
-
-fn current_user_name() -> Option<String> {
-    std::env::var("USER")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var("LOGNAME").ok())
-        .filter(|value| !value.is_empty())
+fn missing_saved_profile_password(target: &WifiConnectTarget) -> anyhow::Error {
+    DomainError::connect(
+        crate::model::ConnectFailureReason::PasswordUnavailable,
+        format!(
+            "saved Wi-Fi profile for {} requires a secret agent or a newly supplied password",
+            target.ssid
+        ),
+    )
+    .with_detail("ssid", target.ssid.to_string())
+    .into()
 }
 
 fn root_object_path() -> Result<OwnedObjectPath> {

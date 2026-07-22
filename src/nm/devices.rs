@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::fs;
 
 use anyhow::{Context, Result};
@@ -339,14 +339,18 @@ fn access_point_matches(
 }
 
 fn merge_access_point(by_ssid: &mut BTreeMap<Vec<u8>, AccessPoint>, ap: AccessPoint) {
-    by_ssid
-        .entry(ap.ssid_bytes().into_owned())
-        .and_modify(|existing| {
-            if ap.active || (!existing.active && ap.strength > existing.strength) {
-                *existing = ap.clone();
-            }
-        })
-        .or_insert(ap);
+    let key = ap.ssid_bytes().into_owned();
+    match by_ssid.entry(key) {
+        Entry::Occupied(mut entry)
+            if ap.active || (!entry.get().active && ap.strength > entry.get().strength) =>
+        {
+            entry.insert(ap);
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(ap);
+        }
+        Entry::Occupied(_) => {}
+    }
 }
 
 fn sorted_access_points(by_ssid: BTreeMap<Vec<u8>, AccessPoint>) -> Vec<AccessPoint> {

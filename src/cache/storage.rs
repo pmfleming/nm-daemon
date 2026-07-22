@@ -140,15 +140,22 @@ where
     reject_symlink_file(path, "history file")?;
     let mut line = serde_json::to_vec(value).context("serialize JSONL record")?;
     line.push(b'\n');
-    let current_bytes = match fs::metadata(path) {
-        Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
-        Err(error) => return Err(error).with_context(|| format!("stat {}", path.display())),
-    };
+    let current_bytes = file_len_or_zero(path)?;
     if current_bytes > 0 && current_bytes.saturating_add(line.len() as u64) > max_bytes {
         rotate_files(path, rotations)?;
     }
+    append_private_file(path, &line)
+}
 
+fn file_len_or_zero(path: &Path) -> Result<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error).with_context(|| format!("stat {}", path.display())),
+    }
+}
+
+fn append_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -159,7 +166,7 @@ where
     let mut file = options
         .open(path)
         .with_context(|| format!("open {}", path.display()))?;
-    file.write_all(&line)
+    file.write_all(contents)
         .with_context(|| format!("write {}", path.display()))?;
     file.sync_data()
         .with_context(|| format!("sync {}", path.display()))?;
@@ -273,47 +280,53 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn create_private_dir_all_unix(path: &Path) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
-    match fs::symlink_metadata(path) {
-        Ok(link_metadata) => {
-            if link_metadata.file_type().is_symlink() {
-                anyhow::bail!(
-                    "refusing to use symlinked cache directory {}",
-                    path.display()
-                );
-            }
-            let metadata =
-                fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-            if !metadata.is_dir() {
-                anyhow::bail!("{} exists but is not a directory", path.display());
-            }
-            let current_uid = current_euid();
-            if metadata.uid() != current_uid {
-                anyhow::bail!(
-                    "refusing to use {} owned by uid {}; expected uid {}",
-                    path.display(),
-                    metadata.uid(),
-                    current_uid
-                );
-            }
-            if metadata.mode() & 0o077 != 0 {
-                fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                    .with_context(|| format!("chmod 0700 {}", path.display()))?;
-            }
-            return Ok(());
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("lstat {}", path.display()));
-        }
+    if let Some(metadata) = private_dir_metadata(path)? {
+        return secure_existing_private_dir(path, &metadata);
     }
-
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true).mode(0o700);
     builder
         .create(path)
         .with_context(|| format!("create {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod 0700 {}", path.display()))
+}
+
+#[cfg(unix)]
+fn private_dir_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("lstat {}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+fn secure_existing_private_dir(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "refusing to use symlinked cache directory {}",
+            path.display()
+        );
+    }
+    if !metadata.is_dir() {
+        anyhow::bail!("{} exists but is not a directory", path.display());
+    }
+    let current_uid = current_euid();
+    if metadata.uid() != current_uid {
+        anyhow::bail!(
+            "refusing to use {} owned by uid {}; expected {current_uid}",
+            path.display(),
+            metadata.uid()
+        );
+    }
+    if metadata.mode() & 0o077 == 0 {
+        return Ok(());
+    }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("chmod 0700 {}", path.display()))
 }

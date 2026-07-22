@@ -112,15 +112,14 @@ fn split_fields(line: &str) -> Vec<String> {
     let mut current = String::new();
     let mut escaped = false;
     for character in line.chars() {
-        if escaped {
-            current.push(character);
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if character == ':' {
-            fields.push(std::mem::take(&mut current));
-        } else {
-            current.push(character);
+        match character {
+            _ if escaped => {
+                current.push(character);
+                escaped = false;
+            }
+            '\\' => escaped = true,
+            ':' => fields.push(std::mem::take(&mut current)),
+            _ => current.push(character),
         }
     }
     fields.push(current);
