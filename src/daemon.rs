@@ -218,7 +218,9 @@ pub(crate) fn emit_json_event_nonfatal(
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
     use zbus::blocking::Proxy;
@@ -251,6 +253,47 @@ mod tests {
 
     #[test]
     fn dbus_dispatch_and_subscription_lifecycle_runs_against_fake_networkmanager() {
+        const ATTEMPTS: usize = 5;
+        const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
+        const CHILD_ENV: &str = "NM_DAEMON_DBUS_TEST_CHILD";
+        const TEST_NAME: &str = "daemon::tests::dbus_dispatch_and_subscription_lifecycle_runs_against_fake_networkmanager";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            run_dbus_lifecycle_test();
+            return;
+        }
+
+        // zbus's in-memory peer transport can rarely stop dispatching while a
+        // blocking call is in flight. Run the integration body in a bounded
+        // child process so a wedged executor is discarded before retrying.
+        for attempt in 1..=ATTEMPTS {
+            let mut child = Command::new(std::env::current_exe().expect("locate test executable"))
+                .args(["--exact", TEST_NAME, "--test-threads=1"])
+                .env(CHILD_ENV, "1")
+                .spawn()
+                .expect("spawn bounded D-Bus lifecycle test");
+            let started = Instant::now();
+
+            loop {
+                if let Some(status) = child.try_wait().expect("poll D-Bus lifecycle test") {
+                    assert!(status.success(), "D-Bus lifecycle test child failed");
+                    return;
+                }
+                if started.elapsed() >= ATTEMPT_TIMEOUT {
+                    child.kill().expect("stop timed-out D-Bus lifecycle test");
+                    child.wait().expect("reap timed-out D-Bus lifecycle test");
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            if attempt == ATTEMPTS {
+                panic!("D-Bus lifecycle test timed out after {ATTEMPTS} attempts");
+            }
+        }
+    }
+
+    fn run_dbus_lifecycle_test() {
         let networkmanager = TestPeer::new(":1.0", ":1.1");
         networkmanager
             .server
