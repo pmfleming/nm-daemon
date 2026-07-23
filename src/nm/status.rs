@@ -12,7 +12,7 @@ use crate::command::nmcli::Nmcli;
 use crate::error::ErrorOperation;
 use crate::model::{
     DhcpLeaseStatus, DisconnectResult, Ip4Status, MeteredStatus, SavedWifiConnection, WifiDevice,
-    WifiStatus, WirelessStatus,
+    WifiPowerResult, WifiStatus, WirelessStatus,
 };
 
 const DHCP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.DHCP4Config";
@@ -20,18 +20,40 @@ const IP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.IP4Config";
 
 impl Nm {
     pub(crate) fn wifi_status(&self) -> Result<WifiStatus> {
+        let enabled = self.wireless_enabled()?;
         let profiles = self.saved_wifi_connections()?;
         let connectivity = self.connectivity_check().ok();
 
         for device in self.wifi_devices()? {
             if let Some(status) =
-                self.wifi_status_for_device(&device, &profiles, connectivity.clone())?
+                self.wifi_status_for_device(&device, &profiles, connectivity.clone(), enabled)?
             {
                 return Ok(status);
             }
         }
 
-        Ok(WifiStatus::inactive(None, connectivity))
+        Ok(WifiStatus::inactive(enabled, None, connectivity))
+    }
+
+    pub(crate) fn wireless_enabled(&self) -> Result<bool> {
+        self.root_proxy()
+            .get_property("WirelessEnabled")
+            .context("read NetworkManager WirelessEnabled")
+    }
+
+    pub(crate) fn set_wireless_enabled(&self, enabled: bool) -> Result<WifiPowerResult> {
+        self.root_proxy()
+            .set_property("WirelessEnabled", enabled)
+            .context("set NetworkManager WirelessEnabled")?;
+        self.wake_waiters();
+        Ok(WifiPowerResult {
+            enabled,
+            message: if enabled {
+                "Wi-Fi turned on".to_string()
+            } else {
+                "Wi-Fi turned off".to_string()
+            },
+        })
     }
 
     fn wifi_status_for_device(
@@ -39,11 +61,18 @@ impl Nm {
         device: &WifiDevice,
         profiles: &[SavedWifiConnection],
         connectivity: Option<crate::model::ConnectivityStatus>,
+        enabled: bool,
     ) -> Result<Option<WifiStatus>> {
         let Some(active_connection_path) = self.device_active_connection_path(&device.path)? else {
             return Ok(None);
         };
-        self.active_wifi_status(device, active_connection_path, profiles, connectivity)
+        self.active_wifi_status(
+            device,
+            active_connection_path,
+            profiles,
+            connectivity,
+            enabled,
+        )
     }
 
     fn active_wifi_status(
@@ -52,6 +81,7 @@ impl Nm {
         active_connection_path: OwnedObjectPath,
         profiles: &[SavedWifiConnection],
         connectivity: Option<crate::model::ConnectivityStatus>,
+        enabled: bool,
     ) -> Result<Option<WifiStatus>> {
         let Some(active_ap_path) = self.active_access_point(device)? else {
             return Ok(None);
@@ -71,6 +101,7 @@ impl Nm {
             .and_then(|path| self.connection_timestamp_ms(path));
 
         Ok(Some(WifiStatus {
+            enabled,
             active: true,
             device_iface: Some(device.iface.clone()),
             active_connection_path: Some(active_connection_path.to_string()),

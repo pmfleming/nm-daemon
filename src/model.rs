@@ -117,7 +117,14 @@ pub(crate) struct DisconnectResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct WifiPowerResult {
+    pub(crate) enabled: bool,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct WifiStatus {
+    pub(crate) enabled: bool,
     pub(crate) active: bool,
     pub(crate) device_iface: Option<String>,
     pub(crate) active_connection_path: Option<String>,
@@ -133,10 +140,12 @@ pub(crate) struct WifiStatus {
 
 impl WifiStatus {
     pub(crate) fn inactive(
+        enabled: bool,
         device_iface: Option<String>,
         connectivity: Option<ConnectivityStatus>,
     ) -> Self {
         Self {
+            enabled,
             active: false,
             device_iface,
             active_connection_path: None,

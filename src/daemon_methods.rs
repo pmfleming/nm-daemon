@@ -25,6 +25,20 @@ pub(crate) fn call_status(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
     })
 }
 
+pub(crate) fn call_set_enabled(
+    runtime: &Arc<DaemonRuntime>,
+    params: SetEnabledParams,
+) -> Result<Value> {
+    runtime.call(ErrorOperation::Status, move |nm| {
+        let result = Application::new(nm).set_wifi_enabled(params.enabled)?;
+        api_data_value(
+            Method::WifiSetEnabled.spec().response_key,
+            &result,
+            "serialize Wi-Fi power response JSON",
+        )
+    })
+}
+
 pub(crate) fn call_connectivity(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
     runtime.call(ErrorOperation::Connectivity, |nm| {
         let application = Application::new(nm);
@@ -134,6 +148,12 @@ fn serialize_profile_result(result: ProfileOperationResult) -> Result<Value> {
         &result,
         "serialize profile operation response JSON",
     )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetEnabledParams {
+    enabled: bool,
 }
 
 #[derive(Default, Deserialize)]

@@ -9,8 +9,8 @@ use crate::error::{
 use crate::model::{
     AccessPoint, ConnectResult, ConnectivityStatus, DisconnectResult, InterfaceName, NetworkEntry,
     NmObjectPath, SavedWifiConnection, ScanRequestOptions, WepKeyType, WifiConnectTarget,
-    WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload, WifiStatus,
-    connect_target_for_network, connect_target_for_network_key, validate_ssid_bytes,
+    WifiPowerResult, WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload,
+    WifiStatus, connect_target_for_network, connect_target_for_network_key, validate_ssid_bytes,
 };
 use crate::nm::Nm;
 use anyhow::Result;
@@ -47,6 +47,13 @@ impl<'a> Application<'a> {
 
     pub(crate) fn connectivity(&self) -> Result<ConnectivityStatus> {
         operation_result(ErrorOperation::Connectivity, self.nm.connectivity_check())
+    }
+
+    pub(crate) fn set_wifi_enabled(&self, enabled: bool) -> Result<WifiPowerResult> {
+        operation_result(
+            ErrorOperation::Status,
+            self.nm.set_wireless_enabled(enabled),
+        )
     }
 
     pub(crate) fn networks(&self, request: NetworksRequest) -> Result<NetworksResult> {

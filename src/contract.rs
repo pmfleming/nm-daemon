@@ -8,9 +8,9 @@ use crate::forget::{ForgetProfile, ForgetResult, ForgetStatus};
 use crate::model::{
     AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectResult, ConnectivityStatus,
     DhcpLeaseStatus, DisconnectResult, Ip4Status, MeteredStatus, NetworkEntry, ProfileIpSettings,
-    ProfilePrivacy, SavedWifiConnection, WifiProfileDetails, WifiProfileSecret, WifiSharePayload,
-    WifiStatus, WirelessStatus, network_entries_with_profile_matches, security_flags_label,
-    security_label,
+    ProfilePrivacy, SavedWifiConnection, WifiPowerResult, WifiProfileDetails, WifiProfileSecret,
+    WifiSharePayload, WifiStatus, WirelessStatus, network_entries_with_profile_matches,
+    security_flags_label, security_label,
 };
 use crate::protocol::{Method, Stream};
 
@@ -50,6 +50,10 @@ fn method_contract_fixtures() -> Value {
         "wifi-saved.profiles": response_fixture(Method::WifiSaved, json!([contract_profile()])),
         "wifi-status.active": response_fixture(Method::WifiStatus, json!(combined.status)),
         "wifi-status.inactive": response_fixture(Method::WifiStatus, json!(inactive_status())),
+        "wifi-set-enabled.success": response_fixture(Method::WifiSetEnabled, json!(WifiPowerResult {
+            enabled: true,
+            message: "Wi-Fi turned on".to_string(),
+        })),
         "network-connectivity.full": response_fixture(Method::NetworkConnectivity, json!(ConnectivityStatus::from_nm_code(4))),
         "wifi-connect.success": response_fixture(Method::WifiConnectTarget, json!(combined.connect_success)),
         "wifi-connect.secret-required": response_fixture(Method::WifiConnectTarget, json!(combined.connect_error)),
@@ -102,6 +106,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
     ShelllistContractFixture {
         network: network.clone(),
         status: WifiStatus {
+            enabled: true,
             active: true,
             device_iface: Some("wlan0".to_string()),
             active_connection_path: Some(
@@ -203,6 +208,7 @@ fn network_from_production(
 
 fn inactive_status() -> WifiStatus {
     WifiStatus::inactive(
+        false,
         Some("wlan0".to_string()),
         Some(ConnectivityStatus::from_nm_code(1)),
     )
@@ -472,6 +478,7 @@ fn serialized_boundary_snapshot() -> Value {
             "connect_prompt": methods["wifi-networks.enterprise-required"]["networks"][0]["connect_prompt"],
         },
         "status": {
+            "enabled": shell["status"]["enabled"],
             "connectivity": shell["status"]["connectivity"],
             "metered": shell["status"]["metered"],
             "wireless": shell["status"]["wireless"],
@@ -482,6 +489,7 @@ fn serialized_boundary_snapshot() -> Value {
         "scan_stream": methods["wifi-scan.stream"],
         "saved_profiles": methods["wifi-saved.profiles"],
         "disconnect": methods["wifi-disconnect.success"],
+        "set_enabled": methods["wifi-set-enabled.success"],
         "profile_details": methods["wifi-profile.details"],
         "profile_update": methods["wifi-profile.update"],
         "profile_secret": methods["wifi-profile.reveal-secret"],
@@ -519,6 +527,7 @@ mod tests {
             "/network/capabilities/needs_credentials",
             "/network/share/requires_profile_secret_check",
             "/network/portal_hint/auto_open_on_connect",
+            "/status/enabled",
             "/connect_success/suggest_open_portal",
         ] {
             assert!(
@@ -564,6 +573,7 @@ mod tests {
         );
         let covered_methods = std::collections::HashSet::from([
             crate::protocol::Method::WifiStatus,
+            crate::protocol::Method::WifiSetEnabled,
             crate::protocol::Method::NetworkConnectivity,
             crate::protocol::Method::WifiNetworks,
             crate::protocol::Method::WifiSaved,
@@ -593,6 +603,8 @@ mod tests {
             "enterprise"
         );
         assert_eq!(value["wifi-status.inactive"]["status"]["active"], false);
+        assert_eq!(value["wifi-status.inactive"]["status"]["enabled"], false);
+        assert_eq!(value["wifi-set-enabled.success"]["result"]["enabled"], true);
         assert_eq!(value["wifi-saved.profiles"]["profiles"][0]["id"], "Example");
         assert_eq!(
             value["wifi-connect.secret-required"]["result"]["reason"],

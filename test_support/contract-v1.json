@@ -661,6 +661,12 @@
       }
     ]
   },
+  "set_enabled": {
+    "result": {
+      "enabled": true,
+      "message": "Wi-Fi turned on"
+    }
+  },
   "status": {
     "connectivity": {
       "captive_portal": true,
@@ -668,6 +674,7 @@
       "full": false,
       "state": "portal"
     },
+    "enabled": true,
     "metered": {
       "code": 4,
       "guessed": true,

@@ -10,8 +10,8 @@ use crate::daemon::emit_json_event_nonfatal;
 use crate::daemon_connect::DbusConnectTargetParams;
 use crate::daemon_event::next_request_id;
 use crate::daemon_methods::{
-    ProfileOperationParams, call_connectivity, call_disconnect, call_networks,
-    call_profile_operation, call_saved, call_status,
+    ProfileOperationParams, SetEnabledParams, call_connectivity, call_disconnect, call_networks,
+    call_profile_operation, call_saved, call_set_enabled, call_status,
 };
 use crate::daemon_runtime::DaemonRuntime;
 use crate::daemon_scan::DbusScanParams;
@@ -74,6 +74,10 @@ fn dispatch_immediate(
 ) -> Result<Value> {
     match method {
         Method::WifiStatus => empty_call(params_json, || call_status(runtime)),
+        Method::WifiSetEnabled => call_set_enabled(
+            runtime,
+            parse_required_params::<SetEnabledParams>(params_json)?,
+        ),
         Method::NetworkConnectivity => empty_call(params_json, || call_connectivity(runtime)),
         Method::WifiDisconnect => empty_call(params_json, || call_disconnect(runtime)),
         Method::WifiSaved => empty_call(params_json, || call_saved(runtime)),

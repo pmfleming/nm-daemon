@@ -12,6 +12,7 @@ pub(crate) const DBUS_INTERFACE: &str = "org.laufan.NmDaemon1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Method {
     WifiStatus,
+    WifiSetEnabled,
     NetworkConnectivity,
     WifiNetworks,
     WifiSaved,
@@ -27,6 +28,7 @@ pub(crate) enum Method {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ParameterKind {
     Empty,
+    Enabled,
     Networks,
     Scan,
     ConnectTarget,
@@ -56,7 +58,17 @@ pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
         response_key: "status",
         stream: Some(Stream::WifiStatus),
         operation: ErrorOperation::Status,
-        description: "Current active Wi-Fi status and connection details.",
+        description: "Current Wi-Fi radio state, active status, and connection details.",
+    },
+    MethodSpec {
+        method: Method::WifiSetEnabled,
+        name: "wifi.setEnabled",
+        parameters: ParameterKind::Enabled,
+        params_example: r#"{"enabled":true}"#,
+        response_key: "result",
+        stream: None,
+        operation: ErrorOperation::Status,
+        description: "Enables or disables the NetworkManager Wi-Fi radio.",
     },
     MethodSpec {
         method: Method::NetworkConnectivity,

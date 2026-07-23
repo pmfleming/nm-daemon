@@ -40,7 +40,8 @@ signal Event(s stream, s event_json)
 
 | Method | Parameters | Response key | Stream | Description |
 | --- | --- | --- | --- | --- |
-| `wifi.status` | `{}` (`Empty`) | `status` | `wifi.status` | Current active Wi-Fi status and connection details. |
+| `wifi.status` | `{}` (`Empty`) | `status` | `wifi.status` | Current Wi-Fi radio state, active status, and connection details. |
+| `wifi.setEnabled` | `{"enabled":true}` (`Enabled`) | `result` | `—` | Enables or disables the NetworkManager Wi-Fi radio. |
 | `network.connectivity` | `{}` (`Empty`) | `connectivity` | `network.connectivity` | NetworkManager connectivity and captive-portal state. |
 | `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `—` | Visible networks enriched with saved-profile and capability details. |
 | `wifi.saved` | `{}` (`Empty`) | `profiles` | `—` | All saved Wi-Fi NetworkManager profiles. |
