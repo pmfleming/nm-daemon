@@ -462,6 +462,17 @@ impl<'de> Deserialize<'de> for Security {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SecurityClass {
+    Open,
+    EnhancedOpen,
+    Legacy,
+    Personal,
+    Enterprise,
+    Unknown,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WifiConnectTarget {
     pub(crate) ssid: Ssid,
@@ -717,6 +728,7 @@ pub(crate) struct NetworkPortalHint {
 pub(crate) struct NetworkEntry {
     #[serde(flatten)]
     pub(crate) access_point: AccessPoint,
+    pub(crate) security_class: SecurityClass,
     /// Stable frontend selection key.
     pub(crate) key: String,
     /// Exact APs in this group; `access_point` is the preferred AP.
@@ -854,6 +866,11 @@ fn network_entry_with_profiles(
     let auth = auth_capability_for(&access_point, has_profile);
     NetworkEntry {
         key: network_key_for(&access_point),
+        security_class: security_class(
+            access_point.flags,
+            access_point.wpa_flags,
+            access_point.rsn_flags,
+        ),
         connect_prompt: connect_prompt_for(&access_point, &auth, has_profile),
         share,
         portal_hint: portal_hint_for(&access_point),
@@ -1021,6 +1038,24 @@ pub(crate) fn security_label(flags: u32, wpa_flags: u32, rsn_flags: u32) -> Secu
         return passwordless_security(wpa_flags, rsn_flags);
     }
     secured_network_label(wpa_flags, rsn_flags)
+}
+
+pub(crate) fn security_class(flags: u32, wpa_flags: u32, rsn_flags: u32) -> SecurityClass {
+    if ap_is_passwordless(flags, wpa_flags, rsn_flags) {
+        if (wpa_flags | rsn_flags) & (NM_AP_SEC_KEY_MGMT_OWE | NM_AP_SEC_KEY_MGMT_OWE_TM) != 0 {
+            SecurityClass::EnhancedOpen
+        } else {
+            SecurityClass::Open
+        }
+    } else if ap_uses_wep(flags, wpa_flags, rsn_flags) {
+        SecurityClass::Legacy
+    } else if ap_supports_enterprise(wpa_flags, rsn_flags) {
+        SecurityClass::Enterprise
+    } else if ap_supports_psk(wpa_flags, rsn_flags) {
+        SecurityClass::Personal
+    } else {
+        SecurityClass::Unknown
+    }
 }
 
 fn passwordless_security(wpa_flags: u32, rsn_flags: u32) -> Security {

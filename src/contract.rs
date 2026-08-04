@@ -536,6 +536,7 @@ mod tests {
             );
         }
         for pointer in [
+            "/network/security_class",
             "/network/auth/kind",
             "/network/auth/note",
             "/network/connect_prompt/kind",
@@ -590,6 +591,10 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(covered_methods, registered_methods);
         assert!(value["wifi-networks.saved"]["networks"].is_array());
+        assert_eq!(
+            value["wifi-networks.saved"]["networks"][0]["security_class"],
+            "personal"
+        );
         assert_eq!(
             value["wifi-networks.password-required"]["networks"][0]["capabilities"]["needs_password"],
             true

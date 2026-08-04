@@ -3,9 +3,9 @@ use super::{
     MeteredStatus, NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_802_1X, NM_AP_SEC_KEY_MGMT_OWE,
     NM_AP_SEC_KEY_MGMT_OWE_TM, NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, NetworkAuth,
     NetworkCapabilities, NmObjectPath, ProfilePrivacy, SavedWifiConnection, Security,
-    WifiConnectTarget, ap_is_passwordless, ap_supports_enterprise, ap_supports_psk, ap_uses_owe,
-    ap_uses_wep, connect_target_for_network_key, frequency_band, frequency_channel,
-    network_entries_with_profile_matches, security_flags_label, security_label,
+    SecurityClass, WifiConnectTarget, ap_is_passwordless, ap_supports_enterprise, ap_supports_psk,
+    ap_uses_owe, ap_uses_wep, connect_target_for_network_key, frequency_band, frequency_channel,
+    network_entries_with_profile_matches, security_class, security_flags_label, security_label,
     ssid_for_network_key,
 };
 
@@ -19,6 +19,31 @@ fn security_label_prefers_rsn_over_wpa() {
     assert_eq!(security_label(NM_AP_FLAGS_PRIVACY, 1, 1), Security::Wpa2Or3);
     assert_eq!(security_label(NM_AP_FLAGS_PRIVACY, 1, 0), Security::Wpa);
     assert_eq!(security_label(NM_AP_FLAGS_PRIVACY, 0, 0), Security::Wep);
+}
+
+#[test]
+fn security_classes_cover_frontend_presentation_types() {
+    assert_eq!(security_class(0, 0, 0), SecurityClass::Open);
+    assert_eq!(
+        security_class(0, 0, NM_AP_SEC_KEY_MGMT_OWE),
+        SecurityClass::EnhancedOpen
+    );
+    assert_eq!(
+        security_class(NM_AP_FLAGS_PRIVACY, 0, 0),
+        SecurityClass::Legacy
+    );
+    assert_eq!(
+        security_class(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_PSK),
+        SecurityClass::Personal
+    );
+    assert_eq!(
+        security_class(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_802_1X),
+        SecurityClass::Enterprise
+    );
+    assert_eq!(
+        security_class(NM_AP_FLAGS_PRIVACY, 0, 0x4000),
+        SecurityClass::Unknown
+    );
 }
 
 #[test]

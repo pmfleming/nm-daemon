@@ -120,6 +120,10 @@ Events:
 - `cancelled`: the request was cancelled
 - `failed`: strict scan or internal failure
 
+### `wifi.networks`
+
+Each grouped network includes a typed `security_class`: `open`, `enhanced-open`, `legacy`, `personal`, `enterprise`, or `unknown`. This presentation-safe class is derived from NetworkManager AP flags rather than display labels. Captive portal is a live connectivity state, not an advertised AP security type; frontends should override the active network's security icon while `network.connectivity.state` is `portal`.
+
 ### `wifi.status` and `network.connectivity`
 
 Continuous status/connectivity subscriptions emit a `changed` event immediately, then whenever the serialized status/connectivity payload changes. One daemon event loop listens to the shared NetworkManager connection, coalesces change notifications, computes each needed payload once, and fans changes out to subscribers. Cancel the subscription id returned by `Subscribe` to remove that subscription; there is no per-subscription polling worker.

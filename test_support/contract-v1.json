@@ -508,6 +508,7 @@
             "rsn_flags": 256,
             "rsn_flags_label": "psk",
             "security": "WPA2/3",
+            "security_class": "personal",
             "share": {
               "reason": "Wi-Fi QR sharing requires an open network or a saved profile with a readable password.",
               "requires_profile_secret_check": false,

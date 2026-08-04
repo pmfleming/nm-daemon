@@ -72,7 +72,7 @@ Frontends that cannot conveniently maintain an arbitrary D-Bus client can run `n
 
 Contract fixtures derive network/authentication readiness through the production model constructors. Tests lock their serialized v1 boundary in [`test_support/contract-v1.json`](./test_support/contract-v1.json) and exercise the real daemon D-Bus lifecycle against in-process fake NetworkManager and Secret Service peers, alongside command-gateway and concurrent cache I/O coverage.
 
-`response_json` is the same `nm-api` v1 envelope the CLI prints today. Shelllist should refresh scan caches only while the network UI is in use: call `wifi.networks` with `cached:true, refresh_cache:true` for fast open/background warming, or `wifi.scan` with `cache:true` for explicit refresh events. See the daemon documentation for Shelllist integration notes and migration progress.
+`response_json` is the same `nm-api` v1 envelope the CLI prints today. Grouped Wi-Fi networks expose a typed `security_class` (`open`, `enhanced-open`, `legacy`, `personal`, `enterprise`, or `unknown`) for consistent frontend presentation; captive portal remains the active connectivity state. Shelllist should refresh scan caches only while the network UI is in use: call `wifi.networks` with `cached:true, refresh_cache:true` for fast open/background warming, or `wifi.scan` with `cache:true` for explicit refresh events. See the daemon documentation for Shelllist integration notes and migration progress.
 
 ## Startup and packaging
 
