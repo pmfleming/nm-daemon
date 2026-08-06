@@ -1001,8 +1001,7 @@ pub(crate) fn ssid_hex(ssid_bytes: &[u8]) -> String {
     ssid_bytes
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join("")
+        .collect()
 }
 
 pub(crate) fn frequency_channel(frequency: u32) -> u32 {
@@ -1072,20 +1071,18 @@ pub(crate) fn security_label(flags: u32, wpa_flags: u32, rsn_flags: u32) -> Secu
 }
 
 pub(crate) fn security_class(flags: u32, wpa_flags: u32, rsn_flags: u32) -> SecurityClass {
-    if ap_is_passwordless(flags, wpa_flags, rsn_flags) {
-        if (wpa_flags | rsn_flags) & (NM_AP_SEC_KEY_MGMT_OWE | NM_AP_SEC_KEY_MGMT_OWE_TM) != 0 {
-            SecurityClass::EnhancedOpen
-        } else {
-            SecurityClass::Open
+    match security_label(flags, wpa_flags, rsn_flags) {
+        Security::Open | Security::OweTransition => SecurityClass::Open,
+        Security::Owe => SecurityClass::EnhancedOpen,
+        Security::Wep => SecurityClass::Legacy,
+        Security::Wpa | Security::Wpa2Or3 if ap_supports_enterprise(wpa_flags, rsn_flags) => {
+            SecurityClass::Enterprise
         }
-    } else if ap_uses_wep(flags, wpa_flags, rsn_flags) {
-        SecurityClass::Legacy
-    } else if ap_supports_enterprise(wpa_flags, rsn_flags) {
-        SecurityClass::Enterprise
-    } else if ap_supports_psk(wpa_flags, rsn_flags) {
-        SecurityClass::Personal
-    } else {
-        SecurityClass::Unknown
+        Security::Wpa | Security::Wpa2Or3 if ap_supports_psk(wpa_flags, rsn_flags) => {
+            SecurityClass::Personal
+        }
+        Security::Enterprise => SecurityClass::Enterprise,
+        Security::Wpa | Security::Wpa2Or3 | Security::Other(_) => SecurityClass::Unknown,
     }
 }
 
@@ -1157,7 +1154,7 @@ fn network_key_for(access_point: &AccessPoint) -> String {
         "ssid-hex:{}|security:{}|ifname:{}",
         ssid_hex(access_point.ssid_bytes().as_ref()),
         security_class_key(class),
-        bytes_hex(access_point.device_iface.as_bytes()),
+        ssid_hex(access_point.device_iface.as_bytes()),
     )
 }
 
@@ -1170,10 +1167,6 @@ fn security_class_key(class: SecurityClass) -> &'static str {
         SecurityClass::Enterprise => "enterprise",
         SecurityClass::Unknown => "unknown",
     }
-}
-
-fn bytes_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(crate) fn ssid_for_network_key(key: &str) -> Result<Ssid> {

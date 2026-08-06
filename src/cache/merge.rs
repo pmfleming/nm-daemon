@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::model::{AccessPoint, ConnectionDetails, NetworkEntry};
+use crate::model::{AccessPoint, ConnectionDetails, NetworkEntry, ssid_hex};
 
 pub(super) fn attach_connection_details(
     networks: &mut [NetworkEntry],
@@ -19,7 +19,7 @@ pub(super) fn attach_connection_details(
 pub(super) fn network_key(access_point: &AccessPoint) -> String {
     format!(
         "{}|{}",
-        bytes_hex(access_point.ssid_bytes().as_ref()),
+        ssid_hex(access_point.ssid_bytes().as_ref()),
         access_point.security
     )
 }
@@ -55,10 +55,6 @@ fn same_access_point(left: &AccessPoint, right: &AccessPoint) -> bool {
         return left.bssid.eq_ignore_ascii_case(&right.bssid);
     }
     left.ssid_bytes().as_ref() == right.ssid_bytes().as_ref() && left.security == right.security
-}
-
-fn bytes_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]

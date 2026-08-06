@@ -92,42 +92,15 @@ fn wait_for_command(
     cancellation: Option<&AtomicBool>,
 ) -> Result<(ExitStatus, OutputReader, OutputReader), CommandFailure> {
     let started = Instant::now();
-    let mut stdout = Some(stdout);
-    let mut stderr = Some(stderr);
     loop {
-        ensure_command_running(
-            &mut child,
-            &mut stdout,
-            &mut stderr,
-            request,
-            started,
-            cancellation,
-        )?;
+        if let Some(reason) = stop_reason(started, request.timeout, cancellation) {
+            return Err(stop_command(&mut child, stdout, stderr, request, reason)?);
+        }
         if let Some(status) = poll_command(&mut child, request)? {
-            return Ok((
-                status,
-                stdout.take().expect("stdout reader is available"),
-                stderr.take().expect("stderr reader is available"),
-            ));
+            return Ok((status, stdout, stderr));
         }
         thread::sleep(COMMAND_POLL_INTERVAL);
     }
-}
-
-fn ensure_command_running(
-    child: &mut Child,
-    stdout: &mut Option<OutputReader>,
-    stderr: &mut Option<OutputReader>,
-    request: &CommandRequest,
-    started: Instant,
-    cancellation: Option<&AtomicBool>,
-) -> Result<(), CommandFailure> {
-    let Some(reason) = stop_reason(started, request.timeout, cancellation) else {
-        return Ok(());
-    };
-    let stdout = stdout.take().expect("stdout reader is available");
-    let stderr = stderr.take().expect("stderr reader is available");
-    Err(stop_command(child, stdout, stderr, request, reason)?)
 }
 
 #[derive(Clone, Copy)]
@@ -347,19 +320,13 @@ impl CommandFailure {
     }
 
     fn timed_out(request: &CommandRequest, stdout: String, stderr: String) -> Self {
-        Self {
-            program: request.program.to_string_lossy().into_owned(),
-            operation: request.operation,
-            kind: CommandFailureKind::Timeout,
-            exit_code: None,
+        Self::stopped(
+            request,
+            CommandFailureKind::Timeout,
             stdout,
             stderr,
-            message: format!(
-                "{} timed out after {} ms",
-                request.program.to_string_lossy(),
-                request.timeout.as_millis()
-            ),
-        }
+            format!("timed out after {} ms", request.timeout.as_millis()),
+        )
     }
 
     fn cancelled(request: &CommandRequest) -> Self {
@@ -367,14 +334,32 @@ impl CommandFailure {
     }
 
     fn cancelled_with_output(request: &CommandRequest, stdout: String, stderr: String) -> Self {
+        Self::stopped(
+            request,
+            CommandFailureKind::Cancelled,
+            stdout,
+            stderr,
+            "was cancelled",
+        )
+    }
+
+    fn stopped(
+        request: &CommandRequest,
+        kind: CommandFailureKind,
+        stdout: String,
+        stderr: String,
+        message: impl fmt::Display,
+    ) -> Self {
+        let program = request.program.to_string_lossy();
+        let message = format!("{program} {message}");
         Self {
-            program: request.program.to_string_lossy().into_owned(),
+            program: program.into_owned(),
             operation: request.operation,
-            kind: CommandFailureKind::Cancelled,
+            kind,
             exit_code: None,
             stdout,
             stderr,
-            message: format!("{} was cancelled", request.program.to_string_lossy()),
+            message,
         }
     }
 }

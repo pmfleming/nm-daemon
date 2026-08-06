@@ -1,7 +1,4 @@
-use crate::model::{
-    NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, ap_is_passwordless, ap_supports_enterprise,
-    ap_supports_psk, ap_uses_owe, ap_uses_wep,
-};
+use crate::model::{NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, SecurityClass, security_class};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WifiAuthentication {
@@ -14,22 +11,14 @@ pub(crate) enum WifiAuthentication {
 }
 
 pub(crate) fn classify(flags: u32, wpa_flags: u32, rsn_flags: u32) -> WifiAuthentication {
-    if ap_is_passwordless(flags, wpa_flags, rsn_flags) {
-        return match ap_uses_owe(wpa_flags, rsn_flags) {
-            true => WifiAuthentication::Owe,
-            false => WifiAuthentication::Open,
-        };
+    match security_class(flags, wpa_flags, rsn_flags) {
+        SecurityClass::Open => WifiAuthentication::Open,
+        SecurityClass::EnhancedOpen => WifiAuthentication::Owe,
+        SecurityClass::Personal => WifiAuthentication::Personal,
+        SecurityClass::Legacy => WifiAuthentication::Wep,
+        SecurityClass::Enterprise => WifiAuthentication::Enterprise,
+        SecurityClass::Unknown => WifiAuthentication::Unsupported,
     }
-    if ap_supports_psk(wpa_flags, rsn_flags) {
-        return WifiAuthentication::Personal;
-    }
-    if ap_uses_wep(flags, wpa_flags, rsn_flags) {
-        return WifiAuthentication::Wep;
-    }
-    if ap_supports_enterprise(wpa_flags, rsn_flags) {
-        return WifiAuthentication::Enterprise;
-    }
-    WifiAuthentication::Unsupported
 }
 
 /// Returns `sae` only for SAE-only APs; PSK/SAE transition networks remain `wpa-psk`.

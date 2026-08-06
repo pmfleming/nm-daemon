@@ -72,7 +72,7 @@ pub(crate) fn run() -> Result<()> {
         connection.clone(),
         Arc::clone(&output_lock),
         Arc::clone(&state),
-    );
+    )?;
 
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
@@ -229,7 +229,7 @@ fn spawn_event_forwarder(
     connection: Connection,
     output_lock: Arc<Mutex<()>>,
     state: Arc<Mutex<ClientState>>,
-) {
+) -> Result<()> {
     std::thread::Builder::new()
         .name("nm-frontend-events".to_string())
         .spawn(move || {
@@ -252,7 +252,8 @@ fn spawn_event_forwarder(
                 );
             }
         })
-        .expect("spawn frontend event forwarding thread");
+        .context("spawn frontend event forwarding thread")?;
+    Ok(())
 }
 
 fn forward_event(

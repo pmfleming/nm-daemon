@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 
 use super::{
-    ConnectionSettings, has_wep_settings, owned_value, setting_string, setting_string_list,
-    setting_u32,
+    ConnectionSettings, WifiSecretKind, has_wep_settings, owned_value, setting_string,
+    setting_string_list, setting_u32, wifi_secret_kind,
 };
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::WifiProfileUpdate;
@@ -12,70 +12,67 @@ use crate::model::WifiProfileUpdate;
 pub(super) struct ProfileSecretSpec {
     pub(super) kind: &'static str,
     pub(super) setting_name: Option<&'static str>,
-    pub(super) secret_keys: Vec<String>,
+    pub(super) secret_keys: &'static [&'static str],
     pub(super) primary_secret_key: Option<String>,
 }
 
 pub(super) fn profile_secret_spec(settings: &ConnectionSettings) -> ProfileSecretSpec {
     let security = settings.get("802-11-wireless-security");
-    let key_mgmt = security
-        .and_then(|section| setting_string(section, "key-mgmt"))
-        .unwrap_or_default();
-    let leap = key_mgmt == "ieee8021x"
-        && security
-            .and_then(|section| setting_string(section, "auth-alg"))
-            .is_some_and(|auth| auth == "leap");
-    if matches!(key_mgmt.as_str(), "wpa-psk" | "sae") {
-        return profile_secret_spec_for("password", "802-11-wireless-security", &["psk"], "psk");
-    }
-    if leap {
-        return profile_secret_spec_for(
+    let kind = security.map(|security| wifi_secret_kind(security, None));
+    match kind {
+        Some(WifiSecretKind::Personal) => {
+            profile_secret_spec_for("password", "802-11-wireless-security", &["psk"], "psk")
+        }
+        Some(WifiSecretKind::Leap) => profile_secret_spec_for(
             "enterprise",
             "802-11-wireless-security",
             &["leap-password"],
             "leap-password",
-        );
+        ),
+        Some(WifiSecretKind::Wep) if has_wep_settings(settings, None) => {
+            let index = security
+                .and_then(|section| section.get("wep-tx-keyidx"))
+                .and_then(setting_u32)
+                .unwrap_or(0)
+                .min(3);
+            profile_secret_spec_for(
+                "wep-key",
+                "802-11-wireless-security",
+                &["wep-key0", "wep-key1", "wep-key2", "wep-key3"],
+                format!("wep-key{index}"),
+            )
+        }
+        Some(WifiSecretKind::Enterprise) => enterprise_profile_secret_spec(),
+        _ if settings.contains_key("802-1x") => enterprise_profile_secret_spec(),
+        _ => ProfileSecretSpec {
+            kind: "none",
+            setting_name: None,
+            secret_keys: &[],
+            primary_secret_key: None,
+        },
     }
-    if matches!(key_mgmt.as_str(), "none" | "") && has_wep_settings(settings, None) {
-        let index = security
-            .and_then(|section| section.get("wep-tx-keyidx"))
-            .and_then(setting_u32)
-            .unwrap_or(0)
-            .min(3);
-        return profile_secret_spec_for(
-            "wep-key",
-            "802-11-wireless-security",
-            &["wep-key0", "wep-key1", "wep-key2", "wep-key3"],
-            &format!("wep-key{index}"),
-        );
-    }
-    if key_mgmt.contains("eap") || settings.contains_key("802-1x") {
-        return profile_secret_spec_for(
-            "enterprise",
-            "802-1x",
-            &["password", "private-key-password", "pin"],
-            "password",
-        );
-    }
-    ProfileSecretSpec {
-        kind: "none",
-        setting_name: None,
-        secret_keys: Vec::new(),
-        primary_secret_key: None,
-    }
+}
+
+fn enterprise_profile_secret_spec() -> ProfileSecretSpec {
+    profile_secret_spec_for(
+        "enterprise",
+        "802-1x",
+        &["password", "private-key-password", "pin"],
+        "password",
+    )
 }
 
 fn profile_secret_spec_for(
     kind: &'static str,
     setting_name: &'static str,
-    keys: &[&str],
-    primary: &str,
+    secret_keys: &'static [&'static str],
+    primary: impl Into<String>,
 ) -> ProfileSecretSpec {
     ProfileSecretSpec {
         kind,
         setting_name: Some(setting_name),
-        secret_keys: keys.iter().map(|key| (*key).to_string()).collect(),
-        primary_secret_key: Some(primary.to_string()),
+        secret_keys,
+        primary_secret_key: Some(primary.into()),
     }
 }
 
@@ -170,13 +167,13 @@ fn validate_replacement(
     key: &str,
     value: &str,
 ) -> Result<()> {
-    if !spec.secret_keys.iter().any(|allowed| allowed == key) {
+    if !spec.secret_keys.contains(&key) {
         return Err(DomainError::validation(
             ErrorOperation::ProfileOperation,
             format!("secret '{key}' is not valid for this Wi-Fi profile"),
         )
         .with_detail("field", format!("secrets.{key}"))
-        .with_detail("allowed_secret_keys", spec.secret_keys.clone())
+        .with_detail("allowed_secret_keys", spec.secret_keys.to_vec())
         .into());
     }
     if value.is_empty() {

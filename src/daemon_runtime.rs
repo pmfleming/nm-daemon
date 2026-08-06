@@ -10,7 +10,7 @@ use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, BackgroundScanScheduler, ScanRequest};
 use crate::daemon_status::{SubscriptionState, refresh_payloads};
-use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
+use crate::error::{DomainError, ErrorOperation};
 use crate::generated::{CONTROL_QUEUE_CAPACITY, WORK_QUEUE_CAPACITY, WORKER_COUNT};
 use crate::nm::Nm;
 use crate::protocol::Stream;
@@ -623,24 +623,13 @@ fn queue_error<T>(
         TrySendError::Full(_) => "daemon work queue is full",
         TrySendError::Disconnected(_) => "daemon runtime has stopped",
     };
-    DomainError::new(
-        ErrorCode::InternalError,
-        operation,
-        ErrorSource::Internal,
-        message,
-    )
-    .with_detail("queue", queue)
-    .into()
+    DomainError::internal(operation, message)
+        .with_detail("queue", queue)
+        .into()
 }
 
 fn runtime_stopped(operation: ErrorOperation) -> anyhow::Error {
-    DomainError::new(
-        ErrorCode::InternalError,
-        operation,
-        ErrorSource::Internal,
-        "daemon runtime stopped before replying",
-    )
-    .into()
+    DomainError::internal(operation, "daemon runtime stopped before replying").into()
 }
 
 #[cfg(test)]

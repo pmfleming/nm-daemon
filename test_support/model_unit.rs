@@ -81,6 +81,10 @@ fn owe_transition_bss_is_open_but_keeps_its_nmcli_security_label() {
         security_label(0, 0, NM_AP_SEC_KEY_MGMT_OWE_TM),
         Security::OweTransition
     );
+    assert_eq!(
+        security_class(0, 0, NM_AP_SEC_KEY_MGMT_OWE_TM),
+        SecurityClass::Open
+    );
 }
 
 #[test]

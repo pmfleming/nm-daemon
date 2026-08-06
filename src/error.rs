@@ -222,10 +222,26 @@ impl DomainError {
         error
     }
 
+    pub(crate) fn internal(operation: ErrorOperation, message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorCode::InternalError,
+            operation,
+            ErrorSource::Internal,
+            message,
+        )
+    }
+
     pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+        Self::cancelled_operation(ErrorOperation::Connect, message)
+    }
+
+    pub(crate) fn cancelled_operation(
+        operation: ErrorOperation,
+        message: impl Into<String>,
+    ) -> Self {
         Self::new(
             ErrorCode::Cancelled,
-            ErrorOperation::Connect,
+            operation,
             ErrorSource::Cancellation,
             message,
         )

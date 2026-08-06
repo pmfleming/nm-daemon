@@ -10,16 +10,14 @@ use zbus::object_server::SignalEmitter;
 use crate::daemon_dispatch::{dispatch_call, json_response, subscribe_streams};
 use crate::daemon_event::event_json;
 use crate::daemon_runtime::DaemonRuntime;
-use crate::error::{
-    DomainError, ErrorCode, ErrorOperation, ErrorSource, best_effort, ensure_domain,
-};
+use crate::error::{DomainError, ErrorOperation, best_effort, ensure_domain};
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Stream};
 
 pub(crate) fn run_daemon() -> Result<()> {
     let connection = zbus::blocking::Connection::session().context("connect to session D-Bus")?;
     let runtime = DaemonRuntime::start(crate::nm::Nm::new()?);
     export_daemon_interface(&connection, &runtime)?;
-    watch_client_disconnects(connection.clone(), Arc::clone(&runtime));
+    watch_client_disconnects(connection.clone(), Arc::clone(&runtime))?;
     register_secret_agent(&connection, &runtime);
     log_daemon_started();
     loop {
@@ -128,13 +126,17 @@ impl NmDaemonInterface {
     -> zbus::Result<()>;
 }
 
-fn watch_client_disconnects(connection: zbus::blocking::Connection, runtime: Arc<DaemonRuntime>) {
+fn watch_client_disconnects(
+    connection: zbus::blocking::Connection,
+    runtime: Arc<DaemonRuntime>,
+) -> Result<()> {
     std::thread::Builder::new()
         .name("nm-dbus-owners".to_string())
         .spawn(move || {
             log_owner_watch_result(run_owner_watch(&connection, &runtime));
         })
-        .expect("spawn D-Bus owner watcher");
+        .context("spawn D-Bus owner watcher")?;
+    Ok(())
 }
 
 fn run_owner_watch(connection: &zbus::blocking::Connection, runtime: &DaemonRuntime) -> Result<()> {
@@ -190,10 +192,8 @@ pub(crate) fn emit_json_event(
     data: Value,
 ) -> Result<()> {
     if !stream.spec().events.contains(&event) {
-        return Err(DomainError::new(
-            ErrorCode::InternalError,
+        return Err(DomainError::internal(
             ErrorOperation::EmitEvent,
-            ErrorSource::Internal,
             format!("event '{event}' is not registered for stream '{stream}'"),
         )
         .with_detail("stream", stream.as_str())

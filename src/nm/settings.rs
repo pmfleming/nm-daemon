@@ -10,10 +10,9 @@ mod profile_secrets;
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     AccessPoint, NetworkEntry, ProfileIpSettings, ProfilePrivacy, SavedWifiConnection,
-    TargetIpAddress, TargetIpRoute, TargetIpSettings, WifiConnectTarget, WifiDevice,
-    WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload,
-    ap_supports_enterprise, ap_supports_psk, ap_uses_wep, display_ssid,
-    network_entries_with_profile_matches,
+    SecurityClass, TargetIpAddress, TargetIpRoute, TargetIpSettings, WifiConnectTarget, WifiDevice,
+    WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload, display_ssid,
+    network_entries_with_profile_matches, security_class,
 };
 use profile_secrets::{
     enterprise_secret_needs_agent, profile_secret_spec, profile_secret_values,
@@ -180,7 +179,7 @@ impl Nm {
             available: !values.is_empty(),
             kind: spec.kind.to_string(),
             setting_name: spec.setting_name.map(str::to_string),
-            secret_keys: spec.secret_keys,
+            secret_keys: spec.secret_keys.iter().map(ToString::to_string).collect(),
             primary_secret_key: spec.primary_secret_key,
             values,
             password,
@@ -659,56 +658,60 @@ fn wifi_settings_need_secret_agent(
     let Some(security) = settings.get("802-11-wireless-security") else {
         return false;
     };
-    let key_mgmt = setting_string(security, "key-mgmt").unwrap_or_default();
-    if key_mgmt == "owe" {
-        return false;
-    }
-    if key_mgmt == "ieee8021x"
-        && setting_string(security, "auth-alg").is_some_and(|auth| auth == "leap")
-    {
-        return required_secret_needs_agent(
-            settings,
-            secrets,
-            "802-11-wireless-security",
-            "leap-password",
-            "leap-password-flags",
-        );
-    }
-
-    if key_mgmt.contains("eap") {
-        return enterprise_secret_needs_agent(settings, secrets);
-    }
-    if personal_security(&key_mgmt, ap) {
-        return required_secret_needs_agent(
+    match wifi_secret_kind(security, ap) {
+        WifiSecretKind::None => false,
+        WifiSecretKind::Personal => required_secret_needs_agent(
             settings,
             secrets,
             "802-11-wireless-security",
             "psk",
             "psk-flags",
-        );
+        ),
+        WifiSecretKind::Leap => required_secret_needs_agent(
+            settings,
+            secrets,
+            "802-11-wireless-security",
+            "leap-password",
+            "leap-password-flags",
+        ),
+        WifiSecretKind::Wep => wep_secret_needs_agent(settings, secrets, security),
+        WifiSecretKind::Enterprise => enterprise_secret_needs_agent(settings, secrets),
     }
-    if wep_security(&key_mgmt, ap) {
-        return wep_secret_needs_agent(settings, secrets, security);
-    }
-    if enterprise_security(&key_mgmt, ap) {
-        return enterprise_secret_needs_agent(settings, secrets);
-    }
-    false
 }
 
-fn personal_security(key_mgmt: &str, ap: Option<&AccessPoint>) -> bool {
-    matches!(key_mgmt, "wpa-psk" | "sae")
-        || ap.is_some_and(|ap| ap_supports_psk(ap.wpa_flags, ap.rsn_flags))
+#[derive(Clone, Copy)]
+pub(super) enum WifiSecretKind {
+    None,
+    Personal,
+    Leap,
+    Wep,
+    Enterprise,
 }
 
-fn wep_security(key_mgmt: &str, ap: Option<&AccessPoint>) -> bool {
-    matches!(key_mgmt, "none" | "")
-        || ap.is_some_and(|ap| ap_uses_wep(ap.flags, ap.wpa_flags, ap.rsn_flags))
+pub(super) fn wifi_secret_kind(
+    security: &HashMap<String, OwnedValue>,
+    ap: Option<&AccessPoint>,
+) -> WifiSecretKind {
+    let key_mgmt = setting_string(security, "key-mgmt").unwrap_or_default();
+    match key_mgmt.as_str() {
+        "owe" => WifiSecretKind::None,
+        "wpa-psk" | "sae" => WifiSecretKind::Personal,
+        "ieee8021x" if setting_string(security, "auth-alg").is_some_and(|auth| auth == "leap") => {
+            WifiSecretKind::Leap
+        }
+        key_mgmt if key_mgmt.contains("eap") => WifiSecretKind::Enterprise,
+        "none" | "" => WifiSecretKind::Wep,
+        _ => access_point_secret_kind(ap),
+    }
 }
 
-fn enterprise_security(key_mgmt: &str, ap: Option<&AccessPoint>) -> bool {
-    key_mgmt.contains("eap")
-        || ap.is_some_and(|ap| ap_supports_enterprise(ap.wpa_flags, ap.rsn_flags))
+fn access_point_secret_kind(ap: Option<&AccessPoint>) -> WifiSecretKind {
+    match ap.map(|ap| security_class(ap.flags, ap.wpa_flags, ap.rsn_flags)) {
+        Some(SecurityClass::Personal) => WifiSecretKind::Personal,
+        Some(SecurityClass::Legacy) => WifiSecretKind::Wep,
+        Some(SecurityClass::Enterprise) => WifiSecretKind::Enterprise,
+        _ => WifiSecretKind::None,
+    }
 }
 
 fn wep_secret_needs_agent(

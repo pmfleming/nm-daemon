@@ -114,34 +114,32 @@ impl Nm {
 
     pub(crate) fn set_airplane_mode(&self, enabled: bool) -> Result<RadioPowerResult> {
         let root = self.root_proxy();
-        let (restore_wireless, restore_wwan) = {
-            let mut state = self
-                .radio_restore
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if enabled && !state.airplane_mode {
-                state.wireless_enabled = root.get_property("WirelessEnabled").unwrap_or(false);
-                state.wwan_enabled = root.get_property("WwanEnabled").unwrap_or(false);
-            }
-            state.airplane_mode = enabled;
+        let mut state = self
+            .radio_restore
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if enabled && !state.airplane_mode {
+            state.wireless_enabled = root.get_property("WirelessEnabled").unwrap_or(false);
+            state.wwan_enabled = root.get_property("WwanEnabled").unwrap_or(false);
+        }
+        state.airplane_mode = enabled;
+        let target = if enabled {
+            (false, false)
+        } else {
             (state.wireless_enabled, state.wwan_enabled)
         };
-        root.set_property(
-            "WirelessEnabled",
-            if enabled { false } else { restore_wireless },
-        )
-        .context("set Wi-Fi for airplane mode")?;
-        root.set_property("WwanEnabled", if enabled { false } else { restore_wwan })
+        drop(state);
+        root.set_property("WirelessEnabled", target.0)
+            .context("set Wi-Fi for airplane mode")?;
+        root.set_property("WwanEnabled", target.1)
             .context("set WWAN for airplane mode")?;
         self.wake_waiters();
         Ok(RadioPowerResult {
             radios: self.radio_status()?,
-            message: if enabled {
-                "Airplane mode enabled"
-            } else {
-                "Airplane mode disabled"
-            }
-            .to_string(),
+            message: format!(
+                "Airplane mode {}",
+                if enabled { "enabled" } else { "disabled" }
+            ),
         })
     }
 

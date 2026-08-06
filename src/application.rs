@@ -192,22 +192,21 @@ impl<'a> Application<'a> {
                 let networks = self
                     .nm
                     .network_entries_for_access_points(self.nm.list_all_access_points()?)?;
-                let target = if let Some(network) =
-                    networks.iter().find(|network| network.key == key)
-                {
-                    connect_target_for_network(network, enterprise_identity)?
-                } else if key.contains('|') {
-                    return Err(DomainError::validation(
+                let target =
+                    if let Some(network) = networks.iter().find(|network| network.key == key) {
+                        connect_target_for_network(network, enterprise_identity)?
+                    } else if key.contains('|') {
+                        return Err(DomainError::validation(
                         ErrorOperation::Connect,
                         "selected Wi-Fi network is no longer available; refresh the network list",
                     )
                     .with_detail("network_key", key)
                     .into());
-                } else {
-                    // Protocol-v1 SSID-only keys from older frontends retain
-                    // their historical best-visible-AP fallback.
-                    connect_target_for_network_key(key, enterprise_identity)?
-                };
+                    } else {
+                        // Protocol-v1 SSID-only keys from older frontends retain
+                        // their historical best-visible-AP fallback.
+                        connect_target_for_network_key(key, enterprise_identity)?
+                    };
                 let request = ConnectRequest {
                     target,
                     password,
@@ -754,13 +753,7 @@ fn is_cancelled(cancellation: Option<&AtomicBool>) -> bool {
 }
 
 fn scan_cancelled_error() -> anyhow::Error {
-    DomainError::new(
-        crate::error::ErrorCode::Cancelled,
-        ErrorOperation::Scan,
-        crate::error::ErrorSource::Cancellation,
-        "Wi-Fi scan cancelled",
-    )
-    .into()
+    DomainError::cancelled_operation(ErrorOperation::Scan, "Wi-Fi scan cancelled").into()
 }
 
 fn cancelled_connect(

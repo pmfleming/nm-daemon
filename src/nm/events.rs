@@ -1,4 +1,4 @@
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -20,67 +20,54 @@ impl NetworkEvents {
     pub(super) fn start(connection: Connection) -> Arc<Self> {
         let events = Arc::new(Self::default());
         let monitor_events = Arc::clone(&events);
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("nm-events".to_string())
-            .spawn(move || {
-                loop {
-                    if let Err(error) = monitor_signals(connection.clone(), &monitor_events) {
-                        tracing::warn!(error = %crate::error::err_chain(&error), "NetworkManager event monitor interrupted; retrying");
-                    }
-                    std::thread::sleep(NETWORKMANAGER_EVENT_RETRY_DELAY);
+            .spawn(move || loop {
+                if let Err(error) = monitor_signals(connection.clone(), &monitor_events) {
+                    tracing::warn!(error = %crate::error::err_chain(&error), "NetworkManager event monitor interrupted; retrying");
                 }
+                std::thread::sleep(NETWORKMANAGER_EVENT_RETRY_DELAY);
             })
-            .expect("spawn NetworkManager event monitor");
+        {
+            tracing::error!(%error, "failed to spawn NetworkManager event monitor");
+        }
         events
     }
 
     pub(super) fn generation(&self) -> u64 {
-        *self
-            .generation
-            .lock()
-            .expect("NM event generation poisoned")
+        *recover_lock(&self.generation)
     }
 
     pub(super) fn wait_for_change(&self, observed: u64, timeout: Duration) -> u64 {
-        let generation = self
-            .generation
-            .lock()
-            .expect("NM event generation poisoned");
+        let generation = recover_lock(&self.generation);
         if *generation != observed {
             return *generation;
         }
         let (generation, _) = self
             .changed
             .wait_timeout(generation, timeout)
-            .expect("NM event condvar poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *generation
     }
 
     pub(super) fn subscribe(&self, listener: Arc<dyn Fn() + Send + Sync>) {
-        self.listeners
-            .lock()
-            .expect("NM event listeners poisoned")
-            .push(listener);
+        recover_lock(&self.listeners).push(listener);
     }
 
     pub(super) fn notify(&self) {
-        let mut generation = self
-            .generation
-            .lock()
-            .expect("NM event generation poisoned");
+        let mut generation = recover_lock(&self.generation);
         *generation = generation.wrapping_add(1);
         self.changed.notify_all();
         drop(generation);
 
-        for listener in self
-            .listeners
-            .lock()
-            .expect("NM event listeners poisoned")
-            .iter()
-        {
+        for listener in recover_lock(&self.listeners).iter() {
             listener();
         }
     }
+}
+
+fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn monitor_signals(connection: Connection, events: &NetworkEvents) -> Result<()> {

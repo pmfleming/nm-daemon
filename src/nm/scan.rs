@@ -147,13 +147,9 @@ fn ensure_scan_deadline(deadline: Deadline, message: &str) -> Result<()> {
 
 fn check_scan_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
     if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-        return Err(DomainError::new(
-            crate::error::ErrorCode::Cancelled,
-            ErrorOperation::Scan,
-            crate::error::ErrorSource::Cancellation,
-            "Wi-Fi scan cancelled",
-        )
-        .into());
+        return Err(
+            DomainError::cancelled_operation(ErrorOperation::Scan, "Wi-Fi scan cancelled").into(),
+        );
     }
     Ok(())
 }

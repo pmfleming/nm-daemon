@@ -9,7 +9,7 @@ use super::{ConnectionSettings, owned_value};
 use crate::auth::WifiAuthentication;
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
-    AccessPoint, EnterpriseAuth, WepKeyType, WifiConnectTarget, ap_uses_owe, enterprise_key_mgmt,
+    AccessPoint, EnterpriseAuth, WepKeyType, WifiConnectTarget, enterprise_key_mgmt,
 };
 use crate::variant::{insert_optional_strings, insert_optional_u32s, insert_string};
 pub(super) use profile::{apply_target_connection_metadata, apply_target_profile_settings};
@@ -162,20 +162,20 @@ fn security_settings_for_visible_ap(
     if let Some(enterprise) = &target.enterprise {
         return enterprise_wifi_connection_settings(ap, enterprise, password).map(Some);
     }
-    let Some(password) = password else {
-        return Ok(None);
-    };
-    if crate::model::ap_uses_wep(ap.flags, ap.wpa_flags, ap.rsn_flags) {
-        return wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key))
-            .map(Some);
+    match (
+        crate::auth::classify(ap.flags, ap.wpa_flags, ap.rsn_flags),
+        password,
+    ) {
+        (WifiAuthentication::Owe, _) => owe_wifi_connection_settings().map(Some),
+        (WifiAuthentication::Wep, Some(password)) => {
+            wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key))
+                .map(Some)
+        }
+        (WifiAuthentication::Personal, Some(password)) => {
+            psk_wifi_connection_settings(ap, password).map(Some)
+        }
+        _ => Ok(None),
     }
-    if crate::model::ap_supports_psk(ap.wpa_flags, ap.rsn_flags) {
-        return psk_wifi_connection_settings(ap, password).map(Some);
-    }
-    if ap_uses_owe(ap.wpa_flags, ap.rsn_flags) {
-        return owe_wifi_connection_settings().map(Some);
-    }
-    Ok(None)
 }
 
 fn security_settings_for_target_hint(
