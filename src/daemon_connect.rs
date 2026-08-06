@@ -11,7 +11,7 @@ use crate::daemon::{emit_json_event, emit_json_event_nonfatal};
 use crate::daemon_event::next_request_id;
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{ErrorOperation, ErrorReport};
-use crate::model::{WepKeyType, WifiConnectTarget, ssid_for_network_key};
+use crate::model::{EnterpriseAuth, WepKeyType, WifiConnectTarget, ssid_for_network_key};
 use crate::nm::Nm;
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
@@ -31,6 +31,8 @@ pub(crate) struct DbusConnectTargetParams {
     wep_key_type: Option<WepKeyType>,
     #[serde(default)]
     enterprise_identity: Option<String>,
+    #[serde(default)]
+    enterprise: Option<EnterpriseAuth>,
 }
 
 impl DbusConnectTargetParams {
@@ -64,12 +66,28 @@ impl DbusConnectTargetParams {
                 wep_key_type: self.wep_key_type,
             });
         }
-        Application::new(nm).connect_request_for_key(
+        let enterprise_identity = self.enterprise_identity.or_else(|| {
+            self.enterprise
+                .as_ref()
+                .and_then(|enterprise| enterprise.identity.clone())
+        });
+        let mut request = Application::new(nm).connect_request_for_key(
             self.key.as_deref().unwrap_or_default(),
             self.password,
             self.wep_key_type,
-            self.enterprise_identity,
-        )
+            enterprise_identity,
+        )?;
+        if let Some(mut enterprise) = self.enterprise {
+            if enterprise.key_mgmt.is_none() {
+                enterprise.key_mgmt = request
+                    .target
+                    .enterprise
+                    .as_ref()
+                    .and_then(|defaults| defaults.key_mgmt.clone());
+            }
+            request.target.enterprise = Some(enterprise);
+        }
+        Ok(request)
     }
 }
 

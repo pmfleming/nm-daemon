@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -33,6 +33,7 @@ pub(super) const DEVICE_IFACE: &str = "org.freedesktop.NetworkManager.Device";
 pub(super) const ACTIVE_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.Connection.Active";
 pub(super) const AP_IFACE: &str = "org.freedesktop.NetworkManager.AccessPoint";
 pub(super) const NM_DEVICE_TYPE_WIFI: u32 = 2;
+pub(super) const NM_DEVICE_TYPE_MODEM: u32 = 8;
 pub(super) const NM_DEVICE_STATE_DISCONNECTED: u32 = 30;
 pub(super) const NM_DEVICE_STATE_ACTIVATED: u32 = 100;
 pub(super) const NM_ACTIVE_CONNECTION_STATE_ACTIVATED: u32 = 2;
@@ -62,6 +63,13 @@ impl WifiActivationStatus {
     }
 }
 
+#[derive(Debug, Default)]
+pub(super) struct RadioRestoreState {
+    pub(super) airplane_mode: bool,
+    pub(super) wireless_enabled: bool,
+    pub(super) wwan_enabled: bool,
+}
+
 pub(crate) struct Nm {
     conn: Connection,
     destination: String,
@@ -70,6 +78,7 @@ pub(crate) struct Nm {
     commands: Arc<dyn CommandRunner>,
     events: Arc<events::NetworkEvents>,
     wireless_telemetry: Arc<dyn WirelessTelemetry>,
+    radio_restore: Mutex<RadioRestoreState>,
 }
 
 impl Nm {
@@ -132,6 +141,7 @@ impl Nm {
             settings_proxy,
             commands,
             wireless_telemetry,
+            radio_restore: Mutex::new(RadioRestoreState::default()),
         }
     }
 

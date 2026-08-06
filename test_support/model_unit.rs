@@ -159,6 +159,38 @@ fn compatible_profile_matches_are_used_across_grouped_access_points() {
 }
 
 #[test]
+fn same_ssid_is_split_by_security_and_device() {
+    let open = test_ap(0, 0, 0);
+    let secured = test_ap(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_PSK);
+    let mut other_device = test_ap(0, 0, 0);
+    other_device.device_iface = "wlan1".to_string();
+    other_device.device_path = "/device/2".to_string();
+
+    let entries = network_entries_with_profile_matches(
+        vec![open, secured, other_device],
+        &std::collections::BTreeMap::new(),
+    );
+
+    assert_eq!(entries.len(), 3);
+    let keys = entries
+        .iter()
+        .map(|entry| entry.key.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        keys.iter()
+            .any(|key| key.contains("security:open|ifname:776c616e30"))
+    );
+    assert!(
+        keys.iter()
+            .any(|key| key.contains("security:personal|ifname:776c616e30"))
+    );
+    assert!(
+        keys.iter()
+            .any(|key| key.contains("security:open|ifname:776c616e31"))
+    );
+}
+
+#[test]
 fn connectivity_status_maps_networkmanager_codes() {
     let portal = ConnectivityStatus::from_nm_code(2);
     assert_eq!(portal.state, "portal");
@@ -302,7 +334,10 @@ fn opaque_network_keys_are_stable_and_resolve_exact_ssid_bytes() {
     )
     .try_into()
     .expect("one entry");
-    assert_eq!(entry.key, "ssid-hex:4578616d706c65");
+    assert_eq!(
+        entry.key,
+        "ssid-hex:4578616d706c65|security:open|ifname:776c616e30"
+    );
     assert_eq!(
         ssid_for_network_key(&entry.key).unwrap().as_bytes(),
         b"Example"

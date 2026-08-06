@@ -39,6 +39,34 @@ pub(crate) fn call_set_enabled(
     })
 }
 
+pub(crate) fn call_set_wwan_enabled(
+    runtime: &Arc<DaemonRuntime>,
+    params: SetEnabledParams,
+) -> Result<Value> {
+    runtime.call(ErrorOperation::Status, move |nm| {
+        let result = Application::new(nm).set_wwan_enabled(params.enabled)?;
+        api_data_value(
+            Method::RadioSetWwanEnabled.spec().response_key,
+            &result,
+            "serialize WWAN power response JSON",
+        )
+    })
+}
+
+pub(crate) fn call_set_airplane_mode(
+    runtime: &Arc<DaemonRuntime>,
+    params: SetEnabledParams,
+) -> Result<Value> {
+    runtime.call(ErrorOperation::Status, move |nm| {
+        let result = Application::new(nm).set_airplane_mode(params.enabled)?;
+        api_data_value(
+            Method::RadioSetAirplaneMode.spec().response_key,
+            &result,
+            "serialize airplane-mode response JSON",
+        )
+    })
+}
+
 pub(crate) fn call_connectivity(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
     runtime.call(ErrorOperation::Connectivity, |nm| {
         let application = Application::new(nm);

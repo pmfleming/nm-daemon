@@ -123,8 +123,26 @@ pub(crate) struct WifiPowerResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct RadioStatus {
+    pub(crate) wireless_enabled: bool,
+    pub(crate) wireless_hardware_enabled: bool,
+    pub(crate) wireless_available: bool,
+    pub(crate) wwan_enabled: bool,
+    pub(crate) wwan_hardware_enabled: bool,
+    pub(crate) wwan_available: bool,
+    pub(crate) airplane_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RadioPowerResult {
+    pub(crate) radios: RadioStatus,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct WifiStatus {
     pub(crate) enabled: bool,
+    pub(crate) radios: RadioStatus,
     pub(crate) active: bool,
     pub(crate) device_iface: Option<String>,
     pub(crate) active_connection_path: Option<String>,
@@ -141,11 +159,13 @@ pub(crate) struct WifiStatus {
 impl WifiStatus {
     pub(crate) fn inactive(
         enabled: bool,
+        radios: RadioStatus,
         device_iface: Option<String>,
         connectivity: Option<ConnectivityStatus>,
     ) -> Self {
         Self {
             enabled,
+            radios,
             active: false,
             device_iface,
             active_connection_path: None,
@@ -462,7 +482,7 @@ impl<'de> Deserialize<'de> for Security {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum SecurityClass {
     Open,
@@ -844,12 +864,23 @@ pub(crate) fn network_entries_with_profile_matches(
 }
 
 fn grouped_access_points(access_points: Vec<AccessPoint>) -> Vec<Vec<AccessPoint>> {
-    let mut groups = std::collections::BTreeMap::<Vec<u8>, Vec<AccessPoint>>::new();
+    // SSID alone is not a network identity. Different adapters can see unrelated
+    // networks with the same name, and an open evil twin must never inherit the
+    // readiness/profile state of a secured AP. Keep only roaming-compatible APs
+    // on the same device in one frontend entry.
+    let mut groups =
+        std::collections::BTreeMap::<(Vec<u8>, SecurityClass, String), Vec<AccessPoint>>::new();
     for access_point in access_points {
-        groups
-            .entry(access_point.ssid_bytes().into_owned())
-            .or_default()
-            .push(access_point);
+        let key = (
+            access_point.ssid_bytes().into_owned(),
+            security_class(
+                access_point.flags,
+                access_point.wpa_flags,
+                access_point.rsn_flags,
+            ),
+            access_point.device_iface.clone(),
+        );
+        groups.entry(key).or_default().push(access_point);
     }
     groups.into_values().collect()
 }
@@ -1117,12 +1148,40 @@ fn unsupported_auth_reason(access_point: &AccessPoint) -> String {
 }
 
 fn network_key_for(access_point: &AccessPoint) -> String {
-    format!("ssid-hex:{}", ssid_hex(access_point.ssid_bytes().as_ref()))
+    let class = security_class(
+        access_point.flags,
+        access_point.wpa_flags,
+        access_point.rsn_flags,
+    );
+    format!(
+        "ssid-hex:{}|security:{}|ifname:{}",
+        ssid_hex(access_point.ssid_bytes().as_ref()),
+        security_class_key(class),
+        bytes_hex(access_point.device_iface.as_bytes()),
+    )
+}
+
+fn security_class_key(class: SecurityClass) -> &'static str {
+    match class {
+        SecurityClass::Open => "open",
+        SecurityClass::EnhancedOpen => "enhanced-open",
+        SecurityClass::Legacy => "legacy",
+        SecurityClass::Personal => "personal",
+        SecurityClass::Enterprise => "enterprise",
+        SecurityClass::Unknown => "unknown",
+    }
+}
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(crate) fn ssid_for_network_key(key: &str) -> Result<Ssid> {
+    // The suffix was added without changing protocol v1. Accept old SSID-only
+    // keys so queued calls and older frontends remain compatible.
     let encoded = key
         .strip_prefix("ssid-hex:")
+        .and_then(|value| value.split('|').next())
         .ok_or_else(|| anyhow::anyhow!("invalid Wi-Fi network key"))?;
     if encoded.len() % 2 != 0 {
         bail!("invalid Wi-Fi network key");

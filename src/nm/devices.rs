@@ -6,9 +6,9 @@ use zvariant::OwnedObjectPath;
 
 use super::{AP_IFACE, DEVICE_IFACE, NM_DEVICE_TYPE_WIFI, Nm, WIFI_IFACE};
 use crate::model::{
-    AccessPoint, Bssid, InterfaceName, NmObjectPath, WifiConnectTarget, WifiDevice, display_ssid,
-    frequency_band, frequency_channel, security_flags_label, security_label, ssid_hex,
-    wifi_mode_label,
+    AccessPoint, Bssid, InterfaceName, NmObjectPath, SecurityClass, WifiConnectTarget, WifiDevice,
+    display_ssid, frequency_band, frequency_channel, security_class, security_flags_label,
+    security_label, ssid_hex, wifi_mode_label,
 };
 
 impl Nm {
@@ -187,7 +187,7 @@ impl Nm {
         let aps = sorted_access_points(by_ssid);
         tracing::debug!(
             count = aps.len(),
-            "listed visible Wi-Fi networks after SSID deduplication"
+            "listed visible Wi-Fi networks after compatible AP deduplication"
         );
         Ok(aps)
     }
@@ -214,13 +214,13 @@ impl Nm {
     fn add_device_access_points(
         &self,
         device: &WifiDevice,
-        by_ssid: &mut BTreeMap<Vec<u8>, AccessPoint>,
+        by_network: &mut BTreeMap<(Vec<u8>, SecurityClass, String), AccessPoint>,
     ) -> Result<()> {
         let active_path = self.active_access_point(device)?;
         for path in self.device_access_points(device)? {
             let active = active_path.as_ref().is_some_and(|active| *active == path);
             if let Some(ap) = self.read_visible_access_point(device, &path, active) {
-                merge_access_point(by_ssid, ap);
+                merge_access_point(by_network, ap);
             }
         }
         Ok(())
@@ -338,9 +338,16 @@ fn access_point_matches(
     }
 }
 
-fn merge_access_point(by_ssid: &mut BTreeMap<Vec<u8>, AccessPoint>, ap: AccessPoint) {
-    let key = ap.ssid_bytes().into_owned();
-    match by_ssid.entry(key) {
+fn merge_access_point(
+    by_network: &mut BTreeMap<(Vec<u8>, SecurityClass, String), AccessPoint>,
+    ap: AccessPoint,
+) {
+    let key = (
+        ap.ssid_bytes().into_owned(),
+        security_class(ap.flags, ap.wpa_flags, ap.rsn_flags),
+        ap.device_iface.clone(),
+    );
+    match by_network.entry(key) {
         Entry::Occupied(mut entry)
             if ap.active || (!entry.get().active && ap.strength > entry.get().strength) =>
         {
@@ -353,8 +360,10 @@ fn merge_access_point(by_ssid: &mut BTreeMap<Vec<u8>, AccessPoint>, ap: AccessPo
     }
 }
 
-fn sorted_access_points(by_ssid: BTreeMap<Vec<u8>, AccessPoint>) -> Vec<AccessPoint> {
-    let mut aps: Vec<_> = by_ssid.into_values().collect();
+fn sorted_access_points(
+    by_network: BTreeMap<(Vec<u8>, SecurityClass, String), AccessPoint>,
+) -> Vec<AccessPoint> {
+    let mut aps: Vec<_> = by_network.into_values().collect();
     aps.sort_by(|a, b| {
         b.active
             .cmp(&a.active)
@@ -395,8 +404,10 @@ fn system_uptime_seconds() -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::access_point_matches;
-    use crate::model::AccessPoint;
+    use std::collections::BTreeMap;
+
+    use super::{access_point_matches, merge_access_point};
+    use crate::model::{AccessPoint, NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_PSK};
 
     #[test]
     fn access_point_match_requires_path_and_bssid_when_both_are_supplied() {
@@ -420,6 +431,22 @@ mod tests {
             Some("/ap/1"),
             Some("00:11:22:33:44:66")
         ));
+    }
+
+    #[test]
+    fn cached_network_dedup_keeps_same_ssid_security_variants() {
+        let mut networks = BTreeMap::new();
+        let open = test_ap();
+        let mut secured = test_ap();
+        secured.flags = NM_AP_FLAGS_PRIVACY;
+        secured.rsn_flags = NM_AP_SEC_KEY_MGMT_PSK;
+        secured.security =
+            crate::model::security_label(secured.flags, secured.wpa_flags, secured.rsn_flags);
+
+        merge_access_point(&mut networks, open);
+        merge_access_point(&mut networks, secured);
+
+        assert_eq!(networks.len(), 2);
     }
 
     fn test_ap() -> AccessPoint {

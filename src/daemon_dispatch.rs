@@ -11,7 +11,8 @@ use crate::daemon_connect::DbusConnectTargetParams;
 use crate::daemon_event::next_request_id;
 use crate::daemon_methods::{
     ProfileOperationParams, SetEnabledParams, call_connectivity, call_disconnect, call_networks,
-    call_profile_operation, call_saved, call_set_enabled, call_status,
+    call_profile_operation, call_saved, call_set_airplane_mode, call_set_enabled,
+    call_set_wwan_enabled, call_status,
 };
 use crate::daemon_runtime::DaemonRuntime;
 use crate::daemon_scan::DbusScanParams;
@@ -75,6 +76,14 @@ fn dispatch_immediate(
     match method {
         Method::WifiStatus => empty_call(params_json, || call_status(runtime)),
         Method::WifiSetEnabled => call_set_enabled(
+            runtime,
+            parse_required_params::<SetEnabledParams>(params_json)?,
+        ),
+        Method::RadioSetWwanEnabled => call_set_wwan_enabled(
+            runtime,
+            parse_required_params::<SetEnabledParams>(params_json)?,
+        ),
+        Method::RadioSetAirplaneMode => call_set_airplane_mode(
             runtime,
             parse_required_params::<SetEnabledParams>(params_json)?,
         ),

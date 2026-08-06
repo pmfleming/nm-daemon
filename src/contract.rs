@@ -8,9 +8,9 @@ use crate::forget::{ForgetProfile, ForgetResult, ForgetStatus};
 use crate::model::{
     AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectResult, ConnectivityStatus,
     DhcpLeaseStatus, DisconnectResult, Ip4Status, MeteredStatus, NetworkEntry, ProfileIpSettings,
-    ProfilePrivacy, SavedWifiConnection, WifiPowerResult, WifiProfileDetails, WifiProfileSecret,
-    WifiSharePayload, WifiStatus, WirelessStatus, network_entries_with_profile_matches,
-    security_flags_label, security_label,
+    ProfilePrivacy, RadioPowerResult, RadioStatus, SavedWifiConnection, WifiPowerResult,
+    WifiProfileDetails, WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus,
+    network_entries_with_profile_matches, security_flags_label, security_label,
 };
 use crate::protocol::{Method, Stream};
 
@@ -53,6 +53,14 @@ fn method_contract_fixtures() -> Value {
         "wifi-set-enabled.success": response_fixture(Method::WifiSetEnabled, json!(WifiPowerResult {
             enabled: true,
             message: "Wi-Fi turned on".to_string(),
+        })),
+        "radio-set-wwan-enabled.success": response_fixture(Method::RadioSetWwanEnabled, json!(RadioPowerResult {
+            radios: contract_radio_status(),
+            message: "Mobile data turned on".to_string(),
+        })),
+        "radio-set-airplane-mode.success": response_fixture(Method::RadioSetAirplaneMode, json!(RadioPowerResult {
+            radios: RadioStatus { airplane_mode: true, wireless_enabled: false, wwan_enabled: false, ..contract_radio_status() },
+            message: "Airplane mode enabled".to_string(),
         })),
         "network-connectivity.full": response_fixture(Method::NetworkConnectivity, json!(ConnectivityStatus::from_nm_code(4))),
         "wifi-connect.success": response_fixture(Method::WifiConnectTarget, json!(combined.connect_success)),
@@ -107,6 +115,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
         network: network.clone(),
         status: WifiStatus {
             enabled: true,
+            radios: contract_radio_status(),
             active: true,
             device_iface: Some("wlan0".to_string()),
             active_connection_path: Some(
@@ -206,9 +215,25 @@ fn network_from_production(
         .expect("canonical access point produces one network")
 }
 
+fn contract_radio_status() -> RadioStatus {
+    RadioStatus {
+        wireless_enabled: true,
+        wireless_hardware_enabled: true,
+        wireless_available: true,
+        wwan_enabled: true,
+        wwan_hardware_enabled: true,
+        wwan_available: true,
+        airplane_mode: false,
+    }
+}
+
 fn inactive_status() -> WifiStatus {
     WifiStatus::inactive(
         false,
+        RadioStatus {
+            wireless_enabled: false,
+            ..contract_radio_status()
+        },
         Some("wlan0".to_string()),
         Some(ConnectivityStatus::from_nm_code(1)),
     )
@@ -479,6 +504,7 @@ fn serialized_boundary_snapshot() -> Value {
         },
         "status": {
             "enabled": shell["status"]["enabled"],
+            "radios": shell["status"]["radios"],
             "connectivity": shell["status"]["connectivity"],
             "metered": shell["status"]["metered"],
             "wireless": shell["status"]["wireless"],
@@ -490,6 +516,8 @@ fn serialized_boundary_snapshot() -> Value {
         "saved_profiles": methods["wifi-saved.profiles"],
         "disconnect": methods["wifi-disconnect.success"],
         "set_enabled": methods["wifi-set-enabled.success"],
+        "set_wwan_enabled": methods["radio-set-wwan-enabled.success"],
+        "set_airplane_mode": methods["radio-set-airplane-mode.success"],
         "profile_details": methods["wifi-profile.details"],
         "profile_update": methods["wifi-profile.update"],
         "profile_secret": methods["wifi-profile.reveal-secret"],
@@ -528,6 +556,9 @@ mod tests {
             "/network/share/requires_profile_secret_check",
             "/network/portal_hint/auto_open_on_connect",
             "/status/enabled",
+            "/status/radios/wireless_hardware_enabled",
+            "/status/radios/wwan_enabled",
+            "/status/radios/airplane_mode",
             "/connect_success/suggest_open_portal",
         ] {
             assert!(
@@ -575,6 +606,8 @@ mod tests {
         let covered_methods = std::collections::HashSet::from([
             crate::protocol::Method::WifiStatus,
             crate::protocol::Method::WifiSetEnabled,
+            crate::protocol::Method::RadioSetWwanEnabled,
+            crate::protocol::Method::RadioSetAirplaneMode,
             crate::protocol::Method::NetworkConnectivity,
             crate::protocol::Method::WifiNetworks,
             crate::protocol::Method::WifiSaved,

@@ -8,9 +8,10 @@ use crate::error::{
 };
 use crate::model::{
     AccessPoint, ConnectResult, ConnectivityStatus, DisconnectResult, InterfaceName, NetworkEntry,
-    NmObjectPath, SavedWifiConnection, ScanRequestOptions, WepKeyType, WifiConnectTarget,
-    WifiPowerResult, WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload,
-    WifiStatus, connect_target_for_network, connect_target_for_network_key, validate_ssid_bytes,
+    NmObjectPath, RadioPowerResult, SavedWifiConnection, ScanRequestOptions, WepKeyType,
+    WifiConnectTarget, WifiPowerResult, WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate,
+    WifiSharePayload, WifiStatus, connect_target_for_network, connect_target_for_network_key,
+    validate_ssid_bytes,
 };
 use crate::nm::Nm;
 use anyhow::Result;
@@ -54,6 +55,14 @@ impl<'a> Application<'a> {
             ErrorOperation::Status,
             self.nm.set_wireless_enabled(enabled),
         )
+    }
+
+    pub(crate) fn set_wwan_enabled(&self, enabled: bool) -> Result<RadioPowerResult> {
+        operation_result(ErrorOperation::Status, self.nm.set_wwan_enabled(enabled))
+    }
+
+    pub(crate) fn set_airplane_mode(&self, enabled: bool) -> Result<RadioPowerResult> {
+        operation_result(ErrorOperation::Status, self.nm.set_airplane_mode(enabled))
     }
 
     pub(crate) fn networks(&self, request: NetworksRequest) -> Result<NetworksResult> {
@@ -183,12 +192,22 @@ impl<'a> Application<'a> {
                 let networks = self
                     .nm
                     .network_entries_for_access_points(self.nm.list_all_access_points()?)?;
-                let target =
-                    if let Some(network) = networks.iter().find(|network| network.key == key) {
-                        connect_target_for_network(network, enterprise_identity)?
-                    } else {
-                        connect_target_for_network_key(key, enterprise_identity)?
-                    };
+                let target = if let Some(network) =
+                    networks.iter().find(|network| network.key == key)
+                {
+                    connect_target_for_network(network, enterprise_identity)?
+                } else if key.contains('|') {
+                    return Err(DomainError::validation(
+                        ErrorOperation::Connect,
+                        "selected Wi-Fi network is no longer available; refresh the network list",
+                    )
+                    .with_detail("network_key", key)
+                    .into());
+                } else {
+                    // Protocol-v1 SSID-only keys from older frontends retain
+                    // their historical best-visible-AP fallback.
+                    connect_target_for_network_key(key, enterprise_identity)?
+                };
                 let request = ConnectRequest {
                     target,
                     password,
