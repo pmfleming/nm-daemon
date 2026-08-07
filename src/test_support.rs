@@ -1,7 +1,9 @@
+use std::os::unix::net::UnixStream;
+use std::thread;
+
 use zbus::Guid;
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
-use zbus::connection::socket::Channel;
 
 pub(crate) struct TestPeer {
     pub(crate) server: Connection,
@@ -10,23 +12,32 @@ pub(crate) struct TestPeer {
 
 impl TestPeer {
     pub(crate) fn new(server_name: &str, client_name: &str) -> Self {
-        let (server_socket, client_socket) = Channel::pair();
+        let (server_socket, client_socket) =
+            UnixStream::pair().expect("create test peer socket pair");
         let guid = Guid::generate();
-        let client_guid = guid.clone();
-        let server = Builder::authenticated_socket(server_socket, guid)
-            .expect("configure authenticated test peer server socket")
-            .p2p()
-            .unique_name(server_name)
-            .expect("name test peer server")
-            .build()
-            .expect("build test peer server");
-        let client = Builder::authenticated_socket(client_socket, client_guid)
-            .expect("configure authenticated test peer client socket")
+        let server_name = server_name.to_owned();
+
+        // Build both authenticated ends concurrently: each side waits for the
+        // peer's D-Bus handshake. A real Unix socket also exercises zbus's
+        // production transport instead of the release-build-sensitive in-memory channel.
+        let server_thread = thread::spawn(move || {
+            Builder::unix_stream(server_socket)
+                .server(guid)
+                .expect("configure test peer server")
+                .p2p()
+                .unique_name(server_name)
+                .expect("name test peer server")
+                .build()
+                .expect("build test peer server")
+        });
+        let client = Builder::unix_stream(client_socket)
             .p2p()
             .unique_name(client_name)
             .expect("name test peer client")
             .build()
             .expect("build test peer client");
+        let server = server_thread.join().expect("join test peer server builder");
+
         Self { server, client }
     }
 }

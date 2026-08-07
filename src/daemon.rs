@@ -253,8 +253,8 @@ mod tests {
 
     #[test]
     fn dbus_dispatch_and_subscription_lifecycle_runs_against_fake_networkmanager() {
-        const ATTEMPTS: usize = 5;
-        const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
+        const ATTEMPTS: usize = 3;
+        const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
         const CHILD_ENV: &str = "NM_DAEMON_DBUS_TEST_CHILD";
         const TEST_NAME: &str = "daemon::tests::dbus_dispatch_and_subscription_lifecycle_runs_against_fake_networkmanager";
 
@@ -263,9 +263,8 @@ mod tests {
             return;
         }
 
-        // zbus's in-memory peer transport can rarely stop dispatching while a
-        // blocking call is in flight. Run the integration body in a bounded
-        // child process so a wedged executor is discarded before retrying.
+        // Keep the integration body bounded so a transport regression cannot
+        // hang the full package build. A retry also isolates rare executor stalls.
         for attempt in 1..=ATTEMPTS {
             let mut child = Command::new(std::env::current_exe().expect("locate test executable"))
                 .args(["--exact", TEST_NAME, "--test-threads=1"])
