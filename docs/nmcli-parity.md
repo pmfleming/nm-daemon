@@ -42,7 +42,7 @@ just connect-parity-probe --execute --order alternate --skip-needs-secret
 
 ## NetworkManager 1.58/1.60 review
 
-The local NetworkManager source was reviewed at commit `4114b664e9` (`meson.build`: `1.59.1-dev`, the 1.60 development cycle). Relevant alignment points:
+The local NetworkManager source was updated and reviewed through commit `4f92885b8a` (`meson.build`: `1.59.2-dev`, the 1.60 development cycle). Relevant alignment points:
 
 - nmcli's new AP `BAND` field is queried by `debug diagnose`; nm-daemon generates NetworkManager-compatible 2.4/5/6 GHz bounds and channel tables from `data/wifi-channels.csv` at build time.
 - OWE transition-mode BSSes are reported as `OWE-TM` but treated as the open half of a transition network; only a real OWE BSS creates an `owe` profile.
@@ -51,6 +51,11 @@ The local NetworkManager source was reviewed at commit `4114b664e9` (`meson.buil
 - 64-hex-character WPA PSKs are accepted, matching the NetworkManager 1.58 WPS/PSK handling improvement.
 - NetworkManager's stale global-connectivity fix requires no protocol change; nm-daemon continues to expose the resulting global `Connectivity` state and explicitly rechecks it after activation/portal interaction. Only NetworkManager's `PORTAL` state suggests opening a portal; `LIMITED` no longer does.
 - Wi-Fi 7 AP-MLD background-scan deduplication is core-owned and introduces no new public D-Bus AP property, so nm-daemon should continue grouping the AP objects NetworkManager exports rather than inventing MLD identity.
+- NetworkManager now considers `key-mgmt=wpa-psk` profiles compatible with SAE-only APs. nm-daemon already derives saved-profile compatibility from each device's `AvailableConnections`, so those profiles become reusable without duplicating NetworkManager's compatibility rules; newly created SAE-only profiles remain explicitly `key-mgmt=sae`.
+- NetworkManager 1.60 adds the `wifi-p2p.wps-pin` secret. The daemon's generic SecretAgent recognizes that setting/key and can relay it through the existing named-value secret request, even though nm-daemon does not expose Wi-Fi Direct discovery or activation methods.
+- NetworkManager suppresses infrastructure scans while Wi-Fi P2P on the same radio is activating and delays the next scan after the prohibition lifts. This is core-owned; nm-daemon retains its bounded scan request and cached/non-strict fallback behavior.
+- IPv4 connectivity checks now accept link-scope default routes used by point-to-point links, and activation errors choose a more relevant incompatible-device reason. Both improve values/messages received from NetworkManager without changing nm-daemon's D-Bus contract.
+- The Wi-Fi frequency/channel tables and the infrastructure Wi-Fi D-Bus interfaces used by nm-daemon did not change in this review range. The only introspection addition was for the unrelated PPP helper interface.
 
 ## Closed gaps from the first matrix pass
 

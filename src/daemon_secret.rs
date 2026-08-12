@@ -658,6 +658,7 @@ fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
             "leap-password",
         ],
         "802-1x" => &["password", "private-key-password", "pin"],
+        "wifi-p2p" => &["wps-pin"],
         "vpn" | "gsm" | "cdma" => &["password", "pin"],
         _ => &["password"],
     }
@@ -666,6 +667,7 @@ fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
 fn default_secret_key_for_setting(setting_name: &str) -> &'static str {
     match setting_name {
         "802-11-wireless-security" => "psk",
+        "wifi-p2p" => "wps-pin",
         _ => "password",
     }
 }
@@ -768,7 +770,8 @@ mod tests {
 
     use super::{
         PendingRegistration, PendingRegistry, PendingSecretRequest, SecretResponse,
-        apply_secret_response, register_pending, remove_pending, with_pending_registry,
+        apply_secret_response, default_secret_key_for_setting, register_pending, remove_pending,
+        secret_keys_for, with_pending_registry,
     };
     use crate::nm::ConnectionSettings;
     use crate::variant::value_string;
@@ -870,6 +873,19 @@ mod tests {
         ));
         drop(registration);
         assert!(remove_pending("timed-out").is_none());
+    }
+
+    #[test]
+    fn wifi_p2p_requests_use_networkmanager_160_wps_pin_secret() {
+        assert_eq!(
+            secret_keys_for("wifi-p2p", &[]),
+            vec!["wps-pin".to_string()]
+        );
+        assert_eq!(
+            secret_keys_for("wifi-p2p", &["wps-pin".to_string()]),
+            vec!["wps-pin".to_string()]
+        );
+        assert_eq!(default_secret_key_for_setting("wifi-p2p"), "wps-pin");
     }
 
     #[test]

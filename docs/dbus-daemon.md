@@ -172,7 +172,7 @@ When `save:true`, the provide response reports `persistence_status: "pending"`; 
 
 `wifi.secret.capabilities` reports `keyring.available`, `persistence_supported`, `default_save`, `prompt_handling: "unsupported"`, and `prompt_policy: "dismiss_and_report"`. Clients should use those fields instead of assuming that keyring availability means every operation can complete without user interaction.
 
-Secret key mapping uses NetworkManager's requested setting/hints. Supported keys include `802-11-wireless-security` keys `psk`, `wep-key0..3`, and `leap-password`; `802-1x` keys `password`, `private-key-password`, and `pin`; and common `vpn`/`gsm`/`cdma` `password`/`pin` keys. The `wifi.secret requested` event includes `secret_keys` and `primary_secret_key` so Shelllist can label prompts accurately.
+Secret key mapping uses NetworkManager's requested setting/hints. Supported keys include `802-11-wireless-security` keys `psk`, `wep-key0..3`, and `leap-password`; `802-1x` keys `password`, `private-key-password`, and `pin`; NetworkManager 1.60's `wifi-p2p.wps-pin`; and common `vpn`/`gsm`/`cdma` `password`/`pin` keys. The `wifi.secret requested` event includes `secret_keys` and `primary_secret_key` so Shelllist can label prompts accurately. Wi-Fi Direct discovery/activation is not otherwise exposed by nm-daemon.
 
 Pending SecretAgent calls live in one registry. A registration guard removes entries on response, NetworkManager cancellation, timeout, or unwind, so a stale secondary lookup cannot outlive the request.
 

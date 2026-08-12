@@ -1,5 +1,5 @@
 # NetworkManager-compatible Wi-Fi channel table.
-# Reviewed against NetworkManager commit 4114b664e9,
+# Reviewed against NetworkManager commit 4f92885b8a,
 # src/libnm-core-impl/nm-utils.c table_2ghz/table_5ghz/table_6ghz.
 # band,frequency_mhz,channel
 2.4,2412,1
