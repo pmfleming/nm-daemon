@@ -174,10 +174,7 @@ impl<'a> Application<'a> {
             access_points: access_points.clone(),
         })?;
         cache_scan_complete(cache_result, networks_found)?;
-        emit(&ScanEvent::Complete {
-            timed_out: false,
-            networks_found,
-        })?;
+        emit(&ScanEvent::Complete { networks_found })?;
         Ok(access_points)
     }
 
@@ -461,7 +458,7 @@ impl<'a> Application<'a> {
             });
         let networks = self.nm.list_all_access_points()?;
         cache::write_snapshot(false, &networks)?;
-        cache::write_complete(false, networks.len())?;
+        cache::write_complete(networks.len())?;
         Ok((networks, warning))
     }
 
@@ -570,7 +567,6 @@ pub(crate) enum ScanEvent {
         access_points: Vec<AccessPoint>,
     },
     Complete {
-        timed_out: bool,
         networks_found: usize,
     },
 }
@@ -722,7 +718,7 @@ fn cache_scan_snapshot(cache_result: bool, access_points: &[AccessPoint]) -> Res
 
 fn cache_scan_complete(cache_result: bool, networks_found: usize) -> Result<()> {
     if cache_result {
-        cache::write_complete(false, networks_found)?;
+        cache::write_complete(networks_found)?;
     }
     Ok(())
 }

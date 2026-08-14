@@ -7,8 +7,7 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, ConnectEvent, ConnectOutcome, ConnectRequest};
-use crate::daemon::{emit_json_event, emit_json_event_nonfatal};
-use crate::daemon_event::next_request_id;
+use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, next_request_id};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{DomainError, ErrorOperation, ErrorReport};
 use crate::model::{EnterpriseAuth, WepKeyType, WifiConnectTarget, ssid_for_network_key};
@@ -36,25 +35,17 @@ pub(crate) struct DbusConnectTargetParams {
 }
 
 impl DbusConnectTargetParams {
-    fn validate(&self) -> Result<()> {
+    fn validated_ssid(&self) -> Result<Vec<u8>> {
         match (&self.key, &self.target) {
-            (Some(key), None) => {
-                ssid_for_network_key(key)?;
-                Ok(())
+            (Some(key), None) => Ok(ssid_for_network_key(key)?.as_bytes().to_vec()),
+            (None, Some(target)) => {
+                target.validate()?;
+                Ok(target.ssid_bytes().to_vec())
             }
-            (None, Some(target)) => target.validate(),
             (Some(_), Some(_)) => {
                 bail!("connect request must provide either key or target, not both")
             }
             (None, None) => bail!("connect request must provide key or target"),
-        }
-    }
-
-    fn target_ssid(&self) -> Result<Vec<u8>> {
-        match (&self.key, &self.target) {
-            (Some(key), None) => Ok(ssid_for_network_key(key)?.as_bytes().to_vec()),
-            (None, Some(target)) => Ok(target.ssid_bytes().to_vec()),
-            _ => bail!("invalid connect target selector"),
         }
     }
 
@@ -97,8 +88,7 @@ pub(crate) fn start_connect_target(
     owner: Option<String>,
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
-    params.validate().map_err(connect_validation_error)?;
-    let target_ssid = params.target_ssid().map_err(connect_validation_error)?;
+    let target_ssid = params.validated_ssid().map_err(connect_validation_error)?;
     let request_id = next_request_id("connect");
     tracing::info!(
         request_id = %request_id,
@@ -200,7 +190,7 @@ fn emit_connect_event(
                 "failed",
                 json!({
                     "request_id": request_id,
-                    "result": result.clone(),
+                    "result": result,
                     "reason": result.reason,
                     "message": result.message,
                     "code": error.code,
@@ -246,19 +236,18 @@ mod tests {
         let keyed: DbusConnectTargetParams =
             serde_json::from_str(r#"{"key":"ssid-hex:4578616d706c65","password":"secret"}"#)
                 .unwrap();
-        keyed.validate().unwrap();
-        assert_eq!(keyed.target_ssid().unwrap(), b"Example");
+        assert_eq!(keyed.validated_ssid().unwrap(), b"Example");
 
         let legacy: DbusConnectTargetParams =
             serde_json::from_str(r#"{"target":{"ssid":"Example"}}"#).unwrap();
-        legacy.validate().unwrap();
+        legacy.validated_ssid().unwrap();
 
         let ambiguous: DbusConnectTargetParams = serde_json::from_str(
             r#"{"key":"ssid-hex:4578616d706c65","target":{"ssid":"Example"}}"#,
         )
         .unwrap();
         let error = ambiguous
-            .validate()
+            .validated_ssid()
             .map_err(connect_validation_error)
             .unwrap_err();
         let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);

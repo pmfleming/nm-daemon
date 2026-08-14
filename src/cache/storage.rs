@@ -102,6 +102,16 @@ where
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(CacheRead::Missing),
         Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
     };
+    let text = read_cache_text(file, path)?;
+    match serde_json::from_str(&text) {
+        Ok(value) => Ok(CacheRead::Available(value)),
+        Err(error) => Ok(CacheRead::Corrupt {
+            message: format!("parse {}: {error}", path.display()),
+        }),
+    }
+}
+
+fn read_cache_text(file: File, path: &Path) -> Result<String> {
     let metadata = file
         .metadata()
         .with_context(|| format!("stat {}", path.display()))?;
@@ -121,16 +131,11 @@ where
         .with_context(|| format!("read {}", path.display()))?;
     if text.len() as u64 > CACHE_MAX_BYTES {
         anyhow::bail!(
-            "cache file {} exceeds the {CACHE_MAX_BYTES}-byte maximum",
+            "cache file {} grew beyond {CACHE_MAX_BYTES} bytes",
             path.display()
         );
     }
-    match serde_json::from_str(&text) {
-        Ok(value) => Ok(CacheRead::Available(value)),
-        Err(error) => Ok(CacheRead::Corrupt {
-            message: format!("parse {}: {error}", path.display()),
-        }),
-    }
+    Ok(text)
 }
 
 #[cfg(unix)]

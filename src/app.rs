@@ -17,13 +17,13 @@ fn run_inner() -> Result<()> {
         direct,
         command,
     } = Cli::parse();
-    let log_path = logging::init(verbose, log_file.clone())?;
+    let log_path = logging::init(verbose, log_file)?;
     tracing::debug!(path = %log_path.display(), "using log file");
 
     if try_forward(&command, direct)? {
         return Ok(());
     }
-    run_command(command, verbose, &log_file)
+    run_command(command)
 }
 
 fn try_forward(command: &Command, direct: bool) -> Result<bool> {
@@ -41,11 +41,11 @@ fn try_forward(command: &Command, direct: bool) -> Result<bool> {
     }
 }
 
-fn run_command(command: Command, verbose: u8, log_file: &Option<std::path::PathBuf>) -> Result<()> {
+fn run_command(command: Command) -> Result<()> {
     match command {
         Command::Daemon => crate::daemon::run_daemon(),
         Command::Client => crate::client::run(),
-        Command::Wifi { command } => run_wifi_command(command, verbose, log_file),
+        Command::Wifi { command } => run_wifi_command(command),
         Command::Network {
             command: NetworkCommand::Connectivity,
         } => with_nm(actions::print_connectivity_state),
@@ -53,22 +53,9 @@ fn run_command(command: Command, verbose: u8, log_file: &Option<std::path::PathB
     }
 }
 
-fn run_wifi_command(
-    command: WifiCommand,
-    verbose: u8,
-    log_file: &Option<std::path::PathBuf>,
-) -> Result<()> {
+fn run_wifi_command(command: WifiCommand) -> Result<()> {
     match command {
-        WifiCommand::Networks(options) => with_nm(|nm| {
-            actions::print_networks(
-                nm,
-                options.cached,
-                options.refresh_cache,
-                options.refresh_timeout,
-                verbose,
-                log_file,
-            )
-        }),
+        WifiCommand::Networks(options) => with_nm(|nm| actions::print_networks(nm, options)),
         WifiCommand::Scan(options) => with_nm(|nm| actions::run_scan(nm, options)),
         WifiCommand::Connect(options) => with_nm(|nm| actions::connect_ssid(nm, options)),
         WifiCommand::ConnectTarget(options) => with_nm(|nm| actions::connect_target(nm, options)),

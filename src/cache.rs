@@ -163,18 +163,13 @@ pub(crate) fn write_status(state: impl Into<String>, message: impl Into<String>)
     })
 }
 
-pub(crate) fn write_complete(timed_out: bool, networks_found: usize) -> Result<()> {
-    let message = if timed_out {
-        format!("scan timed out; {networks_found} networks available")
-    } else {
-        format!("scan complete; {networks_found} networks available")
-    };
+pub(crate) fn write_complete(networks_found: usize) -> Result<()> {
     write_status_record(CachedStatus {
         version: CACHE_VERSION,
         updated_at_ms: now_ms(),
         state: "complete".to_string(),
-        message,
-        timed_out: Some(timed_out),
+        message: format!("scan complete; {networks_found} networks available"),
+        timed_out: Some(false),
         networks_found: Some(networks_found),
     })
 }

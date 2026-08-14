@@ -23,10 +23,11 @@ pub(crate) fn wait_for_active_target(
     cancellation: Option<&AtomicBool>,
 ) -> Result<()> {
     tracing::info!(ssid = %target.ssid, "waiting for target Wi-Fi network to become active");
-    let activation_device = nm.wifi_activation_device_for_target(target)?;
-    if let Some(device) = activation_device.as_ref() {
-        tracing::debug!(ssid = %target.ssid, iface = %device.iface, device = %device.path, "cached activation device for signal-assisted wait loop");
-    }
+    let activation_device = nm
+        .wifi_activation_device_for_target(target)?
+        .inspect(|device| {
+            tracing::debug!(ssid = %target.ssid, iface = %device.iface, device = %device.path, "cached activation device for signal-assisted wait loop");
+        });
     let deadline = Deadline::from_now(ACTIVATION_TIMEOUT)?;
     let mut wait = ActivationWait::default();
     let mut event_generation = nm.event_generation();
@@ -37,7 +38,8 @@ pub(crate) fn wait_for_active_target(
         if wait.observe(target, status, ssid_matches)? {
             return Ok(());
         }
-        check_cancelled_and_abort(nm, target, cancellation)?;
+        // Cancellation wakes NetworkEvents, so a cancel racing this wait is
+        // observed at the top of the next iteration without a second poll.
         event_generation = nm.wait_for_event(event_generation, deadline.wait(Duration::MAX));
     }
     Err(wait.timeout_error(target))

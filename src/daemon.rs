@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::json;
 use zbus::MatchRule;
 use zbus::blocking::MessageIterator;
 use zbus::message::{Header, Type};
 use zbus::object_server::SignalEmitter;
 
 use crate::daemon_dispatch::{dispatch_call, json_response, subscribe_streams};
-use crate::daemon_event::event_json;
+use crate::daemon_event::emit_json_event_nonfatal;
 use crate::daemon_runtime::DaemonRuntime;
-use crate::error::{DomainError, ErrorOperation, best_effort, ensure_domain};
+use crate::error::{ErrorOperation, ensure_domain};
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Stream};
 
 pub(crate) fn run_daemon() -> Result<()> {
@@ -198,38 +198,6 @@ pub(crate) fn emit_event_signal(
     .map_err(|error| ensure_domain(ErrorOperation::EmitEvent, error.into()))
 }
 
-pub(crate) fn emit_json_event(
-    emitter: &SignalEmitter<'_>,
-    stream: Stream,
-    request_id: Option<&str>,
-    event: &str,
-    data: Value,
-) -> Result<()> {
-    if !stream.spec().events.contains(&event) {
-        return Err(DomainError::internal(
-            ErrorOperation::EmitEvent,
-            format!("event '{event}' is not registered for stream '{stream}'"),
-        )
-        .with_detail("stream", stream.as_str())
-        .with_detail("event", event)
-        .into());
-    }
-    emit_event_signal(emitter, stream, event_json(stream, request_id, event, data))
-}
-
-pub(crate) fn emit_json_event_nonfatal(
-    emitter: &SignalEmitter<'_>,
-    stream: Stream,
-    request_id: Option<&str>,
-    event: &str,
-    data: Value,
-) {
-    best_effort(
-        format!("failed to emit registered JSON event {stream}.{event}"),
-        || emit_json_event(emitter, stream, request_id, event, data),
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -265,45 +233,37 @@ mod tests {
         }
     }
 
+    const CHILD_ENV: &str = "NM_DAEMON_DBUS_TEST_CHILD";
+    const TEST_NAME: &str =
+        "daemon::tests::dbus_dispatch_and_subscription_lifecycle_runs_against_fake_networkmanager";
+
     #[test]
     fn dbus_dispatch_and_subscription_lifecycle_runs_against_fake_networkmanager() {
-        const ATTEMPTS: usize = 3;
-        const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
-        const CHILD_ENV: &str = "NM_DAEMON_DBUS_TEST_CHILD";
-        const TEST_NAME: &str = "daemon::tests::dbus_dispatch_and_subscription_lifecycle_runs_against_fake_networkmanager";
-
         if std::env::var_os(CHILD_ENV).is_some() {
-            run_dbus_lifecycle_test();
-            return;
+            return run_dbus_lifecycle_test();
         }
+        assert!(
+            (0..3).any(|_| run_bounded_dbus_child()),
+            "D-Bus lifecycle test timed out after 3 attempts"
+        );
+    }
 
-        // Keep the integration body bounded so a transport regression cannot
-        // hang the full package build. A retry also isolates rare executor stalls.
-        for attempt in 1..=ATTEMPTS {
-            let mut child = Command::new(std::env::current_exe().expect("locate test executable"))
-                .args(["--exact", TEST_NAME, "--test-threads=1"])
-                .env(CHILD_ENV, "1")
-                .spawn()
-                .expect("spawn bounded D-Bus lifecycle test");
-            let started = Instant::now();
-
-            loop {
-                if let Some(status) = child.try_wait().expect("poll D-Bus lifecycle test") {
-                    assert!(status.success(), "D-Bus lifecycle test child failed");
-                    return;
-                }
-                if started.elapsed() >= ATTEMPT_TIMEOUT {
-                    child.kill().expect("stop timed-out D-Bus lifecycle test");
-                    child.wait().expect("reap timed-out D-Bus lifecycle test");
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
+    fn run_bounded_dbus_child() -> bool {
+        let mut child = Command::new(std::env::current_exe().expect("locate test executable"))
+            .args(["--exact", TEST_NAME, "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .spawn()
+            .expect("spawn bounded D-Bus lifecycle test");
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
+            if let Some(status) = child.try_wait().expect("poll D-Bus lifecycle test") {
+                return status.success();
             }
-
-            if attempt == ATTEMPTS {
-                panic!("D-Bus lifecycle test timed out after {ATTEMPTS} attempts");
-            }
+            std::thread::sleep(Duration::from_millis(10));
         }
+        child.kill().expect("stop timed-out D-Bus lifecycle test");
+        child.wait().expect("reap timed-out D-Bus lifecycle test");
+        false
     }
 
     fn run_dbus_lifecycle_test() {

@@ -4,11 +4,10 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::application::{
-    Application, ConnectOutcome, ConnectRequest, NetworksRequest, ProfileOperation,
-    ProfileOperationResult, ScanRequest,
+    Application, BackgroundScanScheduler, ConnectOutcome, ConnectRequest, NetworksRequest,
+    ProfileOperation, ProfileOperationResult, ScanRequest,
 };
-use crate::background_scan::InlineBackgroundScan;
-use crate::cli::{ConnectOptions, ConnectTargetOptions, ProfileCommand, ScanOptions};
+use crate::cli::{ConnectOptions, ConnectTargetOptions, ListOptions, ProfileCommand, ScanOptions};
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
 use crate::model::{Ssid, WepKeyType, WifiConnectTarget};
 use crate::nm::Nm;
@@ -83,9 +82,7 @@ fn resolve_password(password_stdin: bool) -> Result<Option<String>> {
         .with_detail("field", "password")
         .with_cause(error.into())
     })?;
-    while matches!(value.chars().last(), Some('\n' | '\r')) {
-        value.pop();
-    }
+    value.truncate(value.trim_end_matches(['\n', '\r']).len());
     Ok(Some(value))
 }
 
@@ -192,21 +189,14 @@ pub(crate) fn print_connectivity_state(nm: &Nm) -> Result<()> {
     print_connectivity(&Application::new(nm).connectivity()?)
 }
 
-pub(crate) fn print_networks(
-    nm: &Nm,
-    cached: bool,
-    refresh_cache: bool,
-    refresh_timeout: u64,
-    _verbose: u8,
-    _log_file: &Option<std::path::PathBuf>,
-) -> Result<()> {
-    let background_scans = InlineBackgroundScan::new(nm);
+pub(crate) fn print_networks(nm: &Nm, options: ListOptions) -> Result<()> {
+    let background_scans = InlineBackgroundScan(nm);
     let result = Application::new(nm)
         .with_background_scans(&background_scans)
         .networks(NetworksRequest::new(
-            cached,
-            refresh_cache,
-            Duration::from_secs(refresh_timeout),
+            options.cached,
+            options.refresh_cache,
+            Duration::from_secs(options.refresh_timeout),
         ))?;
     if let Some(warning) = result.warning.as_ref() {
         eprintln!(
@@ -215,6 +205,26 @@ pub(crate) fn print_networks(
         );
     }
     crate::output::print_network_entries_json(&result.networks)
+}
+
+struct InlineBackgroundScan<'a>(&'a Nm);
+
+impl BackgroundScanScheduler for InlineBackgroundScan<'_> {
+    fn schedule_scan(&self, timeout: Duration) {
+        if let Err(error) = Application::new(self.0).scan(
+            ScanRequest {
+                timeout,
+                strict: false,
+                cache: true,
+                ifname: None,
+                ssids: Vec::new(),
+            },
+            None,
+            |_| Ok(()),
+        ) {
+            tracing::warn!(error = %crate::error::err_chain(&error), "direct-mode cache refresh failed");
+        }
+    }
 }
 
 #[derive(Deserialize)]

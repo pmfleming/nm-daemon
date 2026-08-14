@@ -8,8 +8,7 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, PreparedScanRequest, ScanEvent, ScanRequest};
-use crate::daemon::{emit_json_event, emit_json_event_nonfatal};
-use crate::daemon_event::next_request_id;
+use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, next_request_id};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{ErrorOperation, ErrorReport};
 use crate::nm::Nm;
@@ -141,14 +140,11 @@ fn emit_scan_event(
                 }),
             )
         }
-        ScanEvent::Complete {
-            timed_out,
-            networks_found,
-        } => (
+        ScanEvent::Complete { networks_found } => (
             "complete",
             json!({
                 "request_id": request_id,
-                "timed_out": timed_out,
+                "timed_out": false,
                 "networks_found": networks_found,
             }),
         ),

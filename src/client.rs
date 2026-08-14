@@ -125,17 +125,7 @@ fn handle_request(
             emit_dbus_response(output_lock, state, &id, result)?;
         }
         ClientRequest::Cancel { id, request_id } => {
-            let result = proxy.call::<_, _, ()>("Cancel", &(request_id.as_str(),));
-            if result.is_ok() {
-                recover_lock(state, "frontend client state")
-                    .active_ids
-                    .remove(&request_id);
-            }
-            emit_transport_response(
-                output_lock,
-                &id,
-                result.map(|()| json!({ "cancelled": request_id })),
-            )?;
+            handle_cancel(proxy, output_lock, state, &id, request_id)?;
         }
         ClientRequest::Shutdown { id } => {
             emit_transport_response(output_lock, &id, Ok(json!({ "shutdown": true })))?;
@@ -143,6 +133,27 @@ fn handle_request(
         }
     }
     Ok(false)
+}
+
+fn handle_cancel(
+    proxy: &Proxy<'_>,
+    output_lock: &Mutex<()>,
+    state: &Mutex<ClientState>,
+    id: &str,
+    request_id: String,
+) -> Result<()> {
+    let result = proxy
+        .call::<_, _, ()>("Cancel", &(request_id.as_str(),))
+        .inspect(|()| {
+            recover_lock(state, "frontend client state")
+                .active_ids
+                .remove(&request_id);
+        });
+    emit_transport_response(
+        output_lock,
+        id,
+        result.map(|()| json!({ "cancelled": request_id })),
+    )
 }
 
 fn emit_dbus_response(

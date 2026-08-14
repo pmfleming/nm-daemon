@@ -41,7 +41,7 @@ impl CancelOutcome {
 struct TaskHandle {
     kind: TaskKind,
     owner: Option<String>,
-    target_ssid: Option<Vec<u8>>,
+    target_ssid: Option<Arc<[u8]>>,
     cancellation: Arc<AtomicBool>,
 }
 
@@ -65,7 +65,7 @@ impl Drop for TaskRegistration {
 
 struct CancelledTask {
     kind: TaskKind,
-    target_ssid: Option<Vec<u8>>,
+    target_ssid: Option<Arc<[u8]>>,
 }
 
 pub(crate) struct DaemonRuntime {
@@ -140,6 +140,7 @@ impl DaemonRuntime {
         task: impl FnOnce(&Nm, &AtomicBool) + Send + 'static,
     ) -> Result<()> {
         let cancellation = Arc::new(AtomicBool::new(false));
+        let target_ssid = target_ssid.map(Arc::from);
         recover_lock(&self.tasks, "daemon task map").insert(
             request_id.clone(),
             TaskHandle {
@@ -202,29 +203,24 @@ impl DaemonRuntime {
             .checked_add(timeout)
             .unwrap_or_else(Instant::now);
         let mut tasks = recover_lock(&self.tasks, "daemon task map");
-        loop {
-            let mut pending = request_ids
-                .iter()
-                .filter(|request_id| tasks.contains_key(*request_id))
-                .cloned()
-                .collect::<Vec<_>>();
-            pending.sort();
-            if pending.is_empty() || Instant::now() >= deadline {
-                return pending;
+        while request_ids.iter().any(|id| tasks.contains_key(id)) {
+            if Instant::now() >= deadline {
+                break;
             }
-            let wait = deadline.saturating_duration_since(Instant::now());
-            let waited = self.tasks_changed.wait_timeout(tasks, wait);
-            let (next_tasks, _) = match waited {
-                Ok(waited) => waited,
+            let waited = self
+                .tasks_changed
+                .wait_timeout(tasks, deadline.saturating_duration_since(Instant::now()));
+            tasks = match waited {
+                Ok((tasks, _)) => tasks,
                 Err(poisoned) => {
                     tracing::error!(
                         "recovering poisoned daemon task map while waiting for cancellation"
                     );
-                    poisoned.into_inner()
+                    poisoned.into_inner().0
                 }
             };
-            tasks = next_tasks;
         }
+        pending_task_ids(&tasks, request_ids)
     }
 
     pub(crate) fn subscribe(
@@ -261,7 +257,7 @@ impl DaemonRuntime {
                 task.cancellation.store(true, Ordering::Relaxed);
                 CancelledTask {
                     kind: task.kind,
-                    target_ssid: task.target_ssid.clone(),
+                    target_ssid: task.target_ssid.as_ref().map(Arc::clone),
                 }
             })
     }
@@ -269,7 +265,7 @@ impl DaemonRuntime {
     fn abort_cancelled_connect(&self, request_id: &str, task: Option<&CancelledTask>) {
         let Some(target_ssid) = task
             .filter(|task| task.kind == TaskKind::Connect)
-            .and_then(|task| task.target_ssid.clone())
+            .and_then(|task| task.target_ssid.as_ref().map(Arc::clone))
         else {
             return;
         };
@@ -278,7 +274,7 @@ impl DaemonRuntime {
         }
     }
 
-    fn submit_activation_abort(&self, request_id: String, target_ssid: Vec<u8>) -> Result<()> {
+    fn submit_activation_abort(&self, request_id: String, target_ssid: Arc<[u8]>) -> Result<()> {
         self.submit_fast(
             ErrorOperation::Disconnect,
             Box::new(move |nm| {
@@ -328,7 +324,7 @@ impl DaemonRuntime {
                     request_id.clone(),
                     CancelledTask {
                         kind: task.kind,
-                        target_ssid: task.target_ssid.clone(),
+                        target_ssid: task.target_ssid.as_ref().map(Arc::clone),
                     },
                 )
             })
@@ -377,12 +373,6 @@ impl DaemonRuntime {
             data,
         }) {
             tracing::warn!(?error, "could not queue external daemon event");
-        }
-    }
-
-    pub(crate) fn background_scans(self: &Arc<Self>) -> RuntimeBackgroundScan {
-        RuntimeBackgroundScan {
-            runtime: Arc::clone(self),
         }
     }
 
@@ -439,13 +429,9 @@ impl DaemonRuntime {
     }
 }
 
-pub(crate) struct RuntimeBackgroundScan {
-    runtime: Arc<DaemonRuntime>,
-}
-
-impl BackgroundScanScheduler for RuntimeBackgroundScan {
+impl BackgroundScanScheduler for Arc<DaemonRuntime> {
     fn schedule_scan(&self, timeout: Duration) {
-        self.runtime.schedule_cache_refresh(timeout);
+        self.schedule_cache_refresh(timeout);
     }
 }
 
@@ -487,6 +473,16 @@ enum Control {
 pub(crate) struct SharedPayloads {
     pub(crate) status: Option<Value>,
     pub(crate) connectivity: Option<Value>,
+}
+
+fn pending_task_ids(tasks: &HashMap<String, TaskHandle>, request_ids: &[String]) -> Vec<String> {
+    let mut pending = request_ids
+        .iter()
+        .filter(|id| tasks.contains_key(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    pending.sort();
+    pending
 }
 
 fn recover_lock<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> {

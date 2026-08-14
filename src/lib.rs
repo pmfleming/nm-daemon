@@ -2,7 +2,6 @@ mod actions;
 mod app;
 mod application;
 mod auth;
-mod background_scan;
 mod cache;
 mod cli;
 mod client;

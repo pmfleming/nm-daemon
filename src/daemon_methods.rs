@@ -79,7 +79,7 @@ pub(crate) fn call_connectivity(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
 }
 
 pub(crate) fn call_networks(runtime: &Arc<DaemonRuntime>, params: NetworksParams) -> Result<Value> {
-    let background_scans = runtime.background_scans();
+    let background_scans = Arc::clone(runtime);
     runtime.call(ErrorOperation::Networks, move |nm| {
         let application = Application::new(nm);
         let result = application

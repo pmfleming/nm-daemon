@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result};
+use zbus::blocking::Proxy;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{
     ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_DEVICE_TYPE_MODEM,
-    NM_DEVICE_TYPE_WIFI, Nm, SETTINGS_CONNECTION_IFACE, WIFI_IFACE,
+    NM_DEVICE_TYPE_WIFI, Nm, RadioRestoreState, SETTINGS_CONNECTION_IFACE, WIFI_IFACE,
 };
 use crate::command::nmcli::Nmcli;
 use crate::error::ErrorOperation;
@@ -18,6 +19,58 @@ use crate::model::{
 const DHCP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.DHCP4Config";
 const IP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.IP4Config";
 
+#[derive(Clone, Copy)]
+enum Radio {
+    Wireless,
+    Wwan,
+}
+
+#[derive(Clone, Copy)]
+struct RadioSwitches {
+    wireless: bool,
+    wwan: bool,
+}
+
+impl RadioRestoreState {
+    fn record_direct_change(&mut self, radio: Radio, enabled: bool) {
+        if !self.airplane_mode || enabled {
+            match radio {
+                Radio::Wireless => self.wireless_enabled = enabled,
+                Radio::Wwan => self.wwan_enabled = enabled,
+            }
+        }
+        self.airplane_mode &= !enabled;
+    }
+
+    fn target_switches(&self, enabled: bool) -> Option<RadioSwitches> {
+        if !enabled && !self.airplane_mode {
+            return None;
+        }
+        Some(if enabled {
+            RadioSwitches {
+                wireless: false,
+                wwan: false,
+            }
+        } else {
+            RadioSwitches {
+                wireless: self.wireless_enabled,
+                wwan: self.wwan_enabled,
+            }
+        })
+    }
+
+    fn commit_airplane(&mut self, enabled: bool, current: RadioSwitches, target: RadioSwitches) {
+        if enabled && !self.airplane_mode {
+            self.wireless_enabled = current.wireless;
+            self.wwan_enabled = current.wwan;
+        } else if !enabled {
+            self.wireless_enabled = target.wireless;
+            self.wwan_enabled = target.wwan;
+        }
+        self.airplane_mode = enabled;
+    }
+}
+
 impl Nm {
     pub(crate) fn wifi_status(&self) -> Result<WifiStatus> {
         let radios = self.radio_status()?;
@@ -26,12 +79,9 @@ impl Nm {
         let connectivity = self.connectivity_check().ok();
 
         for device in self.wifi_devices()? {
-            if let Some(status) = self.wifi_status_for_device(
-                &device,
-                &profiles,
-                connectivity.clone(),
-                radios.clone(),
-            )? {
+            if let Some(status) =
+                self.wifi_status_for_device(&device, &profiles, &connectivity, &radios)?
+            {
                 return Ok(status);
             }
         }
@@ -40,28 +90,10 @@ impl Nm {
     }
 
     pub(crate) fn set_wireless_enabled(&self, enabled: bool) -> Result<WifiPowerResult> {
-        let mut state = self
-            .radio_restore
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.root_proxy()
-            .set_property("WirelessEnabled", enabled)
-            .context("set NetworkManager WirelessEnabled")?;
-        if !state.airplane_mode || enabled {
-            state.wireless_enabled = enabled;
-        }
-        if enabled {
-            state.airplane_mode = false;
-        }
-        drop(state);
-        self.wake_waiters();
+        set_radio_enabled(self, Radio::Wireless, "WirelessEnabled", enabled)?;
         Ok(WifiPowerResult {
             enabled,
-            message: if enabled {
-                "Wi-Fi turned on".to_string()
-            } else {
-                "Wi-Fi turned off".to_string()
-            },
+            message: format!("Wi-Fi turned {}", if enabled { "on" } else { "off" }),
         })
     }
 
@@ -117,80 +149,29 @@ impl Nm {
     }
 
     pub(crate) fn set_wwan_enabled(&self, enabled: bool) -> Result<RadioPowerResult> {
-        let mut state = self
-            .radio_restore
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.root_proxy()
-            .set_property("WwanEnabled", enabled)
-            .context("set NetworkManager WwanEnabled")?;
-        if !state.airplane_mode || enabled {
-            state.wwan_enabled = enabled;
-        }
-        if enabled {
-            state.airplane_mode = false;
-        }
-        drop(state);
-        self.wake_waiters();
+        set_radio_enabled(self, Radio::Wwan, "WwanEnabled", enabled)?;
         Ok(RadioPowerResult {
             radios: self.radio_status()?,
-            message: if enabled {
-                "Mobile data turned on"
-            } else {
-                "Mobile data turned off"
-            }
-            .to_string(),
+            message: format!("Mobile data turned {}", if enabled { "on" } else { "off" }),
         })
     }
 
     pub(crate) fn set_airplane_mode(&self, enabled: bool) -> Result<RadioPowerResult> {
         let root = self.root_proxy();
-        let mut state = self
+        let mut restore = self
             .radio_restore
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !enabled && !state.airplane_mode {
-            drop(state);
-            return Ok(RadioPowerResult {
-                radios: self.radio_status()?,
-                message: "Airplane mode disabled".to_string(),
-            });
+        let target = restore.target_switches(enabled);
+        if let Some(target) = target {
+            let current = read_radio_switches(&root)?;
+            apply_radio_switches(&root, current, target)?;
+            restore.commit_airplane(enabled, current, target);
         }
-
-        let current = (
-            root.get_property("WirelessEnabled")
-                .context("read Wi-Fi before airplane-mode change")?,
-            root.get_property("WwanEnabled")
-                .context("read WWAN before airplane-mode change")?,
-        );
-        let target = if enabled {
-            (false, false)
-        } else {
-            (state.wireless_enabled, state.wwan_enabled)
-        };
-
-        root.set_property("WirelessEnabled", target.0)
-            .context("set Wi-Fi for airplane mode")?;
-        if let Err(error) = root.set_property("WwanEnabled", target.1) {
-            if let Err(rollback_error) = root.set_property("WirelessEnabled", current.0) {
-                tracing::error!(
-                    error = %rollback_error,
-                    "failed to roll back Wi-Fi after airplane-mode WWAN update failed"
-                );
-            }
-            return Err(error).context("set WWAN for airplane mode");
+        drop(restore);
+        if target.is_some() {
+            self.wake_waiters();
         }
-
-        if enabled && !state.airplane_mode {
-            state.wireless_enabled = current.0;
-            state.wwan_enabled = current.1;
-        } else if !enabled {
-            state.wireless_enabled = target.0;
-            state.wwan_enabled = target.1;
-        }
-        state.airplane_mode = enabled;
-        drop(state);
-        self.wake_waiters();
         Ok(RadioPowerResult {
             radios: self.radio_status()?,
             message: format!(
@@ -204,8 +185,8 @@ impl Nm {
         &self,
         device: &WifiDevice,
         profiles: &[SavedWifiConnection],
-        connectivity: Option<crate::model::ConnectivityStatus>,
-        radios: RadioStatus,
+        connectivity: &Option<crate::model::ConnectivityStatus>,
+        radios: &RadioStatus,
     ) -> Result<Option<WifiStatus>> {
         let Some(active_connection_path) = self.device_active_connection_path(&device.path)? else {
             return Ok(None);
@@ -224,8 +205,8 @@ impl Nm {
         device: &WifiDevice,
         active_connection_path: OwnedObjectPath,
         profiles: &[SavedWifiConnection],
-        connectivity: Option<crate::model::ConnectivityStatus>,
-        radios: RadioStatus,
+        connectivity: &Option<crate::model::ConnectivityStatus>,
+        radios: &RadioStatus,
     ) -> Result<Option<WifiStatus>> {
         let Some(active_ap_path) = self.active_access_point(device)? else {
             return Ok(None);
@@ -246,14 +227,14 @@ impl Nm {
 
         Ok(Some(WifiStatus {
             enabled: radios.wireless_enabled,
-            radios,
+            radios: radios.clone(),
             active: true,
             device_iface: Some(device.iface.clone()),
             active_connection_path: Some(active_connection_path.to_string()),
             access_point: Some(access_point),
             network: entry,
             profile,
-            connectivity,
+            connectivity: connectivity.clone(),
             ip4: self.enriched_ip4_status(device),
             wireless: self.wireless_status(device).ok(),
             metered: self.metered_status(&device.path).ok(),
@@ -471,6 +452,49 @@ impl Nm {
     }
 }
 
+fn set_radio_enabled(nm: &Nm, radio: Radio, property: &str, enabled: bool) -> Result<()> {
+    let mut state = nm
+        .radio_restore
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    nm.root_proxy()
+        .set_property(property, enabled)
+        .with_context(|| format!("set NetworkManager {property}"))?;
+    state.record_direct_change(radio, enabled);
+    drop(state);
+    nm.wake_waiters();
+    Ok(())
+}
+
+fn read_radio_switches(root: &Proxy<'_>) -> Result<RadioSwitches> {
+    Ok(RadioSwitches {
+        wireless: root
+            .get_property("WirelessEnabled")
+            .context("read Wi-Fi before airplane-mode change")?,
+        wwan: root
+            .get_property("WwanEnabled")
+            .context("read WWAN before airplane-mode change")?,
+    })
+}
+
+fn apply_radio_switches(
+    root: &Proxy<'_>,
+    current: RadioSwitches,
+    target: RadioSwitches,
+) -> Result<()> {
+    root.set_property("WirelessEnabled", target.wireless)
+        .context("set Wi-Fi for airplane mode")?;
+    root.set_property("WwanEnabled", target.wwan)
+        .inspect_err(|_| rollback_wireless(root, current.wireless))
+        .context("set WWAN for airplane mode")
+}
+
+fn rollback_wireless(root: &Proxy<'_>, enabled: bool) {
+    if let Err(error) = root.set_property("WirelessEnabled", enabled) {
+        tracing::error!(%error, "failed to roll back Wi-Fi after airplane-mode WWAN update failed");
+    }
+}
+
 fn first_address_data(
     entries: &[HashMap<String, OwnedValue>],
 ) -> Option<(Option<String>, Option<u32>)> {
@@ -605,10 +629,24 @@ mod tests {
     use zvariant::{DynamicType, OwnedValue, Value};
 
     use super::{
-        dhcp_lease_from_options, gateway_from_route_data, ip4_status_needs_nmcli_fill,
+        Radio, dhcp_lease_from_options, gateway_from_route_data, ip4_status_needs_nmcli_fill,
         legacy_nameservers,
     };
     use crate::model::Ip4Status;
+    use crate::nm::RadioRestoreState;
+
+    #[test]
+    fn direct_radio_changes_preserve_and_exit_airplane_restore_state() {
+        let mut state = RadioRestoreState {
+            airplane_mode: true,
+            wireless_enabled: true,
+            wwan_enabled: true,
+        };
+        state.record_direct_change(Radio::Wireless, false);
+        assert!(state.airplane_mode && state.wireless_enabled);
+        state.record_direct_change(Radio::Wireless, true);
+        assert!(!state.airplane_mode && state.wireless_enabled);
+    }
 
     #[test]
     fn parses_legacy_ipv4_nameservers_from_network_byte_order() {

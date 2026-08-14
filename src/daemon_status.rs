@@ -4,7 +4,7 @@ use serde_json::{Map, Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::Application;
-use crate::daemon::emit_json_event_nonfatal;
+use crate::daemon_event::emit_json_event_nonfatal;
 use crate::daemon_runtime::SharedPayloads;
 use crate::nm::Nm;
 use crate::protocol::{Method, Stream};

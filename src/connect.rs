@@ -473,5 +473,5 @@ fn status_has_network_details(status: &WifiStatus) -> bool {
 fn refresh_cached_networks(nm: &Nm) -> Result<()> {
     let networks = nm.list_access_points()?;
     cache::write_snapshot(false, &networks)?;
-    cache::write_complete(false, networks.len())
+    cache::write_complete(networks.len())
 }
