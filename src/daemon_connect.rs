@@ -10,7 +10,7 @@ use crate::application::{Application, ConnectEvent, ConnectOutcome, ConnectReque
 use crate::daemon::{emit_json_event, emit_json_event_nonfatal};
 use crate::daemon_event::next_request_id;
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
-use crate::error::{ErrorOperation, ErrorReport};
+use crate::error::{DomainError, ErrorOperation, ErrorReport};
 use crate::model::{EnterpriseAuth, WepKeyType, WifiConnectTarget, ssid_for_network_key};
 use crate::nm::Nm;
 use crate::output::api_data_value;
@@ -94,10 +94,11 @@ impl DbusConnectTargetParams {
 pub(crate) fn start_connect_target(
     runtime: &Arc<DaemonRuntime>,
     params: DbusConnectTargetParams,
+    owner: Option<String>,
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
-    params.validate()?;
-    let target_ssid = params.target_ssid()?;
+    params.validate().map_err(connect_validation_error)?;
+    let target_ssid = params.target_ssid().map_err(connect_validation_error)?;
     let request_id = next_request_id("connect");
     tracing::info!(
         request_id = %request_id,
@@ -109,6 +110,7 @@ pub(crate) fn start_connect_target(
     runtime.start_cancellable(
         request_id.clone(),
         TaskKind::Connect,
+        owner,
         Some(target_ssid),
         move |nm, cancel_flag| {
             if let Err(err) =
@@ -129,6 +131,12 @@ pub(crate) fn start_connect_target(
         }),
         "serialize connect start response JSON",
     )
+}
+
+fn connect_validation_error(error: anyhow::Error) -> anyhow::Error {
+    DomainError::validation(ErrorOperation::Connect, &error)
+        .with_cause(error)
+        .into()
 }
 
 fn run_connect_worker(
@@ -230,7 +238,8 @@ fn emit_connect_failure(emitter: &SignalEmitter<'static>, request_id: &str, repo
 
 #[cfg(test)]
 mod tests {
-    use super::DbusConnectTargetParams;
+    use super::{DbusConnectTargetParams, connect_validation_error};
+    use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
 
     #[test]
     fn opaque_key_and_legacy_target_requests_are_both_supported() {
@@ -248,6 +257,11 @@ mod tests {
             r#"{"key":"ssid-hex:4578616d706c65","target":{"ssid":"Example"}}"#,
         )
         .unwrap();
-        assert!(ambiguous.validate().is_err());
+        let error = ambiguous
+            .validate()
+            .map_err(connect_validation_error)
+            .unwrap_err();
+        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
+        assert_eq!(report.code, ErrorCode::ValidationError);
     }
 }

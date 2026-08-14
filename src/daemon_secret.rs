@@ -1,22 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zbus::blocking::{Connection, Proxy};
-use zbus::object_server::SignalEmitter;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
-use crate::daemon::emit_json_event_nonfatal;
+use crate::daemon_runtime::DaemonRuntime;
 use crate::error::best_effort;
 use crate::generated::SECRET_TIMEOUT;
 use crate::nm::{ConnectionSettings, NM_DEST};
 use crate::output::api_data_value;
-use crate::protocol::DBUS_OBJECT_PATH;
 use crate::protocol::{Method, Stream};
 use crate::variant::value_string;
 
@@ -30,27 +28,24 @@ static REGISTERED: AtomicBool = AtomicBool::new(false);
 static PENDING: OnceLock<Mutex<PendingRegistry>> = OnceLock::new();
 
 pub(crate) struct SecretAgentInterface {
-    event_connection: zbus::Connection,
+    runtime: Weak<DaemonRuntime>,
 }
 
 impl SecretAgentInterface {
-    fn new(session_connection: &Connection) -> Self {
+    fn new(runtime: &Arc<DaemonRuntime>) -> Self {
         Self {
-            event_connection: session_connection.inner().clone(),
+            runtime: Arc::downgrade(runtime),
         }
     }
 }
 
 pub(crate) fn register_secret_agent(
-    session_connection: &Connection,
     system_connection: &Connection,
+    runtime: &Arc<DaemonRuntime>,
 ) -> Result<()> {
     system_connection
         .object_server()
-        .at(
-            SECRET_AGENT_OBJECT_PATH,
-            SecretAgentInterface::new(session_connection),
-        )
+        .at(SECRET_AGENT_OBJECT_PATH, SecretAgentInterface::new(runtime))
         .context("export nm-daemon SecretAgent on system D-Bus")?;
     let manager = Proxy::new(
         system_connection,
@@ -84,7 +79,7 @@ impl SecretAgentInterface {
         if apply_stored_secret(&request, &mut connection)? {
             return Ok(connection);
         }
-        wait_for_secret_response(&self.event_connection, request, connection)
+        wait_for_secret_response(&self.runtime, request, connection)
     }
 
     fn cancel_get_secrets(&self, connection_path: OwnedObjectPath, setting_name: &str) {
@@ -92,7 +87,7 @@ impl SecretAgentInterface {
         let key = PendingSecretRequest::key_for(connection_path.as_str(), setting_name);
         if let Some((request_id, sender)) = remove_pending_by_key(&key) {
             let _ = sender.send(SecretResponse::cancelled());
-            emit_secret_cancelled(&self.event_connection, &request_id);
+            emit_secret_cancelled(&self.runtime, &request_id);
         }
     }
 
@@ -122,21 +117,25 @@ fn apply_stored_secret(
 }
 
 fn wait_for_secret_response(
-    event_connection: &zbus::Connection,
+    runtime: &Weak<DaemonRuntime>,
     request: PendingSecretRequest,
     mut connection: ConnectionSettings,
 ) -> zbus::fdo::Result<ConnectionSettings> {
-    let (registration, displaced_request_id) = register_pending(&request);
+    let owners = runtime
+        .upgrade()
+        .map(|runtime| runtime.subscriber_owners(Stream::WifiSecret))
+        .unwrap_or_default();
+    let (registration, displaced_request_id) = register_pending(&request, owners);
     if let Some(displaced_request_id) = displaced_request_id {
-        emit_secret_cancelled(event_connection, &displaced_request_id);
+        emit_secret_cancelled(runtime, &displaced_request_id);
     }
-    emit_secret_requested(event_connection, &request);
+    emit_secret_requested(runtime, &request);
 
     let response = registration.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
         zbus::fdo::Error::NoReply(format!("timed out waiting for secret {}", request.id))
     })?;
     if let Some(persistence) = apply_secret_response(&mut connection, &request, response)? {
-        emit_secret_persistence(event_connection, &request.id, persistence);
+        emit_secret_persistence(runtime, &request.id, persistence);
     }
     Ok(connection)
 }
@@ -184,8 +183,8 @@ pub(crate) fn capabilities(_: SecretCapabilitiesParams) -> Result<Value> {
     )
 }
 
-pub(crate) fn provide(params: SecretProvideParams) -> Result<Value> {
-    let accepted = if let Some(sender) = remove_pending(&params.request_id) {
+pub(crate) fn provide(owner: Option<&str>, params: SecretProvideParams) -> Result<Value> {
+    let accepted = if let Some(sender) = remove_pending_for_owner(&params.request_id, owner) {
         sender
             .send(SecretResponse {
                 password: params.password,
@@ -221,10 +220,13 @@ pub(crate) fn provide(params: SecretProvideParams) -> Result<Value> {
     )
 }
 
-fn register_pending(request: &PendingSecretRequest) -> (PendingRegistration, Option<String>) {
+fn register_pending(
+    request: &PendingSecretRequest,
+    owners: Vec<String>,
+) -> (PendingRegistration, Option<String>) {
     let (tx, rx) = mpsc::channel();
     let displaced = with_pending_registry(|registry| {
-        registry.insert(request.id.clone(), request.key.clone(), tx)
+        registry.insert(request.id.clone(), request.key.clone(), owners, tx)
     });
     let displaced_request_id = displaced.map(|(request_id, sender)| {
         let _ = sender.send(SecretResponse::cancelled());
@@ -242,6 +244,13 @@ fn register_pending(request: &PendingSecretRequest) -> (PendingRegistration, Opt
 
 fn remove_pending(request_id: &str) -> Option<Sender<SecretResponse>> {
     with_pending_registry(|registry| registry.remove(request_id))
+}
+
+fn remove_pending_for_owner(
+    request_id: &str,
+    owner: Option<&str>,
+) -> Option<Sender<SecretResponse>> {
+    with_pending_registry(|registry| registry.remove_for_owner(request_id, owner))
 }
 
 fn remove_pending_by_key(key: &str) -> Option<(String, Sender<SecretResponse>)> {
@@ -263,9 +272,9 @@ fn with_pending_registry<T>(action: impl FnOnce(&mut PendingRegistry) -> T) -> T
     action(&mut registry)
 }
 
-fn emit_secret_requested(bus: &zbus::Connection, request: &PendingSecretRequest) {
+fn emit_secret_requested(runtime: &Weak<DaemonRuntime>, request: &PendingSecretRequest) {
     emit_secret_event(
-        bus,
+        runtime,
         &request.id,
         "requested",
         json!({
@@ -282,9 +291,9 @@ fn emit_secret_requested(bus: &zbus::Connection, request: &PendingSecretRequest)
     );
 }
 
-fn emit_secret_cancelled(bus: &zbus::Connection, request_id: &str) {
+fn emit_secret_cancelled(runtime: &Weak<DaemonRuntime>, request_id: &str) {
     emit_secret_event(
-        bus,
+        runtime,
         request_id,
         "cancelled",
         json!({ "request_id": request_id }),
@@ -292,7 +301,7 @@ fn emit_secret_cancelled(bus: &zbus::Connection, request_id: &str) {
 }
 
 fn emit_secret_persistence(
-    bus: &zbus::Connection,
+    runtime: &Weak<DaemonRuntime>,
     request_id: &str,
     outcome: SecretPersistenceOutcome,
 ) {
@@ -313,18 +322,20 @@ fn emit_secret_persistence(
             "error": error,
         }),
     };
-    emit_secret_event(bus, request_id, "persistence", data);
+    emit_secret_event(runtime, request_id, "persistence", data);
 }
 
-fn emit_secret_event(bus: &zbus::Connection, request_id: &str, event: &str, data: Value) {
-    let Ok(emitter) = SignalEmitter::new(bus, DBUS_OBJECT_PATH) else {
-        tracing::warn!(
-            request_id,
-            "failed to create main-path SignalEmitter for secret request"
-        );
+fn emit_secret_event(
+    runtime: &Weak<DaemonRuntime>,
+    request_id: &str,
+    event: &'static str,
+    data: Value,
+) {
+    let Some(runtime) = runtime.upgrade() else {
+        tracing::warn!(request_id, "daemon runtime unavailable for secret event");
         return;
     };
-    emit_json_event_nonfatal(&emitter, Stream::WifiSecret, Some(request_id), event, data);
+    runtime.emit_external(Stream::WifiSecret, request_id.to_string(), event, data);
 }
 
 fn lookup_stored_secret(
@@ -701,6 +712,7 @@ enum SecretPersistenceOutcome {
 
 struct PendingEntry {
     key: String,
+    owners: HashSet<String>,
     sender: Sender<SecretResponse>,
 }
 
@@ -714,6 +726,7 @@ impl PendingRegistry {
         &mut self,
         request_id: String,
         key: String,
+        owners: Vec<String>,
         sender: Sender<SecretResponse>,
     ) -> Option<(String, Sender<SecretResponse>)> {
         let duplicate = self
@@ -722,10 +735,14 @@ impl PendingRegistry {
             .find_map(|(id, entry)| (entry.key == key).then(|| id.clone()));
         let displaced =
             duplicate.and_then(|id| self.requests.remove(&id).map(|entry| (id, entry.sender)));
-        if let Some(replaced) = self
-            .requests
-            .insert(request_id.clone(), PendingEntry { key, sender })
-        {
+        if let Some(replaced) = self.requests.insert(
+            request_id.clone(),
+            PendingEntry {
+                key,
+                owners: owners.into_iter().collect(),
+                sender,
+            },
+        ) {
             tracing::warn!(%request_id, "replaced colliding SecretAgent request id");
             let _ = replaced.sender.send(SecretResponse::cancelled());
         }
@@ -734,6 +751,18 @@ impl PendingRegistry {
 
     fn remove(&mut self, request_id: &str) -> Option<Sender<SecretResponse>> {
         self.requests.remove(request_id).map(|entry| entry.sender)
+    }
+
+    fn remove_for_owner(
+        &mut self,
+        request_id: &str,
+        owner: Option<&str>,
+    ) -> Option<Sender<SecretResponse>> {
+        let authorized = self
+            .requests
+            .get(request_id)
+            .is_some_and(|entry| owner.is_some_and(|owner| entry.owners.contains(owner)));
+        authorized.then(|| self.remove(request_id)).flatten()
     }
 
     fn remove_by_key(&mut self, key: &str) -> Option<(String, Sender<SecretResponse>)> {
@@ -784,11 +813,21 @@ mod tests {
 
         assert!(
             registry
-                .insert("first".into(), "connection\nsetting".into(), first_sender)
+                .insert(
+                    "first".into(),
+                    "connection\nsetting".into(),
+                    vec![":1.1".into()],
+                    first_sender,
+                )
                 .is_none()
         );
         let (displaced_id, displaced_sender) = registry
-            .insert("second".into(), "connection\nsetting".into(), second_sender)
+            .insert(
+                "second".into(),
+                "connection\nsetting".into(),
+                vec![":1.1".into()],
+                second_sender,
+            )
             .expect("duplicate key should displace its prior request");
         displaced_sender
             .send(SecretResponse::cancelled())
@@ -812,6 +851,24 @@ mod tests {
     }
 
     #[test]
+    fn pending_secret_response_is_scoped_to_notified_owner() {
+        let mut registry = PendingRegistry::default();
+        let (sender, _receiver) = mpsc::channel();
+        registry.insert(
+            "owned".into(),
+            "connection\nsetting".into(),
+            vec![":1.7".into()],
+            sender,
+        );
+
+        assert!(registry.remove_for_owner("owned", Some(":1.8")).is_none());
+        assert!(registry.requests.contains_key("owned"));
+        assert!(registry.remove_for_owner("owned", None).is_none());
+        assert!(registry.remove_for_owner("owned", Some(":1.7")).is_some());
+        assert!(!registry.requests.contains_key("owned"));
+    }
+
+    #[test]
     fn pending_registration_removes_itself_when_waiting_scope_ends() {
         let request_id = "test-secret-registration-raii";
         remove_pending(request_id);
@@ -820,6 +877,7 @@ mod tests {
             let _ = registry.insert(
                 request_id.into(),
                 "test-connection\ntest-setting".into(),
+                vec![":1.1".into()],
                 sender,
             );
         });
@@ -840,7 +898,7 @@ mod tests {
     #[test]
     fn pending_secret_delivery_observes_delay_and_timeout_cleanup() {
         let delivered = pending_request("timed-delivery", "timed-delivery-key");
-        let (registration, displaced) = register_pending(&delivered);
+        let (registration, displaced) = register_pending(&delivered, vec![":1.1".into()]);
         assert!(displaced.is_none());
         let sender = std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(20));
@@ -865,7 +923,7 @@ mod tests {
         drop(registration);
 
         let timed_out = pending_request("timed-out", "timed-out-key");
-        let (registration, displaced) = register_pending(&timed_out);
+        let (registration, displaced) = register_pending(&timed_out, vec![":1.1".into()]);
         assert!(displaced.is_none());
         assert!(matches!(
             registration.recv_timeout(Duration::from_millis(10)),

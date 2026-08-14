@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::application::{Application, NetworksRequest, ProfileOperation, ProfileOperationResult};
 use crate::daemon_runtime::DaemonRuntime;
-use crate::error::ErrorOperation;
+use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     NmObjectPath, WifiConnectTarget, WifiProfileUpdate, connect_target_for_network_key,
 };
@@ -237,12 +237,17 @@ fn forget_target(
     key: Option<String>,
     target: Option<Box<WifiConnectTarget>>,
 ) -> Result<Box<WifiConnectTarget>> {
-    match (key, target) {
-        (Some(key), None) => Ok(Box::new(connect_target_for_network_key(&key, None)?)),
+    let result = match (key, target) {
+        (Some(key), None) => connect_target_for_network_key(&key, None).map(Box::new),
         (None, Some(target)) => Ok(target),
-        (Some(_), Some(_)) => {
-            anyhow::bail!("forget request must provide either key or target, not both")
-        }
-        (None, None) => anyhow::bail!("forget request must provide key or target"),
-    }
+        (Some(_), Some(_)) => Err(anyhow::anyhow!(
+            "forget request must provide either key or target, not both"
+        )),
+        (None, None) => Err(anyhow::anyhow!("forget request must provide key or target")),
+    };
+    result.map_err(|error| {
+        DomainError::validation(ErrorOperation::ProfileOperation, &error)
+            .with_cause(error)
+            .into()
+    })
 }

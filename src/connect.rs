@@ -450,7 +450,7 @@ fn read_active_status_after_connect(
     nm: &Nm,
     cancellation: Option<&AtomicBool>,
 ) -> Result<WifiStatus> {
-    let deadline = Deadline::from_now(POST_CONNECT_STATUS_WAIT);
+    let deadline = Deadline::from_now(POST_CONNECT_STATUS_WAIT)?;
     let mut event_generation = nm.event_generation();
     loop {
         check_cancelled(cancellation)?;

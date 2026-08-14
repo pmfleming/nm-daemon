@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
@@ -39,8 +40,27 @@ impl CancelOutcome {
 
 struct TaskHandle {
     kind: TaskKind,
+    owner: Option<String>,
     target_ssid: Option<Vec<u8>>,
     cancellation: Arc<AtomicBool>,
+}
+
+struct TaskRegistration {
+    runtime: Weak<DaemonRuntime>,
+    request_id: String,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl Drop for TaskRegistration {
+    fn drop(&mut self) {
+        let Some(runtime) = self.runtime.upgrade() else {
+            return;
+        };
+        recover_lock(&runtime.tasks, "daemon task map").retain(|request_id, handle| {
+            request_id != &self.request_id || !Arc::ptr_eq(&handle.cancellation, &self.cancellation)
+        });
+        runtime.tasks_changed.notify_all();
+    }
 }
 
 struct CancelledTask {
@@ -115,6 +135,7 @@ impl DaemonRuntime {
         self: &Arc<Self>,
         request_id: String,
         kind: TaskKind,
+        owner: Option<String>,
         target_ssid: Option<Vec<u8>>,
         task: impl FnOnce(&Nm, &AtomicBool) + Send + 'static,
     ) -> Result<()> {
@@ -123,29 +144,24 @@ impl DaemonRuntime {
             request_id.clone(),
             TaskHandle {
                 kind,
+                owner,
                 target_ssid,
                 cancellation: Arc::clone(&cancellation),
             },
         );
-        let runtime = Arc::downgrade(self);
+        let registration = TaskRegistration {
+            runtime: Arc::downgrade(self),
+            request_id,
+            cancellation: Arc::clone(&cancellation),
+        };
         let operation = kind.operation();
-        let task_cancellation = Arc::clone(&cancellation);
-        let submit = self.submit(
+        self.submit(
             operation,
             Box::new(move |nm| {
-                task(nm, &task_cancellation);
-                if let Some(runtime) = runtime.upgrade() {
-                    recover_lock(&runtime.tasks, "daemon task map").remove(&request_id);
-                    runtime.tasks_changed.notify_all();
-                }
+                let _registration = registration;
+                task(nm, &cancellation);
             }),
-        );
-        if submit.is_err() {
-            recover_lock(&self.tasks, "daemon task map")
-                .retain(|_, handle| !Arc::ptr_eq(&handle.cancellation, &cancellation));
-            self.tasks_changed.notify_all();
-        }
-        submit
+        )
     }
 
     pub(crate) fn cancel_connects_for_ssid(
@@ -182,7 +198,9 @@ impl DaemonRuntime {
         if request_ids.is_empty() {
             return Vec::new();
         }
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now);
         let mut tasks = recover_lock(&self.tasks, "daemon task map");
         loop {
             let mut pending = request_ids
@@ -228,16 +246,17 @@ impl DaemonRuntime {
             .map_err(|_| runtime_stopped(ErrorOperation::Subscribe))
     }
 
-    pub(crate) fn cancel(&self, request_id: &str) -> CancelOutcome {
-        let task = self.cancel_task(request_id);
+    pub(crate) fn cancel(&self, request_id: &str, owner: Option<&str>) -> CancelOutcome {
+        let task = self.cancel_task(request_id, owner);
         self.nm.wake_waiters();
         self.abort_cancelled_connect(request_id, task.as_ref());
-        self.cancel_subscription(request_id, task.is_some())
+        self.cancel_subscription(request_id, owner, task.is_some())
     }
 
-    fn cancel_task(&self, request_id: &str) -> Option<CancelledTask> {
+    fn cancel_task(&self, request_id: &str, owner: Option<&str>) -> Option<CancelledTask> {
         recover_lock(&self.tasks, "daemon task map")
             .get(request_id)
+            .filter(|task| task.owner.as_deref() == owner)
             .map(|task| {
                 task.cancellation.store(true, Ordering::Relaxed);
                 CancelledTask {
@@ -271,12 +290,18 @@ impl DaemonRuntime {
         )
     }
 
-    fn cancel_subscription(&self, request_id: &str, task_found: bool) -> CancelOutcome {
+    fn cancel_subscription(
+        &self,
+        request_id: &str,
+        owner: Option<&str>,
+        task_found: bool,
+    ) -> CancelOutcome {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         if self
             .control
             .try_send(Control::CancelSubscription {
                 id: request_id.to_string(),
+                owner: owner.map(ToString::to_string),
                 task_found,
                 reply: reply_tx,
             })
@@ -293,9 +318,65 @@ impl DaemonRuntime {
         })
     }
 
+    fn cancel_tasks_for_owner(&self, owner: &str) -> Vec<(String, CancelledTask)> {
+        recover_lock(&self.tasks, "daemon task map")
+            .iter()
+            .filter(|(_, task)| task.owner.as_deref() == Some(owner))
+            .map(|(request_id, task)| {
+                task.cancellation.store(true, Ordering::Relaxed);
+                (
+                    request_id.clone(),
+                    CancelledTask {
+                        kind: task.kind,
+                        target_ssid: task.target_ssid.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn drop_owner(&self, owner: String) {
+        let cancelled = self.cancel_tasks_for_owner(&owner);
+        if !cancelled.is_empty() {
+            self.nm.wake_waiters();
+            for (request_id, task) in cancelled {
+                self.abort_cancelled_connect(&request_id, Some(&task));
+            }
+        }
         if let Err(error) = self.control.try_send(Control::DropOwner(owner)) {
             tracing::warn!(error = ?error, "could not queue disconnected D-Bus owner cleanup");
+        }
+    }
+
+    pub(crate) fn subscriber_owners(&self, stream: Stream) -> Vec<String> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        if self
+            .control
+            .try_send(Control::SubscriberOwners {
+                stream,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        reply_rx.recv().unwrap_or_default()
+    }
+
+    pub(crate) fn emit_external(
+        &self,
+        stream: Stream,
+        request_id: String,
+        event: &'static str,
+        data: Value,
+    ) {
+        if let Err(error) = self.control.try_send(Control::ExternalEvent {
+            stream,
+            request_id,
+            event,
+            data,
+        }) {
+            tracing::warn!(?error, "could not queue external daemon event");
         }
     }
 
@@ -384,8 +465,19 @@ enum Control {
     },
     CancelSubscription {
         id: String,
+        owner: Option<String>,
         task_found: bool,
         reply: SyncSender<CancelOutcome>,
+    },
+    SubscriberOwners {
+        stream: Stream,
+        reply: SyncSender<Vec<String>>,
+    },
+    ExternalEvent {
+        stream: Stream,
+        request_id: String,
+        event: &'static str,
+        data: Value,
     },
     DropOwner(String),
     NetworkChanged,
@@ -425,7 +517,13 @@ fn start_workers(
                     let Ok(job) = job else {
                         break;
                     };
-                    job(&nm);
+                    if catch_unwind(AssertUnwindSafe(|| job(&nm))).is_err() {
+                        tracing::error!(
+                            worker = thread_name,
+                            index,
+                            "daemon worker job panicked; worker remains available"
+                        );
+                    }
                 }
             })
             .expect("spawn daemon worker");
@@ -468,9 +566,26 @@ fn handle_control(
         } => add_subscription(subscription, reply, runtime, subscriptions, refresh),
         Control::CancelSubscription {
             id,
+            owner,
             task_found,
             reply,
-        } => remove_subscription(id, task_found, reply, subscriptions),
+        } => remove_subscription(id, owner.as_deref(), task_found, reply, subscriptions),
+        Control::SubscriberOwners { stream, reply } => {
+            let owners = subscriptions
+                .values()
+                .filter(|subscription| subscription.watches(stream))
+                .filter_map(|subscription| subscription.owner().map(ToString::to_string))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let _ = reply.send(owners);
+        }
+        Control::ExternalEvent {
+            stream,
+            request_id,
+            event,
+            data,
+        } => emit_external_to_subscribers(subscriptions, stream, &request_id, event, &data),
         Control::DropOwner(owner) => drop_subscriptions_for_owner(&owner, subscriptions),
         Control::NetworkChanged => request_shared_refresh(runtime, subscriptions, refresh),
         Control::Refreshed(payloads) => {
@@ -493,11 +608,16 @@ fn add_subscription(
 
 fn remove_subscription(
     id: String,
+    owner: Option<&str>,
     task_found: bool,
     reply: SyncSender<CancelOutcome>,
     subscriptions: &mut HashMap<String, SubscriptionState>,
 ) {
-    let subscription = subscriptions.remove(&id);
+    let subscription = subscriptions
+        .get(&id)
+        .filter(|subscription| subscription.owner() == owner)
+        .map(|_| id.clone())
+        .and_then(|id| subscriptions.remove(&id));
     let _ = reply.send(CancelOutcome {
         task: task_found,
         subscription: subscription.is_some(),
@@ -509,6 +629,27 @@ fn drop_subscriptions_for_owner(
     subscriptions: &mut HashMap<String, SubscriptionState>,
 ) {
     subscriptions.retain(|_, subscription| !subscription.owned_by(owner));
+}
+
+fn emit_external_to_subscribers(
+    subscriptions: &HashMap<String, SubscriptionState>,
+    stream: Stream,
+    request_id: &str,
+    event: &str,
+    data: &Value,
+) {
+    let mut emitted_owners = HashSet::new();
+    subscriptions
+        .values()
+        .filter(|subscription| subscription.watches(stream))
+        .filter(|subscription| {
+            subscription
+                .owner()
+                .is_some_and(|owner| emitted_owners.insert(owner.to_string()))
+        })
+        .for_each(|subscription| {
+            subscription.emit_external(stream, request_id, event, data.clone())
+        });
 }
 
 fn complete_shared_refresh(

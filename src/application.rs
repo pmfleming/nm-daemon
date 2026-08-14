@@ -6,6 +6,7 @@ use crate::connect;
 use crate::error::{
     DomainError, ErrorOperation, ErrorReport, best_effort, ensure_domain, operation_result,
 };
+use crate::generated::REQUEST_TIMEOUT_MAX;
 use crate::model::{
     AccessPoint, ConnectResult, ConnectivityStatus, DisconnectResult, InterfaceName, NetworkEntry,
     NmObjectPath, RadioPowerResult, SavedWifiConnection, ScanRequestOptions, WepKeyType,
@@ -69,6 +70,7 @@ impl<'a> Application<'a> {
         operation_result(
             ErrorOperation::Networks,
             (|| {
+                request.validate()?;
                 let (access_points, warning) = self.load_networks(&request)?;
                 let networks = self.enrich_access_points(access_points)?;
                 Ok(NetworksResult { networks, warning })
@@ -506,6 +508,14 @@ impl NetworksRequest {
             refresh_timeout,
         }
     }
+
+    fn validate(&self) -> Result<()> {
+        validate_request_timeout(
+            self.refresh_timeout,
+            ErrorOperation::Networks,
+            "refresh_timeout",
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -525,6 +535,7 @@ pub(crate) struct ScanRequest {
 
 impl ScanRequest {
     pub(crate) fn prepare(self) -> Result<PreparedScanRequest> {
+        validate_request_timeout(self.timeout, ErrorOperation::Scan, "timeout")?;
         Ok(PreparedScanRequest {
             timeout: self.timeout,
             strict: self.strict,
@@ -645,6 +656,26 @@ pub(crate) enum ProfileOperationResult {
     Details(Box<WifiProfileDetails>),
     Secret(WifiProfileSecret),
     Share(WifiSharePayload),
+}
+
+fn validate_request_timeout(
+    timeout: Duration,
+    operation: ErrorOperation,
+    field: &'static str,
+) -> Result<()> {
+    if timeout.is_zero() || timeout > REQUEST_TIMEOUT_MAX {
+        return Err(DomainError::validation(
+            operation,
+            format!(
+                "{field} must be between 1 ms and {} ms",
+                REQUEST_TIMEOUT_MAX.as_millis()
+            ),
+        )
+        .with_detail("field", field)
+        .with_detail("max_ms", REQUEST_TIMEOUT_MAX.as_millis() as u64)
+        .into());
+    }
+    Ok(())
 }
 
 pub(crate) fn validated_ssids(ssids: Vec<String>) -> Result<Vec<Vec<u8>>> {
@@ -793,5 +824,17 @@ mod tests {
         );
         assert!(request(vec![String::new()]).prepare().is_err());
         assert!(request(vec!["x".repeat(33)]).prepare().is_err());
+
+        let excessive = ScanRequest {
+            timeout: Duration::from_secs(u64::MAX),
+            strict: false,
+            cache: false,
+            ifname: None,
+            ssids: Vec::new(),
+        };
+        let error = excessive.prepare().unwrap_err();
+        let report =
+            crate::error::ErrorReport::from_error(&error, crate::error::ErrorOperation::Unknown);
+        assert_eq!(report.code, crate::error::ErrorCode::ValidationError);
     }
 }

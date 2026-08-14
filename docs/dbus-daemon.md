@@ -33,7 +33,7 @@ signal Event(s stream, s event_json)
 
 `params_json` is a JSON object encoded as a string. An empty string is treated as `{}`. `response_json` is a JSON string containing the same v1 envelope as the CLI.
 
-`Event` signals are broadcast on the user/session object. `event_json` also carries `protocol`, `version`, `stream`, `event`, and usually `request_id` so Shelllist can filter relevant events.
+`Event` signals are directed to the D-Bus sender that started an operation or created a subscription. `event_json` also carries `protocol`, `version`, `stream`, `event`, and usually `request_id` for correlation. Request and subscription cancellation is owner-scoped; disconnecting a client cancels its work and removes its subscriptions.
 
 <!-- BEGIN GENERATED PROTOCOL REGISTRY -->
 ### Method registry
@@ -154,7 +154,7 @@ The underlying connection workflow is the canonical `AlreadyActive → SavedProf
 
 ### `wifi.secret`
 
-SecretAgent registration is live when NetworkManager is available on the system bus. The daemon exports `/org/laufan/NmDaemon/SecretAgent` on the system bus, registers it with `org.freedesktop.NetworkManager.AgentManager`, and bridges `GetSecrets` to Shelllist through `wifi.secret` events.
+SecretAgent registration is live when NetworkManager is available on the system bus. The daemon exports `/org/laufan/NmDaemon/SecretAgent` on the system bus, registers it with `org.freedesktop.NetworkManager.AgentManager`, and bridges `GetSecrets` to Shelllist through `wifi.secret` events. A frontend must hold an active `wifi.secret` subscription before the request begins; prompt events are directed only to those subscribers, and only an owner that received the prompt may answer it.
 
 Events:
 

@@ -38,6 +38,7 @@ fn main() {
     generate_integer_constants(
         &storage_path,
         &[
+            ("cache_max_bytes", "CACHE_MAX_BYTES", "u64"),
             ("history_max_bytes", "HISTORY_MAX_BYTES", "u64"),
             ("history_rotations", "HISTORY_ROTATIONS", "usize"),
         ],
@@ -137,6 +138,7 @@ fn generate_wifi_channels(path: &Path, generated: &mut String) {
 
 fn generate_durations(path: &Path, generated: &mut String) {
     let specs = [
+        ("request_timeout_max_ms", "REQUEST_TIMEOUT_MAX"),
         ("command_poll_interval_ms", "COMMAND_POLL_INTERVAL"),
         ("nmcli_query_timeout_ms", "NMCLI_QUERY_TIMEOUT"),
         ("post_connect_status_wait_ms", "POST_CONNECT_STATUS_WAIT"),

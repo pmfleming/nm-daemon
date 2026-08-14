@@ -16,6 +16,7 @@ use crate::protocol::Method;
 pub(super) fn dispatch(
     method: Method,
     params_json: &str,
+    owner: Option<&str>,
     runtime: &Arc<DaemonRuntime>,
 ) -> Result<Value> {
     match method {
@@ -36,9 +37,10 @@ pub(super) fn dispatch(
                 params_json,
             )?)
         }
-        Method::WifiSecretProvide => crate::daemon_secret::provide(parse_required_params::<
-            SecretProvideParams,
-        >(params_json)?),
+        Method::WifiSecretProvide => crate::daemon_secret::provide(
+            owner,
+            parse_required_params::<SecretProvideParams>(params_json)?,
+        ),
         _ => Err(wrong_dispatch_group(method)),
     }
 }

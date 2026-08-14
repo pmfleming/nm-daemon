@@ -27,7 +27,7 @@ pub(crate) fn wait_for_active_target(
     if let Some(device) = activation_device.as_ref() {
         tracing::debug!(ssid = %target.ssid, iface = %device.iface, device = %device.path, "cached activation device for signal-assisted wait loop");
     }
-    let deadline = Deadline::from_now(ACTIVATION_TIMEOUT);
+    let deadline = Deadline::from_now(ACTIVATION_TIMEOUT)?;
     let mut wait = ActivationWait::default();
     let mut event_generation = nm.event_generation();
     while !deadline.expired() {

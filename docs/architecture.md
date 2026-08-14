@@ -84,7 +84,7 @@ The text between the generated-registry markers in the D-Bus guide is checked ag
 
 Repository guarantees include:
 
-- private directories/files and symlink rejection;
+- private directories/files, no-follow symlink rejection, regular-file checks, and bounded cache reads;
 - per-repository advisory file locking around write transactions and read-modify-write operations;
 - unique temporary files followed by atomic rename for JSON records;
 - explicit `Missing`, `Stale`, `Corrupt`, and `Available` read states;
@@ -108,7 +108,7 @@ Directional transmit and receive link rates bypass the command gateway. `src/nl8
 
 The daemon creates one shared `Nm` instance and therefore one NetworkManager system-bus connection. `DaemonRuntime` owns:
 
-- a bounded long-running work queue for cancellable scan/connect jobs;
+- a bounded long-running work queue for cancellable scan/connect jobs, with panic containment and owner-scoped cleanup;
 - a separate bounded fast lane for synchronous calls, status refreshes, and target-guarded activation aborts so they do not queue behind multi-second jobs;
 - cancellable scan/connect task registrations;
 - one control/event loop for all subscriptions;
@@ -116,13 +116,13 @@ The daemon creates one shared `Nm` instance and therefore one NetworkManager sys
 - coalesced status/connectivity refreshes shared by all subscribers;
 - coalesced background cache refreshes.
 
-Continuous streams are signal-driven, not one polling thread per subscription. Each refresh is computed once for the set of interested subscribers, and duplicate invalidations are coalesced without losing the final change. `Cancel` marks a task, wakes activation waits, and queues a best-effort activation abort for connect cancellation. The task registration retains the requested SSID bytes; the abort resolves the current active-connection object and its profile, deactivates that captured object path only when the profile still matches those bytes, and otherwise returns a no-op. This closes the race where a failed target hands control back to NetworkManager and a late cancel could otherwise disconnect the healthy profile NetworkManager restored.
+Operation and subscription signals are directed to their originating session-bus owner rather than broadcast. Cancellation verifies that owner, and D-Bus disconnect cleanup cancels owned tasks as well as subscriptions. Continuous streams are signal-driven, not one polling thread per subscription. Each refresh is computed once for the set of interested subscribers, and duplicate invalidations are coalesced without losing the final change. `Cancel` marks a task, wakes activation waits, and queues a best-effort activation abort for connect cancellation. The task registration retains the requested SSID bytes; the abort resolves the current active-connection object and its profile, deactivates that captured object path only when the profile still matches those bytes, and otherwise returns a no-op. This closes the race where a failed target hands control back to NetworkManager and a late cancel could otherwise disconnect the healthy profile NetworkManager restored.
 
 ## SecretAgent and Secret Service
 
 The daemon registers one NetworkManager SecretAgent and keeps pending requests in one registry keyed consistently by request id and connection/setting key. A registration guard removes pending entries when a request completes, is cancelled, times out, or unwinds; poisoned mutexes are recovered rather than terminating the daemon.
 
-`src/nm/settings/profile_secrets.rs` owns saved-profile secret classification, reveal, validation, and replacement so general NetworkManager settings parsing does not duplicate security-specific rules. `wifi.secret.provide` accepts requested named values or explicit cancellation and reports whether NetworkManager accepted the response. With `save:true`, its immediate `persistence_status` is `pending`; a later `wifi.secret persistence` event reports `stored`, `prompt_unsupported`, or `failed`. Advanced saved-profile reveal/update uses the same named-secret model: WPA/WEP/LEAP values live in `802-11-wireless-security`, while enterprise password/private-key-password/PIN values correctly live in `802-1x`; the compatibility `password` field aliases the profile's primary secret. The generic agent also recognizes NetworkManager 1.60's `wifi-p2p.wps-pin`, independently of nm-daemon's infrastructure-Wi-Fi operation surface.
+`src/nm/settings/profile_secrets.rs` owns saved-profile secret classification, reveal, validation, and replacement so general NetworkManager settings parsing does not duplicate security-specific rules. `wifi.secret.provide` accepts requested named values or explicit cancellation and reports whether NetworkManager accepted the response. Secret prompts are directed only to owners that already subscribe to `wifi.secret`, and the pending registry accepts a response only from one of those owners. With `save:true`, its immediate `persistence_status` is `pending`; a later `wifi.secret persistence` event reports `stored`, `prompt_unsupported`, or `failed`. Advanced saved-profile reveal/update uses the same named-secret model: WPA/WEP/LEAP values live in `802-11-wireless-security`, while enterprise password/private-key-password/PIN values correctly live in `802-1x`; the compatibility `password` field aliases the profile's primary secret. The generic agent also recognizes NetworkManager 1.60's `wifi-p2p.wps-pin`, independently of nm-daemon's infrastructure-Wi-Fi operation surface.
 
 Each SecretAgent lookup or multi-secret persistence batch opens one Secret Service session and reuses it for every key in that batch; capability probing checks the service without opening a secret session. Secret Service create, delete, and unlock calls are transactional only when they complete without a desktop prompt. Because the daemon cannot present desktop keyring prompts, it dismisses them and reports `prompt_unsupported`; prompted work is never counted as success. `wifi.secret.capabilities` advertises this as `prompt_handling: "unsupported"` and `prompt_policy: "dismiss_and_report"`.
 

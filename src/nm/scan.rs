@@ -22,7 +22,7 @@ impl Nm {
             ifname = ?options.ifname,
             "starting blocking Wi-Fi scan"
         );
-        let deadline = Deadline::from_now(options.timeout);
+        let deadline = Deadline::from_now(options.timeout)?;
         let devices = self.wait_for_scan_devices(
             options.ifname.as_ref().map(InterfaceName::as_str),
             deadline,

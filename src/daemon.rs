@@ -18,7 +18,7 @@ pub(crate) fn run_daemon() -> Result<()> {
     let runtime = DaemonRuntime::start(crate::nm::Nm::new()?);
     export_daemon_interface(&connection, &runtime)?;
     watch_client_disconnects(connection.clone(), Arc::clone(&runtime))?;
-    register_secret_agent(&connection, &runtime);
+    register_secret_agent(&runtime);
     log_daemon_started();
     loop {
         std::thread::park();
@@ -44,11 +44,10 @@ fn export_daemon_interface(
     Ok(())
 }
 
-fn register_secret_agent(connection: &zbus::blocking::Connection, runtime: &DaemonRuntime) {
-    if let Err(err) = crate::daemon_secret::register_secret_agent(
-        connection,
-        &runtime.network_manager_connection(),
-    ) {
+fn register_secret_agent(runtime: &Arc<DaemonRuntime>) {
+    if let Err(err) =
+        crate::daemon_secret::register_secret_agent(&runtime.network_manager_connection(), runtime)
+    {
         tracing::warn!(error = %crate::error::err_chain(&err), "NetworkManager SecretAgent registration failed");
     }
 }
@@ -73,34 +72,42 @@ impl NmDaemonInterface {
         &self,
         method: &str,
         params_json: &str,
+        #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> String {
+        let owner = header.sender().map(ToString::to_string);
+        let emitter = directed_emitter(&emitter, &header);
         json_response(dispatch_call(
             method,
             params_json,
-            emitter.to_owned(),
+            owner,
+            emitter,
             &self.runtime,
         ))
     }
 
-    /// Subscribe to daemon event streams. Signals are broadcast as Event(stream, event_json).
+    /// Subscribe to daemon event streams. Event signals are directed to the subscribing owner.
     fn subscribe(
         &self,
         streams: Vec<String>,
         #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> String {
-        json_response(subscribe_streams(
-            streams,
-            header.sender().map(ToString::to_string),
-            emitter.to_owned(),
-            &self.runtime,
-        ))
+        let owner = header.sender().map(ToString::to_string);
+        let emitter = directed_emitter(&emitter, &header);
+        json_response(subscribe_streams(streams, owner, emitter, &self.runtime))
     }
 
     /// Cancel a daemon request or subscription. In-flight NetworkManager calls may finish later.
-    fn cancel(&self, request_id: &str, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>) {
-        let outcome = self.runtime.cancel(request_id);
+    fn cancel(
+        &self,
+        request_id: &str,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) {
+        let owner = header.sender().map(ToString::to_string);
+        let emitter = directed_emitter(&emitter, &header);
+        let outcome = self.runtime.cancel(request_id, owner.as_deref());
         if outcome.subscription {
             emit_json_event_nonfatal(
                 &emitter,
@@ -124,6 +131,13 @@ impl NmDaemonInterface {
     #[zbus(signal)]
     async fn event(emitter: &SignalEmitter<'_>, stream: &str, event_json: &str)
     -> zbus::Result<()>;
+}
+
+fn directed_emitter(emitter: &SignalEmitter<'_>, header: &Header<'_>) -> SignalEmitter<'static> {
+    match header.sender() {
+        Some(sender) => emitter.to_owned().set_destination(sender.to_owned().into()),
+        None => emitter.to_owned(),
+    }
 }
 
 fn watch_client_disconnects(
@@ -366,6 +380,22 @@ mod tests {
         let unsupported: Value = serde_json::from_str(&unsupported_json).unwrap();
         assert_eq!(unsupported["ok"], false);
         assert_eq!(unsupported["error"]["code"], "validation-error");
+
+        let invalid_connect_json: String =
+            proxy.call("Call", &("wifi.connectTarget", "{}")).unwrap();
+        let invalid_connect: Value = serde_json::from_str(&invalid_connect_json).unwrap();
+        assert_eq!(invalid_connect["ok"], false);
+        assert_eq!(invalid_connect["error"]["code"], "validation-error");
+
+        let excessive_scan_json: String = proxy
+            .call(
+                "Call",
+                &("wifi.scan", r#"{"timeout":18446744073709551615}"#),
+            )
+            .unwrap();
+        let excessive_scan: Value = serde_json::from_str(&excessive_scan_json).unwrap();
+        assert_eq!(excessive_scan["ok"], false);
+        assert_eq!(excessive_scan["error"]["code"], "validation-error");
     }
 
     fn next_event(events: &mut zbus::blocking::proxy::SignalIterator<'_>) -> (String, Value) {

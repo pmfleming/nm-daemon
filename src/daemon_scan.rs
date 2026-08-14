@@ -44,6 +44,7 @@ impl From<DbusScanParams> for ScanRequest {
 pub(crate) fn start_scan(
     runtime: &Arc<DaemonRuntime>,
     params: DbusScanParams,
+    owner: Option<String>,
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
     let request = ScanRequest::from(params).prepare()?;
@@ -52,6 +53,7 @@ pub(crate) fn start_scan(
     runtime.start_cancellable(
         request_id.clone(),
         TaskKind::Scan,
+        owner,
         None,
         move |nm, cancellation| {
             if let Err(err) =

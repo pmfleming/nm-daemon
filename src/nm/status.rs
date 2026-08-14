@@ -40,9 +40,20 @@ impl Nm {
     }
 
     pub(crate) fn set_wireless_enabled(&self, enabled: bool) -> Result<WifiPowerResult> {
+        let mut state = self
+            .radio_restore
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.root_proxy()
             .set_property("WirelessEnabled", enabled)
             .context("set NetworkManager WirelessEnabled")?;
+        if !state.airplane_mode || enabled {
+            state.wireless_enabled = enabled;
+        }
+        if enabled {
+            state.airplane_mode = false;
+        }
+        drop(state);
         self.wake_waiters();
         Ok(WifiPowerResult {
             enabled,
@@ -64,11 +75,20 @@ impl Nm {
         let wwan_enabled = root.get_property("WwanEnabled").unwrap_or(false);
         let wwan_hardware_enabled = root.get_property("WwanHardwareEnabled").unwrap_or(true);
         let (wireless_available, wwan_available) = self.radio_device_availability()?;
-        let airplane_mode = self
+        let mut restore = self
             .radio_restore
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .airplane_mode;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if restore.airplane_mode && (wireless_enabled || wwan_enabled) {
+            tracing::info!(
+                wireless_enabled,
+                wwan_enabled,
+                "clearing stale airplane-mode state after an external radio change"
+            );
+            restore.airplane_mode = false;
+        }
+        let airplane_mode = restore.airplane_mode;
+        drop(restore);
         Ok(RadioStatus {
             wireless_enabled,
             wireless_hardware_enabled,
@@ -97,9 +117,20 @@ impl Nm {
     }
 
     pub(crate) fn set_wwan_enabled(&self, enabled: bool) -> Result<RadioPowerResult> {
+        let mut state = self
+            .radio_restore
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.root_proxy()
             .set_property("WwanEnabled", enabled)
             .context("set NetworkManager WwanEnabled")?;
+        if !state.airplane_mode || enabled {
+            state.wwan_enabled = enabled;
+        }
+        if enabled {
+            state.airplane_mode = false;
+        }
+        drop(state);
         self.wake_waiters();
         Ok(RadioPowerResult {
             radios: self.radio_status()?,
@@ -118,21 +149,47 @@ impl Nm {
             .radio_restore
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if enabled && !state.airplane_mode {
-            state.wireless_enabled = root.get_property("WirelessEnabled").unwrap_or(false);
-            state.wwan_enabled = root.get_property("WwanEnabled").unwrap_or(false);
+        if !enabled && !state.airplane_mode {
+            drop(state);
+            return Ok(RadioPowerResult {
+                radios: self.radio_status()?,
+                message: "Airplane mode disabled".to_string(),
+            });
         }
-        state.airplane_mode = enabled;
+
+        let current = (
+            root.get_property("WirelessEnabled")
+                .context("read Wi-Fi before airplane-mode change")?,
+            root.get_property("WwanEnabled")
+                .context("read WWAN before airplane-mode change")?,
+        );
         let target = if enabled {
             (false, false)
         } else {
             (state.wireless_enabled, state.wwan_enabled)
         };
-        drop(state);
+
         root.set_property("WirelessEnabled", target.0)
             .context("set Wi-Fi for airplane mode")?;
-        root.set_property("WwanEnabled", target.1)
-            .context("set WWAN for airplane mode")?;
+        if let Err(error) = root.set_property("WwanEnabled", target.1) {
+            if let Err(rollback_error) = root.set_property("WirelessEnabled", current.0) {
+                tracing::error!(
+                    error = %rollback_error,
+                    "failed to roll back Wi-Fi after airplane-mode WWAN update failed"
+                );
+            }
+            return Err(error).context("set WWAN for airplane mode");
+        }
+
+        if enabled && !state.airplane_mode {
+            state.wireless_enabled = current.0;
+            state.wwan_enabled = current.1;
+        } else if !enabled {
+            state.wireless_enabled = target.0;
+            state.wwan_enabled = target.1;
+        }
+        state.airplane_mode = enabled;
+        drop(state);
         self.wake_waiters();
         Ok(RadioPowerResult {
             radios: self.radio_status()?,

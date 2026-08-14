@@ -20,13 +20,14 @@ mod immediate;
 pub(crate) fn dispatch_call(
     method: &str,
     params_json: &str,
+    owner: Option<String>,
     emitter: SignalEmitter<'static>,
     runtime: &Arc<DaemonRuntime>,
 ) -> Result<Value> {
     let Some(method) = Method::parse(method) else {
         return Ok(unsupported_method_value(method));
     };
-    let result = dispatch_method(method, params_json, emitter, runtime);
+    let result = dispatch_method(method, params_json, owner, emitter, runtime);
     operation_result(method.spec().operation, result)
 }
 
@@ -54,6 +55,7 @@ pub(super) fn wrong_dispatch_group(method: Method) -> anyhow::Error {
 fn dispatch_method(
     method: Method,
     params_json: &str,
+    owner: Option<String>,
     emitter: SignalEmitter<'static>,
     runtime: &Arc<DaemonRuntime>,
 ) -> Result<Value> {
@@ -61,14 +63,16 @@ fn dispatch_method(
         Method::WifiScan => crate::daemon_scan::start_scan(
             runtime,
             parse_params::<DbusScanParams>(params_json)?,
+            owner,
             emitter,
         ),
         Method::WifiConnectTarget => crate::daemon_connect::start_connect_target(
             runtime,
             parse_required_params::<DbusConnectTargetParams>(params_json)?,
+            owner,
             emitter,
         ),
-        _ => immediate::dispatch(method, params_json, runtime),
+        _ => immediate::dispatch(method, params_json, owner.as_deref(), runtime),
     }
 }
 

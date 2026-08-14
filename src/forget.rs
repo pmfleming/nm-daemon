@@ -21,7 +21,10 @@ pub(crate) fn execute(
     request_id: String,
     target: Box<WifiConnectTarget>,
 ) -> Result<ForgetResult> {
-    target.validate()?;
+    target.validate().map_err(|error| {
+        crate::error::DomainError::validation(ErrorOperation::ProfileOperation, &error)
+            .with_cause(error)
+    })?;
     let request_id = normalized_request_id(request_id);
     tracing::info!(
         %request_id,
@@ -209,7 +212,7 @@ impl<'a> ForgetService<'a> {
         tracing::info!(%request_id, ssid = %target.ssid, "disconnecting active network before forget");
         let result = self.nm.disconnect_wifi()?;
         tracing::info!(%request_id, ssid = %target.ssid, status = result.status, message = %result.message, "NetworkManager accepted disconnect before forget");
-        let deadline = Deadline::from_now(FORGET_DEACTIVATION_TIMEOUT);
+        let deadline = Deadline::from_now(FORGET_DEACTIVATION_TIMEOUT)?;
         let mut generation = self.nm.event_generation();
         while !deadline.expired() {
             if !status_matches_target(&self.nm.wifi_status()?, target) {

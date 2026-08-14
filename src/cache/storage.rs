@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::CacheRead;
-use crate::generated::{HISTORY_MAX_BYTES, HISTORY_ROTATIONS};
+use crate::generated::{CACHE_MAX_BYTES, HISTORY_MAX_BYTES, HISTORY_ROTATIONS};
 
 const CACHE_DIR_NAME: &str = "nm-daemon";
 const LOCK_FILE_NAME: &str = ".storage.lock";
@@ -97,17 +97,58 @@ fn read_json_path<T>(path: &Path) -> Result<CacheRead<T>>
 where
     T: DeserializeOwned,
 {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
+    let file = match open_cache_file(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(CacheRead::Missing),
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
     };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("refusing to read non-regular cache file {}", path.display());
+    }
+    if metadata.len() > CACHE_MAX_BYTES {
+        anyhow::bail!(
+            "cache file {} is {} bytes; maximum is {CACHE_MAX_BYTES}",
+            path.display(),
+            metadata.len()
+        );
+    }
+    let mut text = String::new();
+    file.take(CACHE_MAX_BYTES + 1)
+        .read_to_string(&mut text)
+        .with_context(|| format!("read {}", path.display()))?;
+    if text.len() as u64 > CACHE_MAX_BYTES {
+        anyhow::bail!(
+            "cache file {} exceeds the {CACHE_MAX_BYTES}-byte maximum",
+            path.display()
+        );
+    }
     match serde_json::from_str(&text) {
         Ok(value) => Ok(CacheRead::Available(value)),
         Err(error) => Ok(CacheRead::Corrupt {
             message: format!("parse {}: {error}", path.display()),
         }),
     }
+}
+
+#[cfg(unix)]
+fn open_cache_file(path: &Path) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(not(unix))]
+fn open_cache_file(path: &Path) -> io::Result<File> {
+    File::open(path)
 }
 
 fn write_json_atomic<T>(path: &Path, value: &T) -> Result<()>
@@ -450,6 +491,29 @@ mod tests {
                 .unwrap(),
             CacheRead::Available(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_rejects_symlinked_cache_files() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::new("symlink-read");
+        fs::create_dir_all(&directory.path).unwrap();
+        fs::write(directory.path.join("target.json"), "{\"ok\":true}").unwrap();
+        symlink(
+            directory.path.join("target.json"),
+            directory.path.join("value.json"),
+        )
+        .unwrap();
+
+        assert!(
+            Repository {
+                root: directory.path.clone()
+            }
+            .read_json::<serde_json::Value>("value.json")
+            .is_err()
+        );
     }
 
     #[test]

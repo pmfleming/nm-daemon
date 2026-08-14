@@ -7,7 +7,7 @@ use crate::application::Application;
 use crate::daemon::emit_json_event_nonfatal;
 use crate::daemon_runtime::SharedPayloads;
 use crate::nm::Nm;
-use crate::protocol::{Method, Stream, StreamDelivery};
+use crate::protocol::{Method, Stream};
 
 pub(crate) struct SubscriptionState {
     id: String,
@@ -28,10 +28,7 @@ impl SubscriptionState {
         Self {
             id,
             owner,
-            streams: streams
-                .into_iter()
-                .filter(|stream| stream.spec().delivery == StreamDelivery::Continuous)
-                .collect(),
+            streams,
             emitter,
             last_status: None,
             last_connectivity: None,
@@ -46,8 +43,18 @@ impl SubscriptionState {
         self.streams.contains(&stream)
     }
 
+    pub(crate) fn owner(&self) -> Option<&str> {
+        self.owner.as_deref()
+    }
+
     pub(crate) fn owned_by(&self, owner: &str) -> bool {
         self.owner.as_deref() == Some(owner)
+    }
+
+    pub(crate) fn emit_external(&self, stream: Stream, request_id: &str, event: &str, data: Value) {
+        if self.watches(stream) {
+            emit_json_event_nonfatal(&self.emitter, stream, Some(request_id), event, data);
+        }
     }
 
     pub(crate) fn emit_changes(&mut self, payloads: &SharedPayloads) {
