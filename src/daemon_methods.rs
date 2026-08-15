@@ -89,11 +89,13 @@ pub(crate) fn call_networks(runtime: &Arc<DaemonRuntime>, params: NetworksParams
                 params.refresh_cache,
                 Duration::from_secs(params.refresh_timeout.unwrap_or(10)),
             ))?;
-        api_data_value(
+        let mut response = api_data_value(
             Method::WifiNetworks.spec().response_key,
             &result.networks,
             "serialize network response JSON",
-        )
+        )?;
+        response["data"]["snapshot"] = serde_json::to_value(&result.snapshot)?;
+        Ok(response)
     })
 }
 

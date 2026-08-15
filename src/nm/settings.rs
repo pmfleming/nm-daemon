@@ -218,13 +218,17 @@ impl Nm {
         action: &str,
         mutate: impl FnOnce(&mut ConnectionSettings) -> Result<()>,
     ) -> Result<()> {
+        let _transaction = self
+            .profile_transaction
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let path = OwnedObjectPath::try_from(path).context("parse connection path")?;
         let mut settings = self.connection_settings(&path)?;
         mutate(&mut settings)?;
         self.update_connection_settings(&path, settings, action)
     }
 
-    fn update_connection_settings(
+    pub(super) fn update_connection_settings(
         &self,
         path: &OwnedObjectPath,
         settings: ConnectionSettings,
@@ -249,6 +253,20 @@ impl Nm {
             .call("Update2", &(settings, BLOCK_AUTOCONNECT, args))
             .with_context(|| format!("Update2 credentials for {path}"))?;
         Ok(())
+    }
+
+    pub(super) fn saved_wifi_connection_by_path(
+        &self,
+        path: &OwnedObjectPath,
+    ) -> Result<SavedWifiConnection> {
+        let settings = self.connection_settings(path)?;
+        saved_wifi_connection_from_settings(path, &settings).ok_or_else(|| {
+            DomainError::not_found(
+                ErrorOperation::ProfileOperation,
+                format!("connection is not a saved Wi-Fi profile: {path}"),
+            )
+            .into()
+        })
     }
 
     pub(crate) fn saved_wifi_connections(&self) -> Result<Vec<SavedWifiConnection>> {

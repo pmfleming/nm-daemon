@@ -106,6 +106,7 @@ pub(crate) enum ErrorOperation {
     Status,
     Connectivity,
     Networks,
+    BandOperation,
     Scan,
     Connect,
     Disconnect,

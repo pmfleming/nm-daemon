@@ -6,7 +6,7 @@ use std::fmt;
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport, ErrorSource};
 use crate::model::{
     AccessPoint, ConnectFailureReason, ConnectResult, ConnectivityStatus, DisconnectResult,
-    NetworkEntry, SavedWifiConnection, WifiSharePayload, WifiStatus,
+    NetworkEntry, NetworkSnapshotMetadata, SavedWifiConnection, WifiSharePayload, WifiStatus,
 };
 
 pub(crate) const API_PROTOCOL: &str = "nm-api";
@@ -41,8 +41,17 @@ macro_rules! print_api_data_fns {
 
 print_api_data_fns! {
     print_access_points_json(aps: &[AccessPoint]) => "access_points", "serialize AP response JSON";
-    print_network_entries_json(networks: &[NetworkEntry]) => "networks", "serialize network response JSON";
     print_saved_wifi_connections_json(profiles: &[SavedWifiConnection]) => "profiles", "serialize saved Wi-Fi response JSON";
+}
+
+pub(crate) fn print_network_entries_with_snapshot(
+    networks: &[NetworkEntry],
+    snapshot: &NetworkSnapshotMetadata,
+) -> Result<()> {
+    let context = "serialize network response JSON";
+    let mut envelope = api_data_value("networks", networks, context)?;
+    envelope["data"]["snapshot"] = serde_json::to_value(snapshot).context(context)?;
+    print_pretty_json(&envelope, context)
 }
 
 pub(crate) fn print_connect_result(result: &ConnectResult) -> Result<()> {

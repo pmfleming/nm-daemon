@@ -12,6 +12,7 @@ mod connect_error;
 mod connect_wait;
 mod contract;
 mod daemon;
+mod daemon_band;
 mod daemon_connect;
 mod daemon_dispatch;
 mod daemon_event;

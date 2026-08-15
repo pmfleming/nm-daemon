@@ -28,6 +28,10 @@ pub(super) fn dispatch(
             dispatch_radio(method, params_json, runtime)
         }
         Method::WifiNetworks => call_networks(runtime, parse_params(params_json)?),
+        Method::WifiBandStatus => crate::daemon_band::status(
+            runtime,
+            parse_required_params::<crate::daemon_band::BandStatusParams>(params_json)?,
+        ),
         Method::WifiProfileOperation => call_profile_operation(
             runtime,
             parse_required_params::<ProfileOperationParams>(params_json)?,

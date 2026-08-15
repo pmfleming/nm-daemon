@@ -165,6 +165,14 @@ fn generate_durations(path: &Path, generated: &mut String) {
             "networkmanager_event_retry_delay_ms",
             "NETWORKMANAGER_EVENT_RETRY_DELAY",
         ),
+        (
+            "network_snapshot_stale_after_ms",
+            "NETWORK_SNAPSHOT_STALE_AFTER",
+        ),
+        (
+            "wifi_band_checkpoint_timeout_ms",
+            "WIFI_BAND_CHECKPOINT_TIMEOUT",
+        ),
     ];
     let values = parse_key_values(path);
     ensure_exact_keys(path, &values, specs.iter().map(|(key, _)| *key));

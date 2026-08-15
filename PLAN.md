@@ -175,7 +175,7 @@ Implemented in this repository:
 7. Improved connection parity: AP re-resolution by SSID/BSSID, one targeted rescan before the final D-Bus attempt, `not-found` classification, signal-assisted activation waits, shorter post-connect waits, background cache refresh, and structured connect-attempt history.
 8. Added `nm-daemon daemon`, exporting a session-bus service at `org.laufan.NmDaemon` `/org/laufan/NmDaemon` with interface `org.laufan.NmDaemon1`.
 9. Implemented D-Bus `Call`, `Subscribe`, `Cancel`, and `Event(stream, event_json)`.
-10. Implemented D-Bus method keys: `wifi.status`, `network.connectivity`, `wifi.networks`, `wifi.saved`, `wifi.scan`, `wifi.connectTarget`, `wifi.disconnect`, `wifi.profile.operation`, `wifi.secret.capabilities`, and `wifi.secret.provide`.
+10. Implemented D-Bus method keys: `wifi.status`, `network.connectivity`, `wifi.networks`, `wifi.band.status`, `wifi.band.set`, `wifi.saved`, `wifi.scan`, `wifi.connectTarget`, `wifi.disconnect`, `wifi.profile.operation`, `wifi.secret.capabilities`, and `wifi.secret.provide`.
 11. Added CLI forwarding for stable status, connectivity, networks, saved-profile listing, scan, connect, disconnect, and profile commands through the daemon, with one-shot event correlation for scan/connect and `--direct` / `NM_DAEMON_DIRECT=1` as recovery/debug escape hatches.
 12. Added event streams for scan/status/connectivity/connect flows. Scan and connect calls return immediately with a `request_id`; clients consume follow-up `Event` signals.
 13. Added real NetworkManager SecretAgent registration on the system bus at `/org/laufan/NmDaemon/SecretAgent`, bridging `GetSecrets`/`CancelGetSecrets` to `wifi.secret` requested/cancelled events and `wifi.secret.provide` responses.
@@ -203,6 +203,9 @@ Implemented in this repository:
 35. Added session D-Bus activation backed by the packaged `Type=dbus` systemd user unit, allowing Hyprland/Quickshell clients to start the daemon on first use without depending on login-service ordering.
 36. Expanded advanced profile secret reveal/update to named WPA, WEP, LEAP, and 802.1X values while retaining the primary `password` compatibility field; enterprise secrets now use NetworkManager's correct `802-1x` setting section.
 37. Expanded contract fixtures across every registered method family and declared operation event, added CI/Nix flake checks with a coverage floor, and made daemon runtime/frontend mutexes recover from poisoned worker state instead of cascading panics.
+38. Added typed connect phases and exact target identity to every operation event, including state-machine progress for active checks, saved-profile activation, profile creation, rescanning, and verification.
+39. Added snapshot freshness metadata to `wifi.networks` responses and `wifi.scan snapshot` events, preserving scan timestamps across status-only cache mutations and exposing source, age, stale/scanning state, and refresh intent.
+40. Added active-profile Wi-Fi band status and event-driven transactional band selection for automatic/2.4/5/6 GHz operation, with availability validation, NetworkManager checkpoints, reactivation verification, owner-scoped cancellation, and profile/connection rollback.
 
 ## Remaining open items
 

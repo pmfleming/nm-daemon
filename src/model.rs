@@ -59,6 +59,95 @@ pub(crate) enum ConnectEnginePath {
     Dbus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ConnectPhase {
+    Starting,
+    CheckingActive,
+    ActivatingSavedProfile,
+    CreatingProfile,
+    Rescanning,
+    Verifying,
+    Connected,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ConnectTargetIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) network_key: Option<String>,
+    pub(crate) ssid: String,
+    pub(crate) ssid_bytes: Vec<u8>,
+    pub(crate) ssid_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) device_iface: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) device_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) access_point_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bssid: Option<String>,
+}
+
+impl ConnectTargetIdentity {
+    pub(crate) fn from_target(target: &WifiConnectTarget, network_key: Option<&str>) -> Self {
+        Self {
+            network_key: network_key.map(ToString::to_string),
+            ssid: target.ssid.to_string(),
+            ssid_bytes: target.ssid_bytes().to_vec(),
+            ssid_hex: ssid_hex(target.ssid_bytes()),
+            device_iface: target
+                .ifname
+                .as_ref()
+                .map(|value| value.as_str().to_string()),
+            device_path: target
+                .device_path
+                .as_ref()
+                .map(|value| value.as_str().to_string()),
+            access_point_path: target
+                .ap_path
+                .as_ref()
+                .map(|value| value.as_str().to_string()),
+            bssid: target
+                .bssid
+                .as_ref()
+                .map(|value| value.as_str().to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum NetworkSnapshotSource {
+    Cache,
+    NetworkManager,
+    Scan,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NetworkSnapshotMetadata {
+    pub(crate) source: NetworkSnapshotSource,
+    pub(crate) updated_at_ms: u128,
+    pub(crate) age_ms: u64,
+    pub(crate) stale: bool,
+    pub(crate) scanning: bool,
+    pub(crate) refresh_requested: bool,
+}
+
+impl NetworkSnapshotMetadata {
+    pub(crate) fn live(source: NetworkSnapshotSource) -> Self {
+        Self {
+            source,
+            updated_at_ms: crate::cache::now_ms(),
+            age_ms: 0,
+            stale: false,
+            scanning: false,
+            refresh_requested: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ConnectResult {
     pub(crate) status: &'static str,
@@ -352,6 +441,66 @@ impl Default for ProfilePrivacy {
             send_hostname: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+pub(crate) enum WifiBand {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "2.4")]
+    Ghz2_4,
+    #[serde(rename = "5")]
+    Ghz5,
+    #[serde(rename = "6")]
+    Ghz6,
+}
+
+impl WifiBand {
+    pub(crate) fn nm_value(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Ghz2_4 => Some("bg"),
+            Self::Ghz5 => Some("a"),
+            Self::Ghz6 => Some("6GHz"),
+        }
+    }
+
+    pub(crate) fn from_nm_value(value: &str) -> Self {
+        match value {
+            "bg" => Self::Ghz2_4,
+            "a" => Self::Ghz5,
+            "6GHz" => Self::Ghz6,
+            _ => Self::Auto,
+        }
+    }
+
+    pub(crate) fn from_frequency_label(value: &str) -> Option<Self> {
+        match value {
+            "2.4 GHz" => Some(Self::Ghz2_4),
+            "5 GHz" => Some(Self::Ghz5),
+            "6 GHz" => Some(Self::Ghz6),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct WifiBandStatus {
+    pub(crate) path: String,
+    pub(crate) id: String,
+    pub(crate) ssid: String,
+    pub(crate) device_iface: String,
+    pub(crate) current: WifiBand,
+    pub(crate) selected: WifiBand,
+    pub(crate) available: Vec<WifiBand>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct WifiBandSelectionResult {
+    pub(crate) status: &'static str,
+    pub(crate) changed: bool,
+    pub(crate) band: WifiBandStatus,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

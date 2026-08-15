@@ -14,8 +14,8 @@ use crate::deadline::Deadline;
 use crate::error::{ErrorOperation, best_effort, ensure_domain};
 use crate::generated::{NOT_FOUND_RESCAN_TIMEOUT, POST_CONNECT_STATUS_WAIT};
 use crate::model::{
-    ConnectEnginePath, ConnectFailureReason, ConnectResult, ScanRequestOptions, WepKeyType,
-    WifiConnectTarget, WifiStatus,
+    ConnectEnginePath, ConnectFailureReason, ConnectPhase, ConnectResult, ScanRequestOptions,
+    WepKeyType, WifiConnectTarget, WifiStatus,
 };
 use crate::nm::Nm;
 
@@ -52,6 +52,18 @@ enum VerificationKind {
     CreatedProfile,
 }
 
+impl ConnectionState {
+    fn phase(self) -> ConnectPhase {
+        match self {
+            Self::AlreadyActive => ConnectPhase::CheckingActive,
+            Self::SavedProfile => ConnectPhase::ActivatingSavedProfile,
+            Self::CreateProfile => ConnectPhase::CreatingProfile,
+            Self::Rescan => ConnectPhase::Rescanning,
+            Self::Verify(_) => ConnectPhase::Verifying,
+        }
+    }
+}
+
 enum StateTransition {
     Next(ConnectionState),
     Connected(ActivationOutcome),
@@ -82,6 +94,7 @@ struct ConnectionMachine<'a> {
     password: Option<&'a str>,
     wep_key_type: Option<WepKeyType>,
     cancellation: Option<&'a AtomicBool>,
+    progress: &'a mut dyn FnMut(ConnectPhase) -> Result<()>,
     rescanned: bool,
     created_connection: Option<OwnedObjectPath>,
 }
@@ -93,6 +106,7 @@ impl<'a> ConnectionMachine<'a> {
         password: Option<&'a str>,
         wep_key_type: Option<WepKeyType>,
         cancellation: Option<&'a AtomicBool>,
+        progress: &'a mut dyn FnMut(ConnectPhase) -> Result<()>,
     ) -> Self {
         Self {
             nm,
@@ -100,6 +114,7 @@ impl<'a> ConnectionMachine<'a> {
             password,
             wep_key_type,
             cancellation,
+            progress,
             rescanned: false,
             created_connection: None,
         }
@@ -129,6 +144,7 @@ impl<'a> ConnectionMachine<'a> {
         let mut state = ConnectionState::AlreadyActive;
         loop {
             check_cancelled(self.cancellation)?;
+            (self.progress)(state.phase())?;
             match self.step(state)? {
                 StateTransition::Next(next) => {
                     tracing::debug!(from = ?state, to = ?next, ssid = %self.target.ssid, "Wi-Fi connection state transition");
@@ -418,8 +434,9 @@ pub(crate) fn connect_target_with_password(
     password: Option<&str>,
     wep_key_type: Option<WepKeyType>,
     cancellation: Option<&AtomicBool>,
+    progress: &mut dyn FnMut(ConnectPhase) -> Result<()>,
 ) -> Result<ConnectResult> {
-    ConnectionMachine::new(nm, target, password, wep_key_type, cancellation).run()
+    ConnectionMachine::new(nm, target, password, wep_key_type, cancellation, progress).run()
 }
 
 fn record_connect_attempt(target: &WifiConnectTarget, result: &ConnectResult, started_at: Instant) {
@@ -474,4 +491,31 @@ fn refresh_cached_networks(nm: &Nm) -> Result<()> {
     let networks = nm.list_access_points()?;
     cache::write_snapshot(false, &networks)?;
     cache::write_complete(networks.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConnectionState, VerificationKind};
+    use crate::model::ConnectPhase;
+
+    #[test]
+    fn state_machine_states_have_stable_frontend_phases() {
+        assert_eq!(
+            ConnectionState::AlreadyActive.phase(),
+            ConnectPhase::CheckingActive
+        );
+        assert_eq!(
+            ConnectionState::SavedProfile.phase(),
+            ConnectPhase::ActivatingSavedProfile
+        );
+        assert_eq!(
+            ConnectionState::CreateProfile.phase(),
+            ConnectPhase::CreatingProfile
+        );
+        assert_eq!(ConnectionState::Rescan.phase(), ConnectPhase::Rescanning);
+        assert_eq!(
+            ConnectionState::Verify(VerificationKind::SavedProfile).phase(),
+            ConnectPhase::Verifying
+        );
+    }
 }

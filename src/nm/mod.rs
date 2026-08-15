@@ -11,6 +11,7 @@ use crate::error::{ErrorOperation, ensure_domain};
 use crate::nl80211::{KernelWirelessTelemetry, WirelessTelemetry};
 
 mod activate;
+mod band;
 mod connectivity;
 mod devices;
 mod events;
@@ -79,6 +80,7 @@ pub(crate) struct Nm {
     events: Arc<events::NetworkEvents>,
     wireless_telemetry: Arc<dyn WirelessTelemetry>,
     radio_restore: Mutex<RadioRestoreState>,
+    profile_transaction: Mutex<()>,
 }
 
 impl Nm {
@@ -142,6 +144,7 @@ impl Nm {
             commands,
             wireless_telemetry,
             radio_restore: Mutex::new(RadioRestoreState::default()),
+            profile_transaction: Mutex::new(()),
         }
     }
 

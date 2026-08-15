@@ -8,11 +8,12 @@ use crate::error::{
 };
 use crate::generated::REQUEST_TIMEOUT_MAX;
 use crate::model::{
-    AccessPoint, ConnectResult, ConnectivityStatus, DisconnectResult, InterfaceName, NetworkEntry,
-    NmObjectPath, RadioPowerResult, SavedWifiConnection, ScanRequestOptions, WepKeyType,
-    WifiConnectTarget, WifiPowerResult, WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate,
-    WifiSharePayload, WifiStatus, connect_target_for_network, connect_target_for_network_key,
-    validate_ssid_bytes,
+    AccessPoint, ConnectPhase, ConnectResult, ConnectTargetIdentity, ConnectivityStatus,
+    DisconnectResult, InterfaceName, NetworkEntry, NetworkSnapshotMetadata, NetworkSnapshotSource,
+    NmObjectPath, RadioPowerResult, SavedWifiConnection, ScanRequestOptions, WepKeyType, WifiBand,
+    WifiBandSelectionResult, WifiBandStatus, WifiConnectTarget, WifiPowerResult,
+    WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload, WifiStatus,
+    connect_target_for_network, connect_target_for_network_key, validate_ssid_bytes,
 };
 use crate::nm::Nm;
 use anyhow::Result;
@@ -51,6 +52,25 @@ impl<'a> Application<'a> {
         operation_result(ErrorOperation::Connectivity, self.nm.connectivity_check())
     }
 
+    pub(crate) fn band_status(&self, path: &str) -> Result<WifiBandStatus> {
+        operation_result(
+            ErrorOperation::BandOperation,
+            self.nm.wifi_band_status(path),
+        )
+    }
+
+    pub(crate) fn select_band(
+        &self,
+        path: &str,
+        band: WifiBand,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<WifiBandSelectionResult> {
+        operation_result(
+            ErrorOperation::BandOperation,
+            self.nm.select_wifi_band(path, band, cancellation),
+        )
+    }
+
     pub(crate) fn set_wifi_enabled(&self, enabled: bool) -> Result<WifiPowerResult> {
         operation_result(
             ErrorOperation::Status,
@@ -71,9 +91,13 @@ impl<'a> Application<'a> {
             ErrorOperation::Networks,
             (|| {
                 request.validate()?;
-                let (access_points, warning) = self.load_networks(&request)?;
-                let networks = self.enrich_access_points(access_points)?;
-                Ok(NetworksResult { networks, warning })
+                let loaded = self.load_networks(&request)?;
+                let networks = self.enrich_access_points(loaded.access_points)?;
+                Ok(NetworksResult {
+                    networks,
+                    warning: loaded.warning,
+                    snapshot: loaded.snapshot,
+                })
             })(),
         )
     }
@@ -88,6 +112,7 @@ impl<'a> Application<'a> {
                 Ok(NetworksResult {
                     networks: self.enrich_access_points(access_points)?,
                     warning: None,
+                    snapshot: NetworkSnapshotMetadata::live(NetworkSnapshotSource::Scan),
                 })
             })(),
         )
@@ -208,6 +233,7 @@ impl<'a> Application<'a> {
                     };
                 let request = ConnectRequest {
                     target,
+                    network_key: Some(key.to_string()),
                     password,
                     wep_key_type,
                 };
@@ -235,22 +261,44 @@ impl<'a> Application<'a> {
         cancellation: Option<&AtomicBool>,
         mut emit: impl FnMut(&ConnectEvent) -> Result<()>,
     ) -> Result<ConnectOutcome> {
-        if let Some(outcome) = start_connect(cancellation, &mut emit)? {
+        if let Some(outcome) = start_connect(request, cancellation, &mut emit)? {
             return Ok(outcome);
         }
+        let target_identity =
+            ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref());
+        let mut progress = |phase| {
+            emit(&ConnectEvent::Progress {
+                phase,
+                target: target_identity.clone(),
+                message: connect_phase_message(phase).to_string(),
+            })
+        };
         let result = connect::connect_target_with_password(
             self.nm,
             &request.target,
             request.password.as_deref(),
             request.wep_key_type,
             cancellation,
+            &mut progress,
         );
 
-        if let Some(outcome) = finish_connect_cancellation(cancellation, &mut emit)? {
+        if let Some(outcome) = finish_connect_cancellation(request, cancellation, &mut emit)? {
             return Ok(outcome);
         }
         let outcome = connect_outcome(&request.target, result);
-        emit(&ConnectEvent::Finished(outcome.clone()))?;
+        let phase = match &outcome {
+            ConnectOutcome::Succeeded(_) => ConnectPhase::Connected,
+            ConnectOutcome::Failed { .. } => ConnectPhase::Failed,
+            ConnectOutcome::Cancelled { .. } => ConnectPhase::Cancelled,
+        };
+        emit(&ConnectEvent::Finished {
+            phase,
+            target: ConnectTargetIdentity::from_target(
+                &request.target,
+                request.network_key.as_deref(),
+            ),
+            outcome: outcome.clone(),
+        })?;
         Ok(outcome)
     }
 
@@ -387,27 +435,27 @@ impl<'a> Application<'a> {
         }
     }
 
-    fn load_networks(
-        &self,
-        request: &NetworksRequest,
-    ) -> Result<(Vec<AccessPoint>, Option<ErrorReport>)> {
+    fn load_networks(&self, request: &NetworksRequest) -> Result<LoadedNetworks> {
         if let Some(cached) = self.cached_networks(request)? {
             return Ok(cached);
         }
         let networks = self.nm.list_all_access_points()?;
         self.schedule_requested_refresh(request);
-        Ok((networks, None))
+        let mut snapshot = NetworkSnapshotMetadata::live(NetworkSnapshotSource::NetworkManager);
+        snapshot.refresh_requested = request.refresh_cache;
+        Ok(LoadedNetworks {
+            access_points: networks,
+            warning: None,
+            snapshot,
+        })
     }
 
-    fn cached_networks(
-        &self,
-        request: &NetworksRequest,
-    ) -> Result<Option<(Vec<AccessPoint>, Option<ErrorReport>)>> {
+    fn cached_networks(&self, request: &NetworksRequest) -> Result<Option<LoadedNetworks>> {
         if !request.cached {
             return Ok(None);
         }
-        if let Some(networks) = self.read_cached_networks(request)? {
-            return Ok(Some((networks, None)));
+        if let Some(loaded) = self.read_cached_networks(request)? {
+            return Ok(Some(loaded));
         }
         request
             .refresh_cache
@@ -415,11 +463,16 @@ impl<'a> Application<'a> {
             .transpose()
     }
 
-    fn read_cached_networks(&self, request: &NetworksRequest) -> Result<Option<Vec<AccessPoint>>> {
+    fn read_cached_networks(&self, request: &NetworksRequest) -> Result<Option<LoadedNetworks>> {
         match cache::read_snapshot()? {
             cache::CacheRead::Available(snapshot) => {
+                let metadata = snapshot.metadata(request.refresh_cache);
                 self.schedule_requested_refresh(request);
-                Ok(Some(snapshot.into_networks()))
+                Ok(Some(LoadedNetworks {
+                    access_points: snapshot.into_networks(),
+                    warning: None,
+                    snapshot: metadata,
+                }))
             }
             cache::CacheRead::Missing => {
                 tracing::debug!("Wi-Fi scan cache is missing");
@@ -438,7 +491,7 @@ impl<'a> Application<'a> {
         }
     }
 
-    fn scan_and_cache(&self, timeout: Duration) -> Result<(Vec<AccessPoint>, Option<ErrorReport>)> {
+    fn scan_and_cache(&self, timeout: Duration) -> Result<LoadedNetworks> {
         let warning = self
             .nm
             .scan_with_options(
@@ -459,7 +512,11 @@ impl<'a> Application<'a> {
         let networks = self.nm.list_all_access_points()?;
         cache::write_snapshot(false, &networks)?;
         cache::write_complete(networks.len())?;
-        Ok((networks, warning))
+        Ok(LoadedNetworks {
+            access_points: networks,
+            warning,
+            snapshot: NetworkSnapshotMetadata::live(NetworkSnapshotSource::Scan),
+        })
     }
 
     fn enrich_access_points(&self, access_points: Vec<AccessPoint>) -> Result<Vec<NetworkEntry>> {
@@ -516,9 +573,17 @@ impl NetworksRequest {
 }
 
 #[derive(Debug)]
+struct LoadedNetworks {
+    access_points: Vec<AccessPoint>,
+    warning: Option<ErrorReport>,
+    snapshot: NetworkSnapshotMetadata,
+}
+
+#[derive(Debug)]
 pub(crate) struct NetworksResult {
     pub(crate) networks: Vec<NetworkEntry>,
     pub(crate) warning: Option<ErrorReport>,
+    pub(crate) snapshot: NetworkSnapshotMetadata,
 }
 
 #[derive(Debug, Clone)]
@@ -580,6 +645,7 @@ pub(crate) struct ScanResult {
 #[derive(Debug, Clone)]
 pub(crate) struct ConnectRequest {
     pub(crate) target: WifiConnectTarget,
+    pub(crate) network_key: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) wep_key_type: Option<WepKeyType>,
 }
@@ -596,10 +662,26 @@ impl ConnectRequest {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ConnectEvent {
-    Started { message: String },
-    Progress { message: String },
-    Finished(ConnectOutcome),
-    Cancelled { message: String },
+    Started {
+        phase: ConnectPhase,
+        target: ConnectTargetIdentity,
+        message: String,
+    },
+    Progress {
+        phase: ConnectPhase,
+        target: ConnectTargetIdentity,
+        message: String,
+    },
+    Finished {
+        phase: ConnectPhase,
+        target: ConnectTargetIdentity,
+        outcome: ConnectOutcome,
+    },
+    Cancelled {
+        phase: ConnectPhase,
+        target: ConnectTargetIdentity,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -724,27 +806,45 @@ fn cache_scan_complete(cache_result: bool, networks_found: usize) -> Result<()> 
 }
 
 fn start_connect(
+    request: &ConnectRequest,
     cancellation: Option<&AtomicBool>,
     emit: &mut impl FnMut(&ConnectEvent) -> Result<()>,
 ) -> Result<Option<ConnectOutcome>> {
+    let target =
+        ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref());
     emit(&ConnectEvent::Started {
+        phase: ConnectPhase::Starting,
+        target: target.clone(),
         message: "starting Wi-Fi connection".to_string(),
     })?;
     if is_cancelled(cancellation) {
-        return cancelled_connect(emit, "cancelled before connection attempt started").map(Some);
+        return cancelled_connect(request, emit, "cancelled before connection attempt started")
+            .map(Some);
     }
-    emit(&ConnectEvent::Progress {
-        message: "activating NetworkManager connection".to_string(),
-    })?;
     Ok(None)
 }
 
+fn connect_phase_message(phase: ConnectPhase) -> &'static str {
+    match phase {
+        ConnectPhase::Starting => "starting Wi-Fi connection",
+        ConnectPhase::CheckingActive => "checking current Wi-Fi connection",
+        ConnectPhase::ActivatingSavedProfile => "activating saved NetworkManager profile",
+        ConnectPhase::CreatingProfile => "creating NetworkManager Wi-Fi profile",
+        ConnectPhase::Rescanning => "rescanning for selected Wi-Fi network",
+        ConnectPhase::Verifying => "verifying Wi-Fi activation",
+        ConnectPhase::Connected => "Wi-Fi connection succeeded",
+        ConnectPhase::Failed => "Wi-Fi connection failed",
+        ConnectPhase::Cancelled => "Wi-Fi connection cancelled",
+    }
+}
+
 fn finish_connect_cancellation(
+    request: &ConnectRequest,
     cancellation: Option<&AtomicBool>,
     emit: &mut impl FnMut(&ConnectEvent) -> Result<()>,
 ) -> Result<Option<ConnectOutcome>> {
     if is_cancelled(cancellation) {
-        return cancelled_connect(emit, "connection attempt was cancelled").map(Some);
+        return cancelled_connect(request, emit, "connection attempt was cancelled").map(Some);
     }
     Ok(None)
 }
@@ -784,6 +884,7 @@ fn scan_cancelled_error() -> anyhow::Error {
 }
 
 fn cancelled_connect(
+    request: &ConnectRequest,
     emit: &mut impl FnMut(&ConnectEvent) -> Result<()>,
     message: &str,
 ) -> Result<ConnectOutcome> {
@@ -791,6 +892,8 @@ fn cancelled_connect(
         message: message.to_string(),
     };
     emit(&ConnectEvent::Cancelled {
+        phase: ConnectPhase::Cancelled,
+        target: ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref()),
         message: message.to_string(),
     })?;
     Ok(outcome)

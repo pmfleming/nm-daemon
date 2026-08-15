@@ -45,7 +45,9 @@ signal Event(s stream, s event_json)
 | `radio.setWwanEnabled` | `{"enabled":true}` (`Enabled`) | `result` | `—` | Enables or disables NetworkManager mobile-data radios. |
 | `radio.setAirplaneMode` | `{"enabled":true}` (`Enabled`) | `result` | `—` | Disables or restores NetworkManager Wi-Fi and mobile-data radios. |
 | `network.connectivity` | `{}` (`Empty`) | `connectivity` | `network.connectivity` | NetworkManager connectivity and captive-portal state. |
-| `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `—` | Visible networks enriched with saved-profile and capability details. |
+| `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `—` | Visible networks enriched with saved-profile, capability, and snapshot freshness details. |
+| `wifi.band.status` | `{"path":"/org/freedesktop/NetworkManager/Settings/1"}` (`BandStatus`) | `band` | `—` | Reports the active, selected, and available bands for an active Wi-Fi profile. |
+| `wifi.band.set` | `{"path":"/org/freedesktop/NetworkManager/Settings/1","band":"5"}` (`BandSet`) | `result` | `wifi.band` | Transactionally changes an active Wi-Fi profile band and returns a request id. |
 | `wifi.saved` | `{}` (`Empty`) | `profiles` | `—` | All saved Wi-Fi NetworkManager profiles. |
 | `wifi.scan` | `{"timeout":12,"strict":false,"cache":false,"ifname":null,"ssids":[]}` (`Scan`) | `result` | `wifi.scan` | Starts an event-driven scan and returns its request id. |
 | `wifi.connectTarget` | `{"key":"ssid-hex:4578616d706c65|security:personal|ifname:776c616e30","password":null,"enterprise_identity":null,"enterprise":null,"wep_key_type":null}` (`ConnectTarget`) | `result` | `wifi.connect` | Starts an event-driven Wi-Fi connection by opaque network key and returns its request id; legacy target requests remain accepted. |
@@ -62,6 +64,7 @@ signal Event(s stream, s event_json)
 | `network.connectivity` | true | true | `Continuous` | `subscribed, changed` | Connectivity and portal state, emitted immediately and on change. |
 | `wifi.scan` | true | true | `Operation` | `subscribed, status, warning, snapshot, complete, cancelled, failed` | Events associated with a wifi.scan request id. |
 | `wifi.connect` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a wifi.connectTarget request id. |
+| `wifi.band` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a transactional wifi.band.set request id. |
 | `wifi.secret` | true | false | `External` | `subscribed, requested, cancelled, persistence` | SecretAgent prompt, cancellation, and keyring persistence events. |
 | `daemon.request` | false | false | `Internal` | `cancelled` | Internal request-cancellation acknowledgements. |
 | `daemon.subscription` | false | false | `Internal` | `cancelled` | Internal subscription-cancellation acknowledgements. |
@@ -124,6 +127,8 @@ Events:
 
 ### `wifi.networks`
 
+Each response also includes `data.snapshot` with `source` (`cache`, `network-manager`, or `scan`), `updated_at_ms`, `age_ms`, `stale`, `scanning`, and `refresh_requested`. Scan `snapshot` events carry the same metadata beside their `networks` array, allowing clients to distinguish an immediate cached render from a fresh scan without inferring freshness from request timing.
+
 Each grouped network includes a typed `security_class`: `open`, `enhanced-open`, `legacy`, `personal`, `enterprise`, or `unknown`. This presentation-safe class is derived from NetworkManager AP flags rather than display labels. Captive portal is a live connectivity state, not an advertised AP security type; frontends should override the active network's security icon while `network.connectivity.state` is `portal`.
 
 ### `wifi.status` and `network.connectivity`
@@ -148,9 +153,15 @@ Events:
 - `failed`
 - `cancelled`
 
+Every connect event carries a typed `phase` and `target`. Target identity includes the original opaque `network_key` when supplied, exact `ssid_bytes`/`ssid_hex`, display `ssid`, and available interface/device/AP/BSSID identifiers. Phases are `starting`, `checking-active`, `activating-saved-profile`, `creating-profile`, `rescanning`, `verifying`, `connected`, `failed`, or `cancelled`; clients should render from these fields rather than parsing `message`.
+
 Cancellation is deep and best-effort for the connect task: the daemon sets its cancellation flag, wakes activation waits, and queues a target-guarded NetworkManager activation abort. Before deactivation it resolves the current active-connection object's profile and requires that profile's exact SSID bytes to match the cancelled request; it then deactivates the captured object path rather than re-querying whichever connection is active later. If the attempt has already failed and NetworkManager restored another profile, cancellation is a no-op. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call, but transitions check cancellation before and after those calls. Cancellation is coordinated by the shared runtime; it does not add a watcher thread per connection.
 
 The underlying connection workflow is the canonical `AlreadyActive → SavedProfile → CreateProfile → Rescan → Verify` NetworkManager D-Bus state machine. One targeted rescan is allowed for missing visible targets, terminal authentication/authorization failures remain terminal, and a failed profile created by the attempt is cleaned up centrally. Activation success requires exact SSID bytes; requested BSSID and AP object path are selection hints and are logged rather than enforced after NetworkManager may roam.
+
+### `wifi.band`
+
+`wifi.band.status` reports the active band, the profile's selected constraint, and all currently visible bands for the same exact SSID and interface. `wifi.band.set` accepts `auto`, `2.4`, `5`, or `6`, creates a NetworkManager checkpoint, updates the saved profile, reactivates it, and verifies the resulting band. An unavailable requested band is rejected before mutation. Activation failure or cancellation restores the original profile settings and rolls back the checkpoint; success destroys the checkpoint. The operation is owner-scoped, cancellable, and emits `started`, `progress`, `succeeded`, `failed`, or `cancelled` on `wifi.band`.
 
 ### `wifi.secret`
 

@@ -1,4 +1,111 @@
 {
+  "band_set": {
+    "result": {
+      "message": "Wi-Fi band selection started; listen for Event('wifi.band', event_json) signals",
+      "request_id": "band-contract",
+      "status": "started",
+      "stream": "wifi.band"
+    }
+  },
+  "band_status": {
+    "band": {
+      "available": [
+        "2.4",
+        "5",
+        "6"
+      ],
+      "current": "5",
+      "device_iface": "wlan0",
+      "id": "Example",
+      "path": "/org/freedesktop/NetworkManager/Settings/1",
+      "selected": "5",
+      "ssid": "Example"
+    }
+  },
+  "band_stream": {
+    "events": [
+      {
+        "event": "subscribed",
+        "protocol": "nm-api",
+        "request_id": "band-contract",
+        "stream": "wifi.band",
+        "subscription_id": "subscription-contract",
+        "version": 1
+      },
+      {
+        "event": "started",
+        "path": "/org/freedesktop/NetworkManager/Settings/1",
+        "phase": "preparing",
+        "protocol": "nm-api",
+        "request_id": "band-contract",
+        "requested_band": "5",
+        "stream": "wifi.band",
+        "version": 1
+      },
+      {
+        "event": "progress",
+        "path": "/org/freedesktop/NetworkManager/Settings/1",
+        "phase": "applying",
+        "protocol": "nm-api",
+        "request_id": "band-contract",
+        "requested_band": "5",
+        "stream": "wifi.band",
+        "version": 1
+      },
+      {
+        "event": "succeeded",
+        "path": "/org/freedesktop/NetworkManager/Settings/1",
+        "phase": "complete",
+        "protocol": "nm-api",
+        "request_id": "band-contract",
+        "requested_band": "5",
+        "result": {
+          "band": {
+            "available": [
+              "2.4",
+              "5",
+              "6"
+            ],
+            "current": "5",
+            "device_iface": "wlan0",
+            "id": "Example",
+            "path": "/org/freedesktop/NetworkManager/Settings/1",
+            "selected": "5",
+            "ssid": "Example"
+          },
+          "changed": true,
+          "message": "Wi-Fi band selection updated for Example",
+          "status": "selected"
+        },
+        "stream": "wifi.band",
+        "version": 1
+      },
+      {
+        "code": "activation-failed",
+        "details": {},
+        "event": "failed",
+        "message": "Wi-Fi band selection failed",
+        "path": "/org/freedesktop/NetworkManager/Settings/1",
+        "phase": "failed",
+        "protocol": "nm-api",
+        "request_id": "band-contract",
+        "requested_band": "5",
+        "stream": "wifi.band",
+        "version": 1
+      },
+      {
+        "event": "cancelled",
+        "message": "Wi-Fi band selection was cancelled",
+        "path": "/org/freedesktop/NetworkManager/Settings/1",
+        "phase": "cancelled",
+        "protocol": "nm-api",
+        "request_id": "band-contract",
+        "requested_band": "5",
+        "stream": "wifi.band",
+        "version": 1
+      }
+    ]
+  },
   "connect_error": {
     "connectivity": null,
     "message": "password required for Example",
@@ -20,21 +127,60 @@
       {
         "event": "started",
         "message": "starting Wi-Fi connection",
+        "phase": "starting",
         "protocol": "nm-api",
         "request_id": "connect-contract",
         "stream": "wifi.connect",
+        "target": {
+          "access_point_path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+          "bssid": "00:11:22:33:44:55",
+          "device_iface": "wlan0",
+          "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+          "network_key": "ssid-hex:4578616d706c65|security:personal|ifname:776c616e30",
+          "ssid": "Example",
+          "ssid_bytes": [
+            69,
+            120,
+            97,
+            109,
+            112,
+            108,
+            101
+          ],
+          "ssid_hex": "4578616d706c65"
+        },
         "version": 1
       },
       {
         "event": "progress",
-        "message": "activating NetworkManager connection",
+        "message": "activating saved NetworkManager profile",
+        "phase": "activating-saved-profile",
         "protocol": "nm-api",
         "request_id": "connect-contract",
         "stream": "wifi.connect",
+        "target": {
+          "access_point_path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+          "bssid": "00:11:22:33:44:55",
+          "device_iface": "wlan0",
+          "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+          "network_key": "ssid-hex:4578616d706c65|security:personal|ifname:776c616e30",
+          "ssid": "Example",
+          "ssid_bytes": [
+            69,
+            120,
+            97,
+            109,
+            112,
+            108,
+            101
+          ],
+          "ssid_hex": "4578616d706c65"
+        },
         "version": 1
       },
       {
         "event": "succeeded",
+        "phase": "connected",
         "protocol": "nm-api",
         "request_id": "connect-contract",
         "result": {
@@ -51,6 +197,24 @@
           "suggest_open_portal": false
         },
         "stream": "wifi.connect",
+        "target": {
+          "access_point_path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+          "bssid": "00:11:22:33:44:55",
+          "device_iface": "wlan0",
+          "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+          "network_key": "ssid-hex:4578616d706c65|security:personal|ifname:776c616e30",
+          "ssid": "Example",
+          "ssid_bytes": [
+            69,
+            120,
+            97,
+            109,
+            112,
+            108,
+            101
+          ],
+          "ssid_hex": "4578616d706c65"
+        },
         "version": 1
       },
       {
@@ -58,6 +222,7 @@
         "details": {},
         "event": "failed",
         "message": "password required for Example",
+        "phase": "failed",
         "protocol": "nm-api",
         "reason": "secret-required",
         "request_id": "connect-contract",
@@ -70,14 +235,51 @@
           "suggest_open_portal": false
         },
         "stream": "wifi.connect",
+        "target": {
+          "access_point_path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+          "bssid": "00:11:22:33:44:55",
+          "device_iface": "wlan0",
+          "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+          "network_key": "ssid-hex:4578616d706c65|security:personal|ifname:776c616e30",
+          "ssid": "Example",
+          "ssid_bytes": [
+            69,
+            120,
+            97,
+            109,
+            112,
+            108,
+            101
+          ],
+          "ssid_hex": "4578616d706c65"
+        },
         "version": 1
       },
       {
         "event": "cancelled",
         "message": "connection attempt was cancelled",
+        "phase": "cancelled",
         "protocol": "nm-api",
         "request_id": "connect-contract",
         "stream": "wifi.connect",
+        "target": {
+          "access_point_path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+          "bssid": "00:11:22:33:44:55",
+          "device_iface": "wlan0",
+          "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+          "network_key": "ssid-hex:4578616d706c65|security:personal|ifname:776c616e30",
+          "ssid": "Example",
+          "ssid_bytes": [
+            69,
+            120,
+            97,
+            109,
+            112,
+            108,
+            101
+          ],
+          "ssid_hex": "4578616d706c65"
+        },
         "version": 1
       }
     ]
@@ -185,6 +387,14 @@
         "enterprise.identity"
       ]
     }
+  },
+  "network_snapshot": {
+    "age_ms": 2500,
+    "refresh_requested": true,
+    "scanning": false,
+    "source": "cache",
+    "stale": false,
+    "updated_at_ms": 1762000000000
   },
   "password_network": {
     "auth": {
@@ -534,6 +744,14 @@
         "protocol": "nm-api",
         "request_id": "scan-contract",
         "scanning": false,
+        "snapshot": {
+          "age_ms": 0,
+          "refresh_requested": false,
+          "scanning": false,
+          "source": "scan",
+          "stale": false,
+          "updated_at_ms": 1762000002500
+        },
         "stream": "wifi.scan",
         "version": 1
       },

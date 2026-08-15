@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     AccessPoint, Bssid, ConnectEnginePath, ConnectFailureReason, ConnectionDetails, InterfaceName,
-    NetworkEntry, NmObjectPath, WifiConnectTarget, WifiStatus,
+    NetworkEntry, NetworkSnapshotMetadata, NetworkSnapshotSource, NmObjectPath, WifiConnectTarget,
+    WifiStatus,
 };
 
 use self::merge::{mark_inactive, network_key, upsert_connected_access_point};
@@ -65,6 +66,23 @@ pub(crate) struct CachedSnapshot {
 }
 
 impl CachedSnapshot {
+    pub(crate) fn metadata(&self, refresh_requested: bool) -> NetworkSnapshotMetadata {
+        let age_ms = now_ms()
+            .saturating_sub(self.updated_at_ms)
+            .min(u128::from(u64::MAX)) as u64;
+        NetworkSnapshotMetadata {
+            source: NetworkSnapshotSource::Cache,
+            updated_at_ms: self.updated_at_ms,
+            age_ms,
+            stale: age_ms
+                > crate::generated::NETWORK_SNAPSHOT_STALE_AFTER
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            scanning: self.scanning,
+            refresh_requested,
+        }
+    }
+
     pub(crate) fn into_networks(self) -> Vec<AccessPoint> {
         self.networks
     }
@@ -322,10 +340,11 @@ fn update_snapshot(
     update: impl FnOnce(&mut Vec<AccessPoint>),
 ) -> Result<()> {
     match snapshot {
-        CacheRead::Available(snapshot) => {
-            let mut networks = snapshot.into_networks();
-            update(&mut networks);
-            repository.write_json(SNAPSHOT_FILE, &snapshot_record(false, &networks))
+        CacheRead::Available(mut snapshot) => {
+            update(&mut snapshot.networks);
+            snapshot.scanning = false;
+            snapshot.networks_found = snapshot.networks.len();
+            repository.write_json(SNAPSHOT_FILE, &snapshot)
         }
         CacheRead::Missing => {
             tracing::debug!("not creating Wi-Fi scan cache from status-only update");
@@ -371,7 +390,8 @@ pub(crate) fn now_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CACHE_VERSION, CacheRead, validate_version};
+    use super::{CACHE_VERSION, CacheRead, CachedSnapshot, validate_version};
+    use crate::model::NetworkSnapshotSource;
 
     #[test]
     fn version_mismatch_is_stale_instead_of_missing() {
@@ -383,5 +403,32 @@ mod tests {
                 expected_version: CACHE_VERSION,
             } if found_version == CACHE_VERSION - 1
         ));
+    }
+
+    #[test]
+    fn cached_snapshot_metadata_reports_source_age_and_refresh_intent() {
+        let recent = CachedSnapshot {
+            version: CACHE_VERSION,
+            updated_at_ms: super::now_ms(),
+            scanning: false,
+            networks_found: 0,
+            networks: Vec::new(),
+        }
+        .metadata(true);
+        assert_eq!(recent.source, NetworkSnapshotSource::Cache);
+        assert!(!recent.stale);
+        assert!(recent.refresh_requested);
+
+        let stale = CachedSnapshot {
+            version: CACHE_VERSION,
+            updated_at_ms: 0,
+            scanning: true,
+            networks_found: 0,
+            networks: Vec::new(),
+        }
+        .metadata(false);
+        assert!(stale.stale);
+        assert!(stale.scanning);
+        assert!(!stale.refresh_requested);
     }
 }

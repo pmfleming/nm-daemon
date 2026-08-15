@@ -50,6 +50,10 @@ impl Nm {
         wep_key_type: Option<WepKeyType>,
     ) -> Result<()> {
         if password.is_some() || target.enterprise.is_some() {
+            let _transaction = self
+                .profile_transaction
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let visible_ap = self
                 .visible_access_point_for(target)?
                 .map(|(_device, _path, ap)| ap);

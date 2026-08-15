@@ -24,6 +24,7 @@ const FAST_WORKER_COUNT: usize = 1;
 pub(crate) enum TaskKind {
     Connect,
     Scan,
+    Band,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -440,6 +441,7 @@ impl TaskKind {
         match self {
             Self::Connect => ErrorOperation::Connect,
             Self::Scan => ErrorOperation::Scan,
+            Self::Band => ErrorOperation::BandOperation,
         }
     }
 }

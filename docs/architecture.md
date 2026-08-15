@@ -19,8 +19,9 @@ D-Bus daemon ─> shared runtime ─> bounded tasks, cancellation, subscriptions
 
 - status and NetworkManager connectivity;
 - visible networks, cache selection, and model enrichment;
-- scan validation, execution, cache writes, and typed scan events;
-- connect requests and typed connect events;
+- scan validation, execution, cache writes, freshness metadata, and typed scan events;
+- connect requests and typed state-machine/target events;
+- active-profile band discovery and transactional band selection;
 - disconnect;
 - saved-profile listing and profile mutations.
 
@@ -28,7 +29,7 @@ D-Bus daemon ─> shared runtime ─> bounded tasks, cancellation, subscriptions
 
 `src/actions.rs` and the `src/daemon_*.rs` handlers are adapters around these services. Disconnect and saved-profile mutations are exposed through both the forwarding CLI and the canonical D-Bus application boundary.
 
-Application calls return typed domain results and events. The CLI converts them to `nm-api` JSON/JSONL, while D-Bus methods return the same versioned envelope as a JSON string and emit events through `org.laufan.NmDaemon1.Event`.
+Application calls return typed domain results and events. The CLI converts them to `nm-api` JSON/JSONL, while D-Bus methods return the same versioned envelope as a JSON string and emit events through `org.laufan.NmDaemon1.Event`. Connect events expose typed state-machine phases and a target identity containing the original network key, exact SSID bytes, and available interface/device/AP identifiers; presentation code never has to classify progress messages.
 
 ## Connection state machine
 
@@ -48,6 +49,10 @@ AlreadyActive
 A successful saved-profile activation or newly created profile enters `Verify`. A missing visible target may trigger one targeted `Rescan` before retrying the D-Bus states. There is no subprocess connection fallback. Failed profiles created during an attempt are cleaned up from one failure path.
 
 Verification requires the selected device to report activation and the exact SSID bytes to match. BSSID and NetworkManager AP object paths remain activation-selection hints because roaming or AP object replacement can legitimately change them during activation. The state machine records `already-active` or `dbus`, updates cache/history on completion, and checks cancellation between transitions and while waiting for activation.
+
+## Transactional Wi-Fi band selection
+
+`wifi.band.status` resolves an active saved profile to its exact Wi-Fi device and reports the current AP band, selected profile constraint, and visible bands for the same exact SSID/interface. `wifi.band.set` runs on the bounded cancellable worker lane. It rejects unavailable bands before mutation, creates a NetworkManager checkpoint, updates `802-11-wireless.band`, reactivates the exact profile, waits for full activation, and verifies the resulting band. Success destroys the checkpoint. Failure, cancellation, or checkpoint-finalization failure restores the original settings and rolls the checkpoint back, preventing a failed pin from leaving the machine stranded.
 
 ## Domain model and compatibility boundary
 
@@ -88,6 +93,8 @@ Repository guarantees include:
 - per-repository advisory file locking around write transactions and read-modify-write operations;
 - unique temporary files followed by atomic rename for JSON records;
 - explicit `Missing`, `Stale`, `Corrupt`, and `Available` read states;
+- frontend snapshot metadata carrying source, original update time, age, policy staleness, scan state, and refresh intent;
+- status-only cache mutations preserve the original scan timestamp, so a connection-state update cannot make old AP scan data appear fresh;
 - serialized append/rotation for connection history.
 
 Runtime scan/status data lives under `$XDG_RUNTIME_DIR/nm-daemon` (with a per-user temporary fallback). Persistent connection history lives under `$XDG_STATE_HOME/nm-daemon`, or `~/.local/state/nm-daemon`. `connects.jsonl` rotates at 512 KiB and keeps three older generations.
@@ -108,7 +115,7 @@ Directional transmit and receive link rates bypass the command gateway. `src/nl8
 
 The daemon creates one shared `Nm` instance and therefore one NetworkManager system-bus connection. `DaemonRuntime` owns:
 
-- a bounded long-running work queue for cancellable scan/connect jobs, with panic containment and owner-scoped cleanup;
+- a bounded long-running work queue for cancellable scan/connect/band-selection jobs, with panic containment and owner-scoped cleanup;
 - a separate bounded fast lane for synchronous calls, status refreshes, and target-guarded activation aborts so they do not queue behind multi-second jobs;
 - cancellable scan/connect task registrations;
 - one control/event loop for all subscriptions;

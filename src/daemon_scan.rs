@@ -137,6 +137,7 @@ fn emit_scan_event(
                     "scanning": false,
                     "networks_found": networks_found,
                     "networks": snapshot.networks,
+                    "snapshot": snapshot.snapshot,
                 }),
             )
         }

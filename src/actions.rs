@@ -44,6 +44,7 @@ pub(crate) fn connect_ssid_request(options: ConnectOptions) -> Result<ConnectReq
     };
     Ok(ConnectRequest {
         target,
+        network_key: None,
         password: resolve_password(options.password_stdin)?,
         wep_key_type: options.wep_key_type,
     })
@@ -204,7 +205,7 @@ pub(crate) fn print_networks(nm: &Nm, options: ListOptions) -> Result<()> {
             warning.message
         );
     }
-    crate::output::print_network_entries_json(&result.networks)
+    crate::output::print_network_entries_with_snapshot(&result.networks, &result.snapshot)
 }
 
 struct InlineBackgroundScan<'a>(&'a Nm);
@@ -274,6 +275,7 @@ fn parse_connect_target_request(
     match serde_json::from_str::<ConnectTargetStdinRequest>(request_json) {
         Ok(request) => Ok(ConnectRequest {
             target: request.target,
+            network_key: None,
             password: request.password,
             wep_key_type: request.wep_key_type.or(wep_key_type),
         }),
@@ -299,6 +301,7 @@ fn parse_bare_connect_target(
         })?;
     Ok(ConnectRequest {
         target,
+        network_key: None,
         password: None,
         wep_key_type,
     })

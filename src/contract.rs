@@ -6,10 +6,12 @@ use serde_json::{Value, json};
 
 use crate::forget::{ForgetProfile, ForgetResult, ForgetStatus};
 use crate::model::{
-    AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectResult, ConnectivityStatus,
-    DhcpLeaseStatus, DisconnectResult, Ip4Status, MeteredStatus, NetworkEntry, ProfileIpSettings,
-    ProfilePrivacy, RadioPowerResult, RadioStatus, SavedWifiConnection, WifiPowerResult,
-    WifiProfileDetails, WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus,
+    AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectPhase, ConnectResult,
+    ConnectTargetIdentity, ConnectivityStatus, DhcpLeaseStatus, DisconnectResult, Ip4Status,
+    MeteredStatus, NetworkEntry, NetworkSnapshotMetadata, NetworkSnapshotSource, ProfileIpSettings,
+    ProfilePrivacy, RadioPowerResult, RadioStatus, SavedWifiConnection, WifiBand,
+    WifiBandSelectionResult, WifiBandStatus, WifiPowerResult, WifiProfileDetails,
+    WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus,
     network_entries_with_profile_matches, security_flags_label, security_label,
 };
 use crate::protocol::{Method, Stream};
@@ -44,9 +46,17 @@ fn method_contract_fixtures() -> Value {
             "metadata": crate::protocol::contract_registry(),
             "markdown": crate::protocol::markdown_reference(),
         },
-        "wifi-networks.saved": response_fixture(Method::WifiNetworks, json!([combined.network])),
-        "wifi-networks.password-required": response_fixture(Method::WifiNetworks, json!([password_network])),
-        "wifi-networks.enterprise-required": response_fixture(Method::WifiNetworks, json!([enterprise_network])),
+        "wifi-networks.saved": network_response_fixture(vec![combined.network]),
+        "wifi-networks.password-required": network_response_fixture(vec![password_network]),
+        "wifi-networks.enterprise-required": network_response_fixture(vec![enterprise_network]),
+        "wifi-band.status": response_fixture(Method::WifiBandStatus, json!(contract_band_status())),
+        "wifi-band.set": response_fixture(Method::WifiBandSet, json!({
+            "status": "started",
+            "request_id": "band-contract",
+            "stream": Stream::WifiBand,
+            "message": "Wi-Fi band selection started; listen for Event('wifi.band', event_json) signals",
+        })),
+        "wifi-band.stream": { "events": operation_stream_events(Stream::WifiBand) },
         "wifi-saved.profiles": response_fixture(Method::WifiSaved, json!([contract_profile()])),
         "wifi-status.active": response_fixture(Method::WifiStatus, json!(combined.status)),
         "wifi-status.inactive": response_fixture(Method::WifiStatus, json!(inactive_status())),
@@ -107,6 +117,24 @@ fn response_fixture(method: Method, value: Value) -> Value {
     Value::Object(object)
 }
 
+fn network_response_fixture(networks: Vec<NetworkEntry>) -> Value {
+    json!({
+        "networks": networks,
+        "snapshot": contract_snapshot_metadata(),
+    })
+}
+
+fn contract_snapshot_metadata() -> NetworkSnapshotMetadata {
+    NetworkSnapshotMetadata {
+        source: NetworkSnapshotSource::Cache,
+        updated_at_ms: 1_762_000_000_000,
+        age_ms: 2_500,
+        stale: false,
+        scanning: false,
+        refresh_requested: true,
+    }
+}
+
 fn shelllist_contract_fixture() -> ShelllistContractFixture {
     let access_point = canonical_access_point(crate::model::NM_AP_SEC_KEY_MGMT_PSK, true);
     let profile = contract_profile();
@@ -148,6 +176,21 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
         },
         connect_success: connected_fixture(),
         connect_error: connect_error_fixture(),
+    }
+}
+
+fn contract_connect_identity() -> ConnectTargetIdentity {
+    ConnectTargetIdentity {
+        network_key: Some(
+            "ssid-hex:4578616d706c65|security:personal|ifname:776c616e30".to_string(),
+        ),
+        ssid: "Example".to_string(),
+        ssid_bytes: b"Example".to_vec(),
+        ssid_hex: "4578616d706c65".to_string(),
+        device_iface: Some("wlan0".to_string()),
+        device_path: Some("/org/freedesktop/NetworkManager/Devices/1".to_string()),
+        access_point_path: Some("/org/freedesktop/NetworkManager/AccessPoint/1".to_string()),
+        bssid: Some("00:11:22:33:44:55".to_string()),
     }
 }
 
@@ -253,7 +296,19 @@ fn scan_stream_events() -> Vec<Value> {
             ),
             (
                 "snapshot",
-                json!({ "scanning": false, "networks_found": 1, "networks": [network] }),
+                json!({
+                    "scanning": false,
+                    "networks_found": 1,
+                    "networks": [network],
+                    "snapshot": NetworkSnapshotMetadata {
+                        source: NetworkSnapshotSource::Scan,
+                        updated_at_ms: 1_762_000_002_500,
+                        age_ms: 0,
+                        stale: false,
+                        scanning: false,
+                        refresh_requested: false,
+                    },
+                }),
             ),
             (
                 "complete",
@@ -274,20 +329,35 @@ fn operation_stream_events(stream: Stream) -> Vec<Value> {
             "connect-contract",
             vec![
                 subscribed_event("subscription-contract"),
-                ("started", json!({ "message": "starting Wi-Fi connection" })),
+                (
+                    "started",
+                    json!({
+                        "phase": ConnectPhase::Starting,
+                        "target": contract_connect_identity(),
+                        "message": "starting Wi-Fi connection",
+                    }),
+                ),
                 (
                     "progress",
-                    json!({ "message": "activating NetworkManager connection" }),
+                    json!({
+                        "phase": ConnectPhase::ActivatingSavedProfile,
+                        "target": contract_connect_identity(),
+                        "message": "activating saved NetworkManager profile",
+                    }),
                 ),
                 (
                     "succeeded",
                     json!({
+                        "phase": ConnectPhase::Connected,
+                        "target": contract_connect_identity(),
                         "result": connected_fixture(),
                     }),
                 ),
                 (
                     "failed",
                     json!({
+                        "phase": ConnectPhase::Failed,
+                        "target": contract_connect_identity(),
                         "result": connect_error_fixture(),
                         "reason": "secret-required",
                         "code": "secret-required",
@@ -297,7 +367,67 @@ fn operation_stream_events(stream: Stream) -> Vec<Value> {
                 ),
                 (
                     "cancelled",
-                    json!({ "message": "connection attempt was cancelled" }),
+                    json!({
+                        "phase": ConnectPhase::Cancelled,
+                        "target": contract_connect_identity(),
+                        "message": "connection attempt was cancelled",
+                    }),
+                ),
+            ],
+        ),
+        Stream::WifiBand => (
+            "band-contract",
+            vec![
+                subscribed_event("subscription-contract"),
+                (
+                    "started",
+                    json!({
+                        "phase": "preparing",
+                        "path": contract_profile().path,
+                        "requested_band": WifiBand::Ghz5,
+                    }),
+                ),
+                (
+                    "progress",
+                    json!({
+                        "phase": "applying",
+                        "path": contract_profile().path,
+                        "requested_band": WifiBand::Ghz5,
+                    }),
+                ),
+                (
+                    "succeeded",
+                    json!({
+                        "phase": "complete",
+                        "path": contract_profile().path,
+                        "requested_band": WifiBand::Ghz5,
+                        "result": WifiBandSelectionResult {
+                            status: "selected",
+                            changed: true,
+                            band: contract_band_status(),
+                            message: "Wi-Fi band selection updated for Example".to_string(),
+                        },
+                    }),
+                ),
+                (
+                    "failed",
+                    json!({
+                        "phase": "failed",
+                        "path": contract_profile().path,
+                        "requested_band": WifiBand::Ghz5,
+                        "code": "activation-failed",
+                        "message": "Wi-Fi band selection failed",
+                        "details": {},
+                    }),
+                ),
+                (
+                    "cancelled",
+                    json!({
+                        "phase": "cancelled",
+                        "path": contract_profile().path,
+                        "requested_band": WifiBand::Ghz5,
+                        "message": "Wi-Fi band selection was cancelled",
+                    }),
                 ),
             ],
         ),
@@ -375,6 +505,18 @@ fn stream_events(stream: Stream, request_id: &str, events: Vec<(&str, Value)>) -
             .expect("canonical stream event JSON")
         })
         .collect()
+}
+
+fn contract_band_status() -> WifiBandStatus {
+    WifiBandStatus {
+        path: "/org/freedesktop/NetworkManager/Settings/1".to_string(),
+        id: "Example".to_string(),
+        ssid: "Example".to_string(),
+        device_iface: "wlan0".to_string(),
+        current: WifiBand::Ghz5,
+        selected: WifiBand::Ghz5,
+        available: vec![WifiBand::Ghz2_4, WifiBand::Ghz5, WifiBand::Ghz6],
+    }
 }
 
 fn contract_profile() -> SavedWifiConnection {
@@ -486,6 +628,7 @@ fn serialized_boundary_snapshot() -> Value {
     let shell = serde_json::to_value(shelllist_contract_fixture()).expect("shell fixture JSON");
     let methods = method_contract_fixtures();
     json!({
+        "network_snapshot": methods["wifi-networks.saved"]["snapshot"],
         "saved_network": {
             "capabilities": shell["network"]["capabilities"],
             "auth": shell["network"]["auth"],
@@ -514,6 +657,9 @@ fn serialized_boundary_snapshot() -> Value {
         "connect_stream": methods["wifi-connect.stream"],
         "scan_stream": methods["wifi-scan.stream"],
         "saved_profiles": methods["wifi-saved.profiles"],
+        "band_status": methods["wifi-band.status"],
+        "band_set": methods["wifi-band.set"],
+        "band_stream": methods["wifi-band.stream"],
         "disconnect": methods["wifi-disconnect.success"],
         "set_enabled": methods["wifi-set-enabled.success"],
         "set_wwan_enabled": methods["radio-set-wwan-enabled.success"],
@@ -543,6 +689,11 @@ mod tests {
             "{}\n",
             serde_json::to_string_pretty(&serialized_boundary_snapshot()).unwrap()
         );
+        if std::env::var_os("NM_DAEMON_UPDATE_CONTRACT_FIXTURE").is_some() {
+            std::fs::write("test_support/contract-v1.json", &actual)
+                .expect("update checked-in contract fixture");
+            return;
+        }
         assert_eq!(actual, include_str!("../test_support/contract-v1.json"));
     }
 
@@ -610,6 +761,8 @@ mod tests {
             crate::protocol::Method::RadioSetAirplaneMode,
             crate::protocol::Method::NetworkConnectivity,
             crate::protocol::Method::WifiNetworks,
+            crate::protocol::Method::WifiBandStatus,
+            crate::protocol::Method::WifiBandSet,
             crate::protocol::Method::WifiSaved,
             crate::protocol::Method::WifiScan,
             crate::protocol::Method::WifiConnectTarget,
@@ -624,6 +777,11 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(covered_methods, registered_methods);
         assert!(value["wifi-networks.saved"]["networks"].is_array());
+        assert_eq!(value["wifi-networks.saved"]["snapshot"]["source"], "cache");
+        assert_eq!(
+            value["wifi-networks.saved"]["snapshot"]["refresh_requested"],
+            true
+        );
         assert_eq!(
             value["wifi-networks.saved"]["networks"][0]["security_class"],
             "personal"
@@ -643,6 +801,11 @@ mod tests {
         assert_eq!(value["wifi-status.inactive"]["status"]["active"], false);
         assert_eq!(value["wifi-status.inactive"]["status"]["enabled"], false);
         assert_eq!(value["wifi-set-enabled.success"]["result"]["enabled"], true);
+        assert_eq!(value["wifi-band.status"]["band"]["selected"], "5");
+        assert_eq!(
+            value["wifi-band.set"]["result"]["request_id"],
+            "band-contract"
+        );
         assert_eq!(value["wifi-saved.profiles"]["profiles"][0]["id"], "Example");
         assert_eq!(
             value["wifi-connect.secret-required"]["result"]["reason"],
@@ -684,11 +847,13 @@ mod tests {
         );
         for fixture in [
             "wifi-connect.stream",
+            "wifi-band.stream",
             "wifi-scan.stream",
             "wifi-secret.stream",
         ] {
             let stream = match fixture {
                 "wifi-connect.stream" => crate::protocol::Stream::WifiConnect,
+                "wifi-band.stream" => crate::protocol::Stream::WifiBand,
                 "wifi-scan.stream" => crate::protocol::Stream::WifiScan,
                 _ => crate::protocol::Stream::WifiSecret,
             };

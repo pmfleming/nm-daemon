@@ -71,6 +71,12 @@ fn dispatch_method(
             owner,
             emitter,
         ),
+        Method::WifiBandSet => crate::daemon_band::start_set(
+            runtime,
+            parse_required_params::<crate::daemon_band::BandSetParams>(params_json)?,
+            owner,
+            emitter,
+        ),
         _ => immediate::dispatch(method, params_json, owner.as_deref(), runtime),
     }
 }

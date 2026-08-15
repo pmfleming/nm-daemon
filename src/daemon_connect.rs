@@ -10,7 +10,10 @@ use crate::application::{Application, ConnectEvent, ConnectOutcome, ConnectReque
 use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, next_request_id};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{DomainError, ErrorOperation, ErrorReport};
-use crate::model::{EnterpriseAuth, WepKeyType, WifiConnectTarget, ssid_for_network_key};
+use crate::model::{
+    ConnectPhase, ConnectTargetIdentity, EnterpriseAuth, WepKeyType, WifiConnectTarget,
+    connect_target_for_network_key, ssid_for_network_key,
+};
 use crate::nm::Nm;
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
@@ -35,6 +38,20 @@ pub(crate) struct DbusConnectTargetParams {
 }
 
 impl DbusConnectTargetParams {
+    fn requested_identity(&self) -> Result<ConnectTargetIdentity> {
+        match (&self.key, &self.target) {
+            (Some(key), None) => {
+                let target = connect_target_for_network_key(key, None)?;
+                Ok(ConnectTargetIdentity::from_target(&target, Some(key)))
+            }
+            (None, Some(target)) => Ok(ConnectTargetIdentity::from_target(target, None)),
+            (Some(_), Some(_)) => {
+                bail!("connect request must provide either key or target, not both")
+            }
+            (None, None) => bail!("connect request must provide key or target"),
+        }
+    }
+
     fn validated_ssid(&self) -> Result<Vec<u8>> {
         match (&self.key, &self.target) {
             (Some(key), None) => Ok(ssid_for_network_key(key)?.as_bytes().to_vec()),
@@ -53,6 +70,7 @@ impl DbusConnectTargetParams {
         if let Some(target) = self.target {
             return Ok(ConnectRequest {
                 target,
+                network_key: None,
                 password: self.password,
                 wep_key_type: self.wep_key_type,
             });
@@ -89,6 +107,9 @@ pub(crate) fn start_connect_target(
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
     let target_ssid = params.validated_ssid().map_err(connect_validation_error)?;
+    let requested_identity = params
+        .requested_identity()
+        .map_err(connect_validation_error)?;
     let request_id = next_request_id("connect");
     tracing::info!(
         request_id = %request_id,
@@ -107,7 +128,7 @@ pub(crate) fn start_connect_target(
                 run_connect_worker(nm, &worker_request_id, params, cancel_flag, &emitter)
             {
                 let report = ErrorReport::from_error(&err, ErrorOperation::Connect);
-                emit_connect_failure(&emitter, &worker_request_id, &report);
+                emit_connect_failure(&emitter, &worker_request_id, &requested_identity, &report);
             }
         },
     )?;
@@ -150,15 +171,37 @@ fn emit_connect_event(
     event: &ConnectEvent,
 ) -> Result<()> {
     let (name, data) = match event {
-        ConnectEvent::Started { message } => (
+        ConnectEvent::Started {
+            phase,
+            target,
+            message,
+        } => (
             "started",
-            json!({ "request_id": request_id, "message": message }),
+            json!({
+                "request_id": request_id,
+                "phase": phase,
+                "target": target,
+                "message": message,
+            }),
         ),
-        ConnectEvent::Progress { message } => (
+        ConnectEvent::Progress {
+            phase,
+            target,
+            message,
+        } => (
             "progress",
-            json!({ "request_id": request_id, "message": message }),
+            json!({
+                "request_id": request_id,
+                "phase": phase,
+                "target": target,
+                "message": message,
+            }),
         ),
-        ConnectEvent::Finished(ConnectOutcome::Succeeded(result)) => {
+        ConnectEvent::Finished {
+            phase,
+            target,
+            outcome: ConnectOutcome::Succeeded(result),
+        } => {
             let connectivity_state = result
                 .connectivity
                 .as_ref()
@@ -175,10 +218,19 @@ fn emit_connect_event(
             );
             (
                 "succeeded",
-                json!({ "request_id": request_id, "result": result }),
+                json!({
+                    "request_id": request_id,
+                    "phase": phase,
+                    "target": target,
+                    "result": result,
+                }),
             )
         }
-        ConnectEvent::Finished(ConnectOutcome::Failed { result, error }) => {
+        ConnectEvent::Finished {
+            phase,
+            target,
+            outcome: ConnectOutcome::Failed { result, error },
+        } => {
             tracing::warn!(
                 %request_id,
                 ssid = %result.ssid,
@@ -190,6 +242,8 @@ fn emit_connect_event(
                 "failed",
                 json!({
                     "request_id": request_id,
+                    "phase": phase,
+                    "target": target,
                     "result": result,
                     "reason": result.reason,
                     "message": result.message,
@@ -198,19 +252,37 @@ fn emit_connect_event(
                 }),
             )
         }
-        ConnectEvent::Cancelled { message }
-        | ConnectEvent::Finished(ConnectOutcome::Cancelled { message }) => {
+        ConnectEvent::Cancelled {
+            phase,
+            target,
+            message,
+        }
+        | ConnectEvent::Finished {
+            phase,
+            target,
+            outcome: ConnectOutcome::Cancelled { message },
+        } => {
             tracing::info!(%request_id, "emitting correlated Wi-Fi connection cancellation");
             (
                 "cancelled",
-                json!({ "request_id": request_id, "message": message }),
+                json!({
+                    "request_id": request_id,
+                    "phase": phase,
+                    "target": target,
+                    "message": message,
+                }),
             )
         }
     };
     emit_json_event(emitter, STREAM, Some(request_id), name, data)
 }
 
-fn emit_connect_failure(emitter: &SignalEmitter<'static>, request_id: &str, report: &ErrorReport) {
+fn emit_connect_failure(
+    emitter: &SignalEmitter<'static>,
+    request_id: &str,
+    target: &ConnectTargetIdentity,
+    report: &ErrorReport,
+) {
     emit_json_event_nonfatal(
         emitter,
         STREAM,
@@ -218,6 +290,8 @@ fn emit_connect_failure(emitter: &SignalEmitter<'static>, request_id: &str, repo
         "failed",
         json!({
             "request_id": request_id,
+            "phase": ConnectPhase::Failed,
+            "target": target,
             "reason": report.code.connect_reason(),
             "code": report.code,
             "message": report.message,
