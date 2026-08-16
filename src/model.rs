@@ -1005,7 +1005,7 @@ pub(crate) fn network_entries_with_profile_matches(
 ) -> Vec<NetworkEntry> {
     grouped_access_points(access_points)
         .into_iter()
-        .map(|group| {
+        .filter_map(|group| {
             let profiles = profiles_for_access_point_group(&group, profile_matches_by_ap_path);
             network_entry_with_profiles(group, profiles)
         })
@@ -1037,14 +1037,14 @@ fn grouped_access_points(access_points: Vec<AccessPoint>) -> Vec<Vec<AccessPoint
 fn network_entry_with_profiles(
     access_points: Vec<AccessPoint>,
     profiles: Vec<SavedWifiConnection>,
-) -> NetworkEntry {
-    let access_point = preferred_access_point(&access_points);
+) -> Option<NetworkEntry> {
+    let access_point = preferred_access_point(&access_points)?;
     let primary_profile = profiles.first().cloned();
     let has_profile = primary_profile.is_some();
     let share = network_share_hint_for(&access_point, primary_profile.as_ref());
     let capabilities = network_capabilities(&access_point, has_profile, &share);
     let auth = auth_capability_for(&access_point, has_profile);
-    NetworkEntry {
+    Some(NetworkEntry {
         key: network_key_for(&access_point),
         security_class: security_class(
             access_point.flags,
@@ -1061,7 +1061,7 @@ fn network_entry_with_profiles(
         profiles,
         auth,
         last_connection: None,
-    }
+    })
 }
 
 fn network_capabilities(
@@ -1116,7 +1116,7 @@ fn access_point_is_passwordless(access_point: &AccessPoint) -> bool {
     )
 }
 
-fn preferred_access_point(access_points: &[AccessPoint]) -> AccessPoint {
+fn preferred_access_point(access_points: &[AccessPoint]) -> Option<AccessPoint> {
     access_points
         .iter()
         .max_by(|left, right| {
@@ -1125,7 +1125,6 @@ fn preferred_access_point(access_points: &[AccessPoint]) -> AccessPoint {
                 .then_with(|| left.strength.cmp(&right.strength))
         })
         .cloned()
-        .expect("network entries require at least one access point")
 }
 
 fn profiles_for_access_point_group(

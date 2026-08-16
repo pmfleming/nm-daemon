@@ -14,12 +14,12 @@ pub(crate) fn next_request_id(prefix: &str) -> String {
     format!("{prefix}-{value}")
 }
 
-pub(crate) fn event_json(
+pub(crate) fn event_value(
     stream: Stream,
     request_id: Option<&str>,
     event: &str,
     mut data: Value,
-) -> String {
+) -> Value {
     if let Value::Object(object) = &mut data {
         object.insert("protocol".to_string(), json!(crate::output::API_PROTOCOL));
         object.insert("version".to_string(), json!(crate::output::API_VERSION));
@@ -31,7 +31,16 @@ pub(crate) fn event_json(
                 .or_insert_with(|| json!(request_id));
         }
     }
-    serde_json::to_string(&data).unwrap_or_else(|err| fallback_event_json(stream, err))
+    data
+}
+
+pub(crate) fn event_json(
+    stream: Stream,
+    request_id: Option<&str>,
+    event: &str,
+    data: Value,
+) -> String {
+    event_value(stream, request_id, event, data).to_string()
 }
 
 pub(crate) fn emit_json_event(
@@ -64,15 +73,4 @@ pub(crate) fn emit_json_event_nonfatal(
         format!("failed to emit registered JSON event {stream}.{event}"),
         || emit_json_event(emitter, stream, request_id, event, data),
     );
-}
-
-fn fallback_event_json(stream: Stream, err: serde_json::Error) -> String {
-    json!({
-        "protocol": crate::output::API_PROTOCOL,
-        "version": crate::output::API_VERSION,
-        "stream": stream,
-        "event": "failed",
-        "message": format!("serialize event JSON: {err}"),
-    })
-    .to_string()
 }

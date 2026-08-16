@@ -218,10 +218,7 @@ impl Nm {
         action: &str,
         mutate: impl FnOnce(&mut ConnectionSettings) -> Result<()>,
     ) -> Result<()> {
-        let _transaction = self
-            .profile_transaction
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _transaction = self.begin_profile_transaction();
         let path = OwnedObjectPath::try_from(path).context("parse connection path")?;
         let mut settings = self.connection_settings(&path)?;
         mutate(&mut settings)?;

@@ -496,13 +496,7 @@ fn stream_events(stream: Stream, request_id: &str, events: Vec<(&str, Value)>) -
     events
         .into_iter()
         .map(|(event, data)| {
-            serde_json::from_str(&crate::daemon_event::event_json(
-                stream,
-                Some(request_id),
-                event,
-                data,
-            ))
-            .expect("canonical stream event JSON")
+            crate::daemon_event::event_value(stream, Some(request_id), event, data)
         })
         .collect()
 }

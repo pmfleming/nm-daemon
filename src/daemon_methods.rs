@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::application::{Application, NetworksRequest, ProfileOperation, ProfileOperationResult};
@@ -15,13 +15,8 @@ use crate::output::api_data_value;
 use crate::protocol::Method;
 
 pub(crate) fn call_status(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    runtime.call(ErrorOperation::Status, |nm| {
-        let application = Application::new(nm);
-        api_data_value(
-            Method::WifiStatus.spec().response_key,
-            &application.status()?,
-            "serialize Wi-Fi status response JSON",
-        )
+    call_application(runtime, Method::WifiStatus, |application| {
+        application.status()
     })
 }
 
@@ -29,13 +24,8 @@ pub(crate) fn call_set_enabled(
     runtime: &Arc<DaemonRuntime>,
     params: SetEnabledParams,
 ) -> Result<Value> {
-    runtime.call(ErrorOperation::Status, move |nm| {
-        let result = Application::new(nm).set_wifi_enabled(params.enabled)?;
-        api_data_value(
-            Method::WifiSetEnabled.spec().response_key,
-            &result,
-            "serialize Wi-Fi power response JSON",
-        )
+    call_application(runtime, Method::WifiSetEnabled, move |application| {
+        application.set_wifi_enabled(params.enabled)
     })
 }
 
@@ -43,13 +33,8 @@ pub(crate) fn call_set_wwan_enabled(
     runtime: &Arc<DaemonRuntime>,
     params: SetEnabledParams,
 ) -> Result<Value> {
-    runtime.call(ErrorOperation::Status, move |nm| {
-        let result = Application::new(nm).set_wwan_enabled(params.enabled)?;
-        api_data_value(
-            Method::RadioSetWwanEnabled.spec().response_key,
-            &result,
-            "serialize WWAN power response JSON",
-        )
+    call_application(runtime, Method::RadioSetWwanEnabled, move |application| {
+        application.set_wwan_enabled(params.enabled)
     })
 }
 
@@ -57,24 +42,14 @@ pub(crate) fn call_set_airplane_mode(
     runtime: &Arc<DaemonRuntime>,
     params: SetEnabledParams,
 ) -> Result<Value> {
-    runtime.call(ErrorOperation::Status, move |nm| {
-        let result = Application::new(nm).set_airplane_mode(params.enabled)?;
-        api_data_value(
-            Method::RadioSetAirplaneMode.spec().response_key,
-            &result,
-            "serialize airplane-mode response JSON",
-        )
+    call_application(runtime, Method::RadioSetAirplaneMode, move |application| {
+        application.set_airplane_mode(params.enabled)
     })
 }
 
 pub(crate) fn call_connectivity(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    runtime.call(ErrorOperation::Connectivity, |nm| {
-        let application = Application::new(nm);
-        api_data_value(
-            Method::NetworkConnectivity.spec().response_key,
-            &application.connectivity()?,
-            "serialize connectivity response JSON",
-        )
+    call_application(runtime, Method::NetworkConnectivity, |application| {
+        application.connectivity()
     })
 }
 
@@ -100,21 +75,29 @@ pub(crate) fn call_networks(runtime: &Arc<DaemonRuntime>, params: NetworksParams
 }
 
 pub(crate) fn call_saved(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    runtime.call(ErrorOperation::ProfileOperation, |nm| {
-        api_data_value(
-            Method::WifiSaved.spec().response_key,
-            &Application::new(nm).saved_profiles()?,
-            "serialize saved Wi-Fi profile response JSON",
-        )
+    call_application(runtime, Method::WifiSaved, |application| {
+        application.saved_profiles()
     })
 }
 
 pub(crate) fn call_disconnect(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    runtime.call(ErrorOperation::Disconnect, |nm| {
+    call_application(runtime, Method::WifiDisconnect, |application| {
+        application.disconnect()
+    })
+}
+
+fn call_application<T: Serialize>(
+    runtime: &Arc<DaemonRuntime>,
+    method: Method,
+    action: impl FnOnce(&Application<'_>) -> Result<T> + Send + 'static,
+) -> Result<Value> {
+    let spec = method.spec();
+    runtime.call(spec.operation, move |nm| {
+        let result = action(&Application::new(nm))?;
         api_data_value(
-            Method::WifiDisconnect.spec().response_key,
-            &Application::new(nm).disconnect()?,
-            "serialize disconnect response JSON",
+            spec.response_key,
+            &result,
+            "serialize daemon method response JSON",
         )
     })
 }

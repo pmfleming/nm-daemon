@@ -107,10 +107,7 @@ impl Nm {
         let wwan_enabled = root.get_property("WwanEnabled").unwrap_or(false);
         let wwan_hardware_enabled = root.get_property("WwanHardwareEnabled").unwrap_or(true);
         let (wireless_available, wwan_available) = self.radio_device_availability()?;
-        let mut restore = self
-            .radio_restore
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut restore = self.radio_restore_state();
         if restore.airplane_mode && (wireless_enabled || wwan_enabled) {
             tracing::info!(
                 wireless_enabled,
@@ -158,10 +155,7 @@ impl Nm {
 
     pub(crate) fn set_airplane_mode(&self, enabled: bool) -> Result<RadioPowerResult> {
         let root = self.root_proxy();
-        let mut restore = self
-            .radio_restore
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut restore = self.radio_restore_state();
         let target = restore.target_switches(enabled);
         if let Some(target) = target {
             let current = read_radio_switches(&root)?;
@@ -453,10 +447,7 @@ impl Nm {
 }
 
 fn set_radio_enabled(nm: &Nm, radio: Radio, property: &str, enabled: bool) -> Result<()> {
-    let mut state = nm
-        .radio_restore
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = nm.radio_restore_state();
     nm.root_proxy()
         .set_property(property, enabled)
         .with_context(|| format!("set NetworkManager {property}"))?;

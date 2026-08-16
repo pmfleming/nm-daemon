@@ -33,8 +33,8 @@ pub(crate) fn wait_for_active_target(
     let mut event_generation = nm.event_generation();
     while !deadline.expired() {
         check_cancelled_and_abort(nm, target, cancellation)?;
-        let ssid_matches = active_ssid_matches(nm, activation_device.as_ref(), target)?;
-        let status = activation_status(nm, activation_device.as_ref(), target)?;
+        let (ssid_matches, status) =
+            activation_observation(nm, activation_device.as_ref(), target)?;
         if wait.observe(target, status, ssid_matches)? {
             return Ok(());
         }
@@ -243,26 +243,19 @@ fn target_radio_details(target: &WifiConnectTarget) -> String {
         .unwrap_or_default()
 }
 
-fn active_ssid_matches(
+fn activation_observation(
     nm: &Nm,
     activation_device: Option<&crate::model::WifiDevice>,
     target: &WifiConnectTarget,
-) -> Result<bool> {
-    if let Some(device) = activation_device {
-        nm.active_ssid_matches_on_device(device, target)
-    } else {
-        nm.active_ssid_matches(target)
-    }
-}
-
-fn activation_status(
-    nm: &Nm,
-    activation_device: Option<&crate::model::WifiDevice>,
-    target: &WifiConnectTarget,
-) -> Result<Option<crate::nm::WifiActivationStatus>> {
-    if let Some(device) = activation_device {
-        nm.wifi_activation_status_for_device(device).map(Some)
-    } else {
-        nm.wifi_activation_status_for(target)
+) -> Result<(bool, Option<crate::nm::WifiActivationStatus>)> {
+    match activation_device {
+        Some(device) => Ok((
+            nm.active_ssid_matches_on_device(device, target)?,
+            Some(nm.wifi_activation_status_for_device(device)?),
+        )),
+        None => Ok((
+            nm.active_ssid_matches(target)?,
+            nm.wifi_activation_status_for(target)?,
+        )),
     }
 }

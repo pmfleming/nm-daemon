@@ -75,10 +75,7 @@ impl Nm {
         cancellation: Option<&AtomicBool>,
     ) -> Result<WifiBandSelectionResult> {
         check_band_cancelled(cancellation)?;
-        let _transaction = self
-            .profile_transaction
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _transaction = self.begin_profile_transaction();
         check_band_cancelled(cancellation)?;
         let before = self.wifi_band_status(path)?;
         if requested != WifiBand::Auto && !before.available.contains(&requested) {

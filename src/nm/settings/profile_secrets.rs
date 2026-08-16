@@ -205,12 +205,10 @@ fn validate_profile_wpa_psk(value: &str) -> Result<()> {
     if (8..=63).contains(&len) || (len == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())) {
         return Ok(());
     }
-    Err(DomainError::validation(
-        ErrorOperation::ProfileOperation,
+    invalid_profile_secret(
+        "secrets.psk",
         "WPA-PSK password must be 8-63 characters, or 64 hexadecimal characters",
     )
-    .with_detail("field", "secrets.psk")
-    .into())
 }
 
 fn validate_profile_wep_key(settings: &ConnectionSettings, value: &str) -> Result<()> {
@@ -219,27 +217,26 @@ fn validate_profile_wep_key(settings: &ConnectionSettings, value: &str) -> Resul
         .and_then(|section| section.get("wep-key-type"))
         .and_then(setting_u32)
         .unwrap_or(1);
-    let valid = match key_type {
-        2 => (8..=64).contains(&value.len()),
-        _ => {
-            (matches!(value.len(), 5 | 13) && value.is_ascii())
-                || (matches!(value.len(), 10 | 26)
-                    && value.chars().all(|ch| ch.is_ascii_hexdigit()))
-        }
+    let message = match key_type {
+        2 if (8..=64).contains(&value.len()) => return Ok(()),
+        2 => "WEP passphrase must be 8-64 characters",
+        _ if valid_wep_network_key(value) => return Ok(()),
+        _ => "WEP key must be 5 or 13 ASCII characters, or 10 or 26 hexadecimal characters",
     };
-    if valid {
-        return Ok(());
-    }
-    Err(DomainError::validation(
-        ErrorOperation::ProfileOperation,
-        if key_type == 2 {
-            "WEP passphrase must be 8-64 characters"
-        } else {
-            "WEP key must be 5 or 13 ASCII characters, or 10 or 26 hexadecimal characters"
-        },
+    invalid_profile_secret("secrets", message)
+}
+
+fn valid_wep_network_key(value: &str) -> bool {
+    (matches!(value.len(), 5 | 13) && value.is_ascii())
+        || (matches!(value.len(), 10 | 26) && value.chars().all(|ch| ch.is_ascii_hexdigit()))
+}
+
+fn invalid_profile_secret(field: &'static str, message: &'static str) -> Result<()> {
+    Err(
+        DomainError::validation(ErrorOperation::ProfileOperation, message)
+            .with_detail("field", field)
+            .into(),
     )
-    .with_detail("field", "secrets")
-    .into())
 }
 
 pub(super) fn enterprise_secret_needs_agent(

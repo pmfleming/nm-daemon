@@ -10,6 +10,7 @@ pub(crate) const DBUS_OBJECT_PATH: &str = "/org/laufan/NmDaemon";
 pub(crate) const DBUS_INTERFACE: &str = "org.laufan.NmDaemon1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(usize)]
 pub(crate) enum Method {
     WifiStatus,
     WifiSetEnabled,
@@ -55,7 +56,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) const METHOD_REGISTRY: &[MethodSpec] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 15] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -217,10 +218,7 @@ impl Method {
     }
 
     pub(crate) fn spec(self) -> &'static MethodSpec {
-        METHOD_REGISTRY
-            .iter()
-            .find(|spec| spec.method == self)
-            .expect("every Method variant must have one registry entry")
+        &METHOD_REGISTRY[self as usize]
     }
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -244,6 +242,7 @@ impl Serialize for Method {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(usize)]
 pub(crate) enum Stream {
     WifiStatus,
     NetworkConnectivity,
@@ -275,7 +274,7 @@ pub(crate) struct StreamSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) const STREAM_REGISTRY: &[StreamSpec] = &[
+pub(crate) static STREAM_REGISTRY: &[StreamSpec; 8] = &[
     StreamSpec {
         stream: Stream::WifiStatus,
         name: "wifi.status",
@@ -393,10 +392,7 @@ impl Stream {
     }
 
     pub(crate) fn spec(self) -> &'static StreamSpec {
-        STREAM_REGISTRY
-            .iter()
-            .find(|spec| spec.stream == self)
-            .expect("every Stream variant must have one registry entry")
+        &STREAM_REGISTRY[self as usize]
     }
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -486,6 +482,7 @@ mod tests {
         for spec in METHOD_REGISTRY {
             assert!(names.insert(spec.name));
             assert_eq!(Method::parse(spec.name), Some(spec.method));
+            assert_eq!(spec.method.spec().name, spec.name);
         }
         assert_eq!(Method::parse("wifi.connect-target"), None);
 
@@ -493,6 +490,7 @@ mod tests {
         for spec in STREAM_REGISTRY {
             assert!(names.insert(spec.name));
             assert_eq!(Stream::parse(spec.name), Some(spec.stream));
+            assert_eq!(spec.stream.spec().name, spec.name);
             assert_eq!(
                 Stream::parse_subscription(spec.name),
                 spec.subscribable.then_some(spec.stream)

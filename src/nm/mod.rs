@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -142,6 +142,14 @@ impl Nm {
         self.wireless_telemetry.as_ref()
     }
 
+    pub(super) fn begin_profile_transaction(&self) -> MutexGuard<'_, ()> {
+        recover_lock(&self.profile_transaction)
+    }
+
+    pub(super) fn radio_restore_state(&self) -> MutexGuard<'_, RadioRestoreState> {
+        recover_lock(&self.radio_restore)
+    }
+
     pub(crate) fn event_generation(&self) -> u64 {
         self.events.generation()
     }
@@ -178,4 +186,10 @@ impl Nm {
     ) -> Result<Proxy<'a>> {
         self.proxy(path.as_str(), iface)
     }
+}
+
+fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

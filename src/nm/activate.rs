@@ -50,10 +50,7 @@ impl Nm {
         wep_key_type: Option<WepKeyType>,
     ) -> Result<()> {
         if password.is_some() || target.enterprise.is_some() {
-            let _transaction = self
-                .profile_transaction
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _transaction = self.begin_profile_transaction();
             let visible_ap = self
                 .visible_access_point_for(target)?
                 .map(|(_device, _path, ap)| ap);
@@ -194,13 +191,6 @@ impl Nm {
     }
 
     pub(crate) fn wifi_activation_status_for_device(
-        &self,
-        device: &crate::model::WifiDevice,
-    ) -> Result<super::WifiActivationStatus> {
-        self.device_activation_status(device)
-    }
-
-    fn device_activation_status(
         &self,
         device: &crate::model::WifiDevice,
     ) -> Result<super::WifiActivationStatus> {
