@@ -171,7 +171,11 @@ pub(crate) fn run_profile_command(nm: &Nm, command: ProfileCommand) -> Result<()
         ProfileOperationResult::Updated { message } => print_api_message(message),
         ProfileOperationResult::Share(payload) => print_wifi_share_payload(&payload),
         ProfileOperationResult::Details(_) | ProfileOperationResult::Secret(_) => {
-            unreachable!("CLI profile commands do not request advanced profile data")
+            Err(DomainError::internal(
+                ErrorOperation::ProfileOperation,
+                "CLI profile command returned an incompatible response",
+            )
+            .into())
         }
     }
 }

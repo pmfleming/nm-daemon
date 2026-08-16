@@ -15,7 +15,7 @@ use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Stream};
 
 pub(crate) fn run_daemon() -> Result<()> {
     let connection = zbus::blocking::Connection::session().context("connect to session D-Bus")?;
-    let runtime = DaemonRuntime::start(crate::nm::Nm::new()?);
+    let runtime = DaemonRuntime::start(crate::nm::Nm::new()?)?;
     export_daemon_interface(&connection, &runtime)?;
     watch_client_disconnects(connection.clone(), Arc::clone(&runtime))?;
     register_secret_agent(&runtime);
@@ -286,8 +286,9 @@ mod tests {
             Arc::new(SystemCommandRunner),
             ":1.0",
             Arc::new(UnavailableWirelessTelemetry),
-        );
-        let runtime = DaemonRuntime::start(nm);
+        )
+        .unwrap();
+        let runtime = DaemonRuntime::start(nm).unwrap();
 
         let daemon = TestPeer::new(":1.2", ":1.3");
         daemon

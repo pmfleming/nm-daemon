@@ -9,28 +9,33 @@ pub(in crate::nm) fn apply_target_connection_metadata(
     settings: &mut ConnectionSettings,
     target: &WifiConnectTarget,
 ) -> Result<()> {
-    if target.connection_name.is_none() && !target.private {
+    apply_connection_name(settings, target.connection_name.as_deref())?;
+    apply_private_connection(settings, target.private)
+}
+
+fn apply_connection_name(settings: &mut ConnectionSettings, name: Option<&str>) -> Result<()> {
+    let Some(name) = name.filter(|value| !value.is_empty()) else {
         return Ok(());
-    }
+    };
     let connection = settings.entry("connection".to_string()).or_default();
-    if let Some(name) = target
-        .connection_name
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        connection.insert("id".to_string(), owned_value(name.to_string())?);
-        connection
-            .entry("type".to_string())
-            .or_insert(owned_value("802-11-wireless".to_string())?);
-    }
-    if target.private
-        && let Some(user) = current_user_name()
-    {
-        connection.insert(
+    connection.insert("id".to_string(), owned_value(name.to_string())?);
+    connection
+        .entry("type".to_string())
+        .or_insert(owned_value("802-11-wireless".to_string())?);
+    Ok(())
+}
+
+fn apply_private_connection(settings: &mut ConnectionSettings, private: bool) -> Result<()> {
+    let Some(user) = private.then(current_user_name).flatten() else {
+        return Ok(());
+    };
+    settings
+        .entry("connection".to_string())
+        .or_default()
+        .insert(
             "permissions".to_string(),
             owned_value(vec![format!("user:{user}:")])?,
         );
-    }
     Ok(())
 }
 

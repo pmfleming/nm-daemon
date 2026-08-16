@@ -26,12 +26,12 @@ fn main() {
     );
     generate_wifi_channels(&channels_path, &mut generated);
     generate_durations(&timeouts_path, &mut generated);
-    generate_usize_constants(
+    generate_integer_constants(
         &capacity_path,
         &[
-            ("worker_count", "WORKER_COUNT"),
-            ("work_queue_capacity", "WORK_QUEUE_CAPACITY"),
-            ("control_queue_capacity", "CONTROL_QUEUE_CAPACITY"),
+            ("worker_count", "WORKER_COUNT", "usize"),
+            ("work_queue_capacity", "WORK_QUEUE_CAPACITY", "usize"),
+            ("control_queue_capacity", "CONTROL_QUEUE_CAPACITY", "usize"),
         ],
         &mut generated,
     );
@@ -188,14 +188,6 @@ fn generate_durations(path: &Path, generated: &mut String) {
         .expect("write generated duration");
     }
     generated.push('\n');
-}
-
-fn generate_usize_constants(path: &Path, specs: &[(&str, &str)], generated: &mut String) {
-    let typed: Vec<_> = specs
-        .iter()
-        .map(|(key, constant)| (*key, *constant, "usize"))
-        .collect();
-    generate_integer_constants(path, &typed, generated);
 }
 
 fn generate_integer_constants(path: &Path, specs: &[(&str, &str, &str)], generated: &mut String) {

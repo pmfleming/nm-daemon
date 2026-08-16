@@ -140,29 +140,24 @@ impl Nm {
         target_ssid: &[u8],
         ignore_ap_path: bool,
     ) -> Result<Option<(WifiDevice, OwnedObjectPath, AccessPoint)>> {
+        let ap_path = (!ignore_ap_path)
+            .then(|| target.ap_path.as_ref().map(NmObjectPath::as_str))
+            .flatten();
+        let bssid = target.bssid.as_ref().map(Bssid::as_str);
         for device in devices {
-            for path in self.device_access_points(device)? {
-                let Ok(ap) = self.access_point(device, &path, false) else {
-                    continue;
-                };
-                if access_point_matches(
-                    &ap,
-                    target_ssid,
-                    (!ignore_ap_path)
-                        .then(|| target.ap_path.as_ref().map(NmObjectPath::as_str))
-                        .flatten(),
-                    target.bssid.as_ref().map(Bssid::as_str),
-                ) {
-                    tracing::debug!(
-                        ssid = %target.ssid,
-                        iface = %device.iface,
-                        ap_path = %path,
-                        bssid = %ap.bssid,
-                        ignore_ap_path,
-                        "matched visible access point"
-                    );
-                    return Ok(Some((device.clone(), path, ap)));
-                }
+            let match_ = self
+                .visible_access_points(device, None)?
+                .find(|(_, ap)| access_point_matches(ap, target_ssid, ap_path, bssid));
+            if let Some((path, ap)) = match_ {
+                tracing::debug!(
+                    ssid = %target.ssid,
+                    iface = %device.iface,
+                    ap_path = %path,
+                    bssid = %ap.bssid,
+                    ignore_ap_path,
+                    "matched visible access point"
+                );
+                return Ok(Some((device.clone(), path, ap)));
             }
         }
         Ok(None)
@@ -182,7 +177,10 @@ impl Nm {
     pub(crate) fn list_access_points(&self) -> Result<Vec<AccessPoint>> {
         let mut by_ssid = BTreeMap::new();
         for device in self.wifi_devices()? {
-            self.add_device_access_points(&device, &mut by_ssid)?;
+            let active = self.active_access_point(&device)?;
+            for (_, ap) in self.visible_access_points(&device, active.as_ref())? {
+                merge_access_point(&mut by_ssid, ap);
+            }
         }
         let aps = sorted_access_points(by_ssid);
         tracing::debug!(
@@ -195,13 +193,11 @@ impl Nm {
     pub(crate) fn list_all_access_points(&self) -> Result<Vec<AccessPoint>> {
         let mut aps = Vec::new();
         for device in self.wifi_devices()? {
-            let active_path = self.active_access_point(&device)?;
-            for path in self.device_access_points(&device)? {
-                let active = active_path.as_ref().is_some_and(|active| *active == path);
-                if let Some(ap) = self.read_visible_access_point(&device, &path, active) {
-                    aps.push(ap);
-                }
-            }
+            let active = self.active_access_point(&device)?;
+            aps.extend(
+                self.visible_access_points(&device, active.as_ref())?
+                    .map(|(_, ap)| ap),
+            );
         }
         sort_access_points_nmcli_like(&mut aps);
         tracing::debug!(
@@ -211,19 +207,19 @@ impl Nm {
         Ok(aps)
     }
 
-    fn add_device_access_points(
-        &self,
-        device: &WifiDevice,
-        by_network: &mut BTreeMap<(Vec<u8>, SecurityClass, String), AccessPoint>,
-    ) -> Result<()> {
-        let active_path = self.active_access_point(device)?;
-        for path in self.device_access_points(device)? {
-            let active = active_path.as_ref().is_some_and(|active| *active == path);
-            if let Some(ap) = self.read_visible_access_point(device, &path, active) {
-                merge_access_point(by_network, ap);
-            }
-        }
-        Ok(())
+    fn visible_access_points<'a>(
+        &'a self,
+        device: &'a WifiDevice,
+        active_path: Option<&'a OwnedObjectPath>,
+    ) -> Result<impl Iterator<Item = (OwnedObjectPath, AccessPoint)> + 'a> {
+        Ok(self
+            .device_access_points(device)?
+            .into_iter()
+            .filter_map(move |path| {
+                let active = active_path == Some(&path);
+                self.read_visible_access_point(device, &path, active)
+                    .map(|ap| (path, ap))
+            }))
     }
 
     pub(super) fn active_access_point(

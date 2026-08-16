@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use zbus::object_server::SignalEmitter;
 
@@ -80,18 +80,18 @@ pub(crate) struct DaemonRuntime {
 }
 
 impl DaemonRuntime {
-    pub(crate) fn start(nm: Nm) -> Arc<Self> {
+    pub(crate) fn start(nm: Nm) -> Result<Arc<Self>> {
         let nm = Arc::new(nm);
         let (work_tx, work_rx) = mpsc::sync_channel(WORK_QUEUE_CAPACITY);
         let (fast_work_tx, fast_work_rx) = mpsc::sync_channel(WORK_QUEUE_CAPACITY);
         let (control_tx, control_rx) = mpsc::sync_channel(CONTROL_QUEUE_CAPACITY);
-        start_workers(Arc::clone(&nm), work_rx, "nm-worker", WORKER_COUNT);
+        start_workers(Arc::clone(&nm), work_rx, "nm-worker", WORKER_COUNT)?;
         start_workers(
             Arc::clone(&nm),
             fast_work_rx,
             "nm-fast-worker",
             FAST_WORKER_COUNT,
-        );
+        )?;
 
         let runtime = Arc::new(Self {
             nm,
@@ -102,12 +102,12 @@ impl DaemonRuntime {
             tasks_changed: Condvar::new(),
             cache_refresh_pending: AtomicBool::new(false),
         });
-        start_event_loop(Arc::downgrade(&runtime), control_rx);
+        start_event_loop(Arc::downgrade(&runtime), control_rx)?;
         let control = runtime.control.clone();
         runtime.nm.subscribe_events(Arc::new(move || {
             let _ = control.try_send(Control::NetworkChanged);
         }));
-        runtime
+        Ok(runtime)
     }
 
     pub(crate) fn network_manager_connection(&self) -> zbus::blocking::Connection {
@@ -502,7 +502,7 @@ fn start_workers(
     receiver: Receiver<Job>,
     thread_name: &'static str,
     worker_count: usize,
-) {
+) -> Result<()> {
     let receiver = Arc::new(Mutex::new(receiver));
     for index in 0..worker_count {
         let nm = Arc::clone(&nm);
@@ -524,15 +524,17 @@ fn start_workers(
                     }
                 }
             })
-            .expect("spawn daemon worker");
+            .with_context(|| format!("spawn {thread_name}-{index}"))?;
     }
+    Ok(())
 }
 
-fn start_event_loop(runtime: Weak<DaemonRuntime>, receiver: Receiver<Control>) {
+fn start_event_loop(runtime: Weak<DaemonRuntime>, receiver: Receiver<Control>) -> Result<()> {
     std::thread::Builder::new()
         .name("nm-runtime".to_string())
         .spawn(move || run_event_loop(runtime, receiver))
-        .expect("spawn daemon event runtime");
+        .context("spawn daemon event runtime")?;
+    Ok(())
 }
 
 fn run_event_loop(runtime: Weak<DaemonRuntime>, receiver: Receiver<Control>) {

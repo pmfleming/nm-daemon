@@ -91,25 +91,10 @@ impl Nm {
     pub(crate) fn with_command_runner(commands: Arc<dyn CommandRunner>) -> Result<Self> {
         let conn = Connection::system()
             .map_err(|error| ensure_domain(ErrorOperation::ConnectSystemBus, error.into()))?;
-        Ok(Self::with_connection_and_runner(conn, commands))
-    }
-
-    pub(crate) fn with_connection_and_runner(
-        conn: Connection,
-        commands: Arc<dyn CommandRunner>,
-    ) -> Self {
-        Self::with_connection_runner_and_destination(conn, commands, NM_DEST)
-    }
-
-    pub(crate) fn with_connection_runner_and_destination(
-        conn: Connection,
-        commands: Arc<dyn CommandRunner>,
-        destination: impl Into<String>,
-    ) -> Self {
         Self::with_connection_runner_destination_and_telemetry(
             conn,
             commands,
-            destination,
+            NM_DEST,
             Arc::new(KernelWirelessTelemetry),
         )
     }
@@ -119,23 +104,20 @@ impl Nm {
         commands: Arc<dyn CommandRunner>,
         destination: impl Into<String>,
         wireless_telemetry: Arc<dyn WirelessTelemetry>,
-    ) -> Self {
+    ) -> Result<Self> {
         let destination = destination.into();
-        let root_proxy = Proxy::new_owned(
-            conn.clone(),
-            destination.clone(),
-            NM_PATH.to_string(),
-            NM_IFACE.to_string(),
-        )
-        .expect("NetworkManager root proxy constants must be valid");
-        let settings_proxy = Proxy::new_owned(
-            conn.clone(),
-            destination.clone(),
-            SETTINGS_PATH.to_string(),
-            SETTINGS_IFACE.to_string(),
-        )
-        .expect("NetworkManager settings proxy constants must be valid");
-        Self {
+        let proxy = |path: &str, interface: &str| {
+            Proxy::new_owned(
+                conn.clone(),
+                destination.clone(),
+                path.to_string(),
+                interface.to_string(),
+            )
+            .map_err(|error| ensure_domain(ErrorOperation::CreateDbusProxy, error.into()))
+        };
+        let root_proxy = proxy(NM_PATH, NM_IFACE)?;
+        let settings_proxy = proxy(SETTINGS_PATH, SETTINGS_IFACE)?;
+        Ok(Self {
             events: events::NetworkEvents::start(conn.clone()),
             conn,
             destination,
@@ -145,7 +127,7 @@ impl Nm {
             wireless_telemetry,
             radio_restore: Mutex::new(RadioRestoreState::default()),
             profile_transaction: Mutex::new(()),
-        }
+        })
     }
 
     pub(crate) fn connection(&self) -> Connection {

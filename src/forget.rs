@@ -64,7 +64,7 @@ pub(crate) fn execute(
     let log_request_id = request_id.clone();
     let log_ssid = target.ssid.to_string();
     let result = runtime.call(ErrorOperation::ProfileOperation, move |nm| {
-        ForgetService::new(nm).run(request_id, &target, cancelled)
+        ForgetService { nm }.run(request_id, &target, cancelled)
     });
     match result {
         Ok(result) => {
@@ -87,11 +87,7 @@ struct ForgetService<'a> {
     nm: &'a Nm,
 }
 
-impl<'a> ForgetService<'a> {
-    fn new(nm: &'a Nm) -> Self {
-        Self { nm }
-    }
-
+impl ForgetService<'_> {
     fn run(
         &self,
         request_id: String,
@@ -345,21 +341,14 @@ impl ForgetResult {
         };
         let message = completion_message(&completion);
         Self {
-            operation: "forget",
-            status,
-            request_id: completion.request_id,
-            ssid: completion.ssid,
-            message,
             was_active: completion.was_active,
             disconnected: completion.disconnected,
             profiles_found,
             deleted_profiles: completion.deleted_profiles,
             failed_profiles: completion.failed_profiles,
             cancelled_connect_requests: completion.cancelled_connect_requests,
-            pending_connect_requests: Vec::new(),
             warnings: completion.warnings,
-            portal_session_reset: false,
-            portal_note: PORTAL_NOTE,
+            ..Self::base(status, completion.request_id, completion.ssid, message)
         }
     }
 
@@ -370,21 +359,14 @@ impl ForgetResult {
         pending_connect_requests: Vec<String>,
     ) -> Self {
         Self {
-            operation: "forget",
-            status: ForgetStatus::CancellationPending,
-            request_id,
-            ssid,
-            message: "Connection cancellation is still pending; try Forget again when the connection action finishes".to_string(),
-            was_active: false,
-            disconnected: false,
-            profiles_found: 0,
-            deleted_profiles: Vec::new(),
-            failed_profiles: Vec::new(),
             cancelled_connect_requests,
             pending_connect_requests,
-            warnings: Vec::new(),
-            portal_session_reset: false,
-            portal_note: PORTAL_NOTE,
+            ..Self::base(
+                ForgetStatus::CancellationPending,
+                request_id,
+                ssid,
+                "Connection cancellation is still pending; try Forget again when the connection action finishes".to_string(),
+            )
         }
     }
 
@@ -395,22 +377,32 @@ impl ForgetResult {
         cancelled_connect_requests: Vec<String>,
         warnings: Vec<String>,
     ) -> Self {
+        let message =
+            format!("Could not confirm disconnection from {ssid}; no saved profiles were deleted");
+        Self {
+            was_active: true,
+            profiles_found,
+            cancelled_connect_requests,
+            warnings,
+            ..Self::base(ForgetStatus::DisconnectPending, request_id, ssid, message)
+        }
+    }
+
+    fn base(status: ForgetStatus, request_id: String, ssid: String, message: String) -> Self {
         Self {
             operation: "forget",
-            status: ForgetStatus::DisconnectPending,
+            status,
             request_id,
-            message: format!(
-                "Could not confirm disconnection from {ssid}; no saved profiles were deleted"
-            ),
             ssid,
-            was_active: true,
+            message,
+            was_active: false,
             disconnected: false,
-            profiles_found,
+            profiles_found: 0,
             deleted_profiles: Vec::new(),
             failed_profiles: Vec::new(),
-            cancelled_connect_requests,
+            cancelled_connect_requests: Vec::new(),
             pending_connect_requests: Vec::new(),
-            warnings,
+            warnings: Vec::new(),
             portal_session_reset: false,
             portal_note: PORTAL_NOTE,
         }
@@ -436,29 +428,38 @@ impl ForgetResult {
 fn completion_message(completion: &ForgetCompletion) -> String {
     let deleted = completion.deleted_profiles.len();
     let failed = completion.failed_profiles.len();
-    if deleted == 0 && failed == 0 {
-        return if completion.disconnected {
-            format!(
-                "Disconnected from {}; no saved profile remained",
-                completion.ssid
-            )
-        } else {
-            format!("{} has no saved profiles to forget", completion.ssid)
-        };
+    match (deleted, failed) {
+        (0, 0) => no_profiles_message(completion),
+        (_, 0) => successful_forget_message(completion, deleted),
+        _ => format!(
+            "Forgot {deleted} of {} saved profiles for {}; {failed} failed",
+            deleted + failed,
+            completion.ssid
+        ),
     }
+}
+
+fn no_profiles_message(completion: &ForgetCompletion) -> String {
+    if completion.disconnected {
+        format!(
+            "Disconnected from {}; no saved profile remained",
+            completion.ssid
+        )
+    } else {
+        format!("{} has no saved profiles to forget", completion.ssid)
+    }
+}
+
+fn successful_forget_message(completion: &ForgetCompletion, deleted: usize) -> String {
     let action = if completion.was_active && completion.disconnected {
         "Disconnected and forgot"
     } else {
         "Forgot"
     };
-    match failed {
-        0 if deleted == 1 => format!("{action} {}", completion.ssid),
-        0 => format!("{action} {deleted} saved profiles for {}", completion.ssid),
-        failed => format!(
-            "Forgot {deleted} of {} saved profiles for {}; {failed} failed",
-            deleted + failed,
-            completion.ssid
-        ),
+    if deleted == 1 {
+        format!("{action} {}", completion.ssid)
+    } else {
+        format!("{action} {deleted} saved profiles for {}", completion.ssid)
     }
 }
 

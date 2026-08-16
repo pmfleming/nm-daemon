@@ -216,21 +216,7 @@ impl<'a> Application<'a> {
                 let networks = self
                     .nm
                     .network_entries_for_access_points(self.nm.list_all_access_points()?)?;
-                let target =
-                    if let Some(network) = networks.iter().find(|network| network.key == key) {
-                        connect_target_for_network(network, enterprise_identity)?
-                    } else if key.contains('|') {
-                        return Err(DomainError::validation(
-                        ErrorOperation::Connect,
-                        "selected Wi-Fi network is no longer available; refresh the network list",
-                    )
-                    .with_detail("network_key", key)
-                    .into());
-                    } else {
-                        // Protocol-v1 SSID-only keys from older frontends retain
-                        // their historical best-visible-AP fallback.
-                        connect_target_for_network_key(key, enterprise_identity)?
-                    };
+                let target = resolve_connect_target(&networks, key, enterprise_identity)?;
                 let request = ConnectRequest {
                     target,
                     network_key: Some(key.to_string()),
@@ -873,6 +859,26 @@ fn log_unavailable_cache<T>(state: &cache::CacheRead<T>) {
 
 fn profile_updated(message: &'static str) -> ProfileOperationResult {
     ProfileOperationResult::Updated { message }
+}
+
+fn resolve_connect_target(
+    networks: &[NetworkEntry],
+    key: &str,
+    enterprise_identity: Option<String>,
+) -> Result<WifiConnectTarget> {
+    match networks.iter().find(|network| network.key == key) {
+        Some(network) => connect_target_for_network(network, enterprise_identity),
+        None if !key.contains('|') => {
+            // Protocol-v1 SSID-only keys retain their best-visible-AP fallback.
+            connect_target_for_network_key(key, enterprise_identity)
+        }
+        None => Err(DomainError::validation(
+            ErrorOperation::Connect,
+            "selected Wi-Fi network is no longer available; refresh the network list",
+        )
+        .with_detail("network_key", key)
+        .into()),
+    }
 }
 
 fn is_cancelled(cancellation: Option<&AtomicBool>) -> bool {
