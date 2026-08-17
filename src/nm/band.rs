@@ -9,10 +9,19 @@ use crate::connect_wait::wait_for_active_target;
 use crate::error::{DomainError, ErrorOperation};
 use crate::generated::WIFI_BAND_CHECKPOINT_TIMEOUT;
 use crate::model::{
-    InterfaceName, NmObjectPath, WifiBand, WifiBandSelectionResult, WifiBandStatus,
+    InterfaceName, NmObjectPath, WifiBand, WifiBandSelectionResult, WifiBandStatus, WifiDevice,
     connect_target_for_network_key, ssid_hex,
 };
 use crate::variant::value_string;
+
+struct BandChange {
+    profile_path: OwnedObjectPath,
+    device: WifiDevice,
+    before: WifiBandStatus,
+    ssid_bytes: Vec<u8>,
+    original: ConnectionSettings,
+    checkpoint: OwnedObjectPath,
+}
 
 impl Nm {
     pub(crate) fn wifi_band_status(&self, path: &str) -> Result<WifiBandStatus> {
@@ -78,33 +87,23 @@ impl Nm {
         let _transaction = self.begin_profile_transaction();
         check_band_cancelled(cancellation)?;
         let before = self.wifi_band_status(path)?;
-        if requested != WifiBand::Auto && !before.available.contains(&requested) {
-            return Err(DomainError::validation(
-                ErrorOperation::BandOperation,
-                format!("requested Wi-Fi band is not available for {}", before.ssid),
-            )
-            .with_detail("path", before.path)
-            .with_detail(
-                "requested",
-                serde_json::to_value(requested).unwrap_or_default(),
-            )
-            .with_detail(
-                "available",
-                serde_json::to_value(&before.available).unwrap_or_default(),
-            )
-            .into());
-        }
-        if before.selected == requested
-            && (requested == WifiBand::Auto || before.current == requested)
-        {
-            return Ok(WifiBandSelectionResult {
-                status: "unchanged",
-                changed: false,
-                message: format!("Wi-Fi band selection for {} is unchanged", before.ssid),
-                band: before,
-            });
+        validate_requested_band(&before, requested)?;
+        if band_selection_is_unchanged(&before, requested) {
+            return Ok(unchanged_band_selection(before));
         }
 
+        let change = self.prepare_band_change(path, before)?;
+        self.commit_band_change(change, requested, cancellation)?;
+        let after = self.wifi_band_status(path)?;
+        Ok(WifiBandSelectionResult {
+            status: "selected",
+            changed: true,
+            message: format!("Wi-Fi band selection updated for {}", after.ssid),
+            band: after,
+        })
+    }
+
+    fn prepare_band_change(&self, path: &str, before: WifiBandStatus) -> Result<BandChange> {
         let profile_path = OwnedObjectPath::try_from(path).context("parse Wi-Fi profile path")?;
         let device = self
             .wifi_devices()?
@@ -119,40 +118,41 @@ impl Nm {
         let profile = self.saved_wifi_connection_by_path(&profile_path)?;
         let original = self.connection_settings(&profile_path)?;
         let checkpoint = self.create_band_checkpoint(&device.path)?;
+        Ok(BandChange {
+            profile_path,
+            device,
+            before,
+            ssid_bytes: profile.ssid_bytes,
+            original,
+            checkpoint,
+        })
+    }
 
-        let change = self
+    fn commit_band_change(
+        &self,
+        change: BandChange,
+        requested: WifiBand,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<()> {
+        let result = self
             .apply_band_and_reactivate(
-                &profile_path,
-                &device,
-                &before,
-                &profile.ssid_bytes,
+                &change.profile_path,
+                &change.device,
+                &change.before,
+                &change.ssid_bytes,
                 requested,
                 cancellation,
             )
             .and_then(|()| check_band_cancelled(cancellation));
-        if let Err(error) = change {
-            self.rollback_band_change(&checkpoint, &profile_path, original);
-            if cancellation.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
-                return Err(DomainError::cancelled_operation(
-                    ErrorOperation::BandOperation,
-                    "Wi-Fi band selection cancelled",
-                )
-                .into());
-            }
+        if let Err(error) = result {
+            self.rollback_band_change(&change.checkpoint, &change.profile_path, change.original);
+            return Err(normalize_band_change_error(error, cancellation));
+        }
+        if let Err(error) = self.destroy_checkpoint(&change.checkpoint) {
+            self.rollback_band_change(&change.checkpoint, &change.profile_path, change.original);
             return Err(error);
         }
-
-        if let Err(error) = self.destroy_checkpoint(&checkpoint) {
-            self.rollback_band_change(&checkpoint, &profile_path, original);
-            return Err(error);
-        }
-        let after = self.wifi_band_status(path)?;
-        Ok(WifiBandSelectionResult {
-            status: "selected",
-            changed: true,
-            message: format!("Wi-Fi band selection updated for {}", after.ssid),
-            band: after,
-        })
+        Ok(())
     }
 
     fn apply_band_and_reactivate(
@@ -270,6 +270,54 @@ impl Nm {
         self.root_proxy()
             .call::<_, _, ()>("CheckpointDestroy", &(checkpoint.clone(),))
             .with_context(|| format!("destroy NetworkManager checkpoint {checkpoint}"))
+    }
+}
+
+fn validate_requested_band(before: &WifiBandStatus, requested: WifiBand) -> Result<()> {
+    if requested == WifiBand::Auto || before.available.contains(&requested) {
+        return Ok(());
+    }
+    Err(DomainError::validation(
+        ErrorOperation::BandOperation,
+        format!("requested Wi-Fi band is not available for {}", before.ssid),
+    )
+    .with_detail("path", before.path.clone())
+    .with_detail(
+        "requested",
+        serde_json::to_value(requested).unwrap_or_default(),
+    )
+    .with_detail(
+        "available",
+        serde_json::to_value(&before.available).unwrap_or_default(),
+    )
+    .into())
+}
+
+fn band_selection_is_unchanged(before: &WifiBandStatus, requested: WifiBand) -> bool {
+    before.selected == requested && (requested == WifiBand::Auto || before.current == requested)
+}
+
+fn unchanged_band_selection(before: WifiBandStatus) -> WifiBandSelectionResult {
+    WifiBandSelectionResult {
+        status: "unchanged",
+        changed: false,
+        message: format!("Wi-Fi band selection for {} is unchanged", before.ssid),
+        band: before,
+    }
+}
+
+fn normalize_band_change_error(
+    error: anyhow::Error,
+    cancellation: Option<&AtomicBool>,
+) -> anyhow::Error {
+    if cancellation.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+        DomainError::cancelled_operation(
+            ErrorOperation::BandOperation,
+            "Wi-Fi band selection cancelled",
+        )
+        .into()
+    } else {
+        error
     }
 }
 
