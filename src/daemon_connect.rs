@@ -38,7 +38,24 @@ pub(crate) struct DbusConnectTargetParams {
 }
 
 impl DbusConnectTargetParams {
-    fn requested_identity(&self) -> Result<ConnectTargetIdentity> {
+    /// Builds a request around an exact target, for callers that resolved the
+    /// network themselves rather than through an opaque network key.
+    pub(crate) fn for_target(
+        target: WifiConnectTarget,
+        password: Option<String>,
+        wep_key_type: Option<WepKeyType>,
+    ) -> Self {
+        Self {
+            key: None,
+            target: Some(target),
+            password,
+            wep_key_type,
+            enterprise_identity: None,
+            enterprise: None,
+        }
+    }
+
+    pub(crate) fn requested_identity(&self) -> Result<ConnectTargetIdentity> {
         match (&self.key, &self.target) {
             (Some(key), None) => {
                 let target = connect_target_for_network_key(key, None)?;

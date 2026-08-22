@@ -32,6 +32,8 @@ pub(crate) enum Method {
     VpnStatus,
     VpnConnect,
     VpnDisconnect,
+    WifiQrParse,
+    WifiQrConnect,
     WifiNetworks,
     WifiBandStatus,
     WifiBandSet,
@@ -55,6 +57,8 @@ pub(crate) enum ParameterKind {
     HotspotStart,
     VpnSelect,
     VpnConnect,
+    QrPayload,
+    QrConnect,
     Networks,
     BandStatus,
     BandSet,
@@ -77,7 +81,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static METHOD_REGISTRY: &[MethodSpec; 30] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 32] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -277,6 +281,26 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 30] = &[
         stream: None,
         operation: ErrorOperation::VpnOperation,
         description: "Deactivates one active VPN or WireGuard connection, or the only active one.",
+    },
+    MethodSpec {
+        method: Method::WifiQrParse,
+        name: "wifi.qr.parse",
+        parameters: ParameterKind::QrPayload,
+        params_example: r#"{"payload":"WIFI:T:WPA;S:Example;P:...;;"}"#,
+        response_key: "qr",
+        stream: None,
+        operation: ErrorOperation::QrOperation,
+        description: "Validates a scanned Wi-Fi QR payload without logging it or echoing its secret.",
+    },
+    MethodSpec {
+        method: Method::WifiQrConnect,
+        name: "wifi.qr.connect",
+        parameters: ParameterKind::QrConnect,
+        params_example: r#"{"payload":"WIFI:T:WPA;S:Example;P:...;;","ifname":null}"#,
+        response_key: "result",
+        stream: Some(Stream::WifiConnect),
+        operation: ErrorOperation::QrOperation,
+        description: "Connects to the network in a scanned Wi-Fi QR payload and returns a connect request id.",
     },
     MethodSpec {
         method: Method::WifiNetworks,

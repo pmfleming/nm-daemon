@@ -236,6 +236,8 @@ Implemented in this repository:
 
 47. Added the typed `network.health` stream: device, active-connection, and VPN transitions carrying NetworkManager's own reason code with a stable name and coarse category, `user_requested`/`unexpected` classification, and device/profile identity resolved in both directions. Presentation stays with Shelllist; the daemon emits no desktop notifications. Connectivity payloads now also carry NetworkManager's connectivity-check URI, check enabled/available flags, and the primary connection's identity.
 
+48. Added Wi-Fi QR intake: `wifi.qr.parse` and `wifi.qr.connect`. Escaped `WIFI:` fields, supported authentication, hidden state, and secret lengths are validated, enterprise payloads are rejected, and the payload is never logged, echoed in a response, or included in an error. Connecting reuses the existing `wifi.connect` operation, stream, cancellation, and typed failure reasons.
+
 ## Remaining open items
 
 1. Optionally add desktop UI integration for Secret Service prompts. The daemon now dismisses create/delete/unlock prompts and reports `prompt_unsupported` instead of claiming success.

@@ -19,6 +19,7 @@ mod daemon_event;
 mod daemon_forward;
 mod daemon_hotspot;
 mod daemon_methods;
+mod daemon_qr;
 mod daemon_runtime;
 mod daemon_scan;
 mod daemon_secret;

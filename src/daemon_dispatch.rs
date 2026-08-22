@@ -83,6 +83,12 @@ fn dispatch_method(
             owner,
             emitter,
         ),
+        Method::WifiQrConnect => crate::daemon_qr::start_connect(
+            runtime,
+            parse_required_params::<crate::daemon_qr::QrConnectParams>(params_json)?,
+            owner,
+            emitter,
+        ),
         Method::VpnConnect => crate::daemon_vpn::start_connect(
             runtime,
             parse_required_params::<crate::daemon_vpn::VpnConnectParams>(params_json)?,

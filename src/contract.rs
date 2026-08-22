@@ -149,6 +149,14 @@ fn wifi_method_fixtures() -> Value {
             "persistence_status": "pending",
             "message": "Secret provided to pending NetworkManager request; the wifi.secret stream reports the persistence outcome",
         })),
+        "wifi-qr.parse": response_fixture(Method::WifiQrParse, json!(contract_parsed_qr("WIFI:T:WPA;S:Example;P:correct horse battery staple;;"))),
+        "wifi-qr.parse-open": response_fixture(Method::WifiQrParse, json!(contract_parsed_qr("WIFI:T:nopass;S:Guest;H:true;;"))),
+        "wifi-qr.connect": response_fixture(Method::WifiQrConnect, json!({
+            "status": "started",
+            "request_id": "connect-contract",
+            "stream": Stream::WifiConnect,
+            "message": "Wi-Fi connection started; listen for Event('wifi.connect', event_json) signals",
+        })),
         "wifi-secret.stream": { "events": operation_stream_events(Stream::WifiSecret) },
         "continuous.streams": { "events": continuous_stream_events() },
         "network-health.stream": { "events": health_stream_events() },
@@ -385,6 +393,10 @@ fn network_response_fixture(networks: Vec<NetworkEntry>) -> Value {
         "networks": networks,
         "snapshot": contract_snapshot_metadata(),
     })
+}
+
+fn contract_parsed_qr(payload: &str) -> crate::qr::ParsedWifiQr {
+    crate::qr::parse_wifi_qr(payload).expect("contract QR payload parses")
 }
 
 fn contract_snapshot_metadata() -> NetworkSnapshotMetadata {
@@ -1544,6 +1556,8 @@ mod tests {
             crate::protocol::Method::VpnStatus,
             crate::protocol::Method::VpnConnect,
             crate::protocol::Method::VpnDisconnect,
+            crate::protocol::Method::WifiQrParse,
+            crate::protocol::Method::WifiQrConnect,
             crate::protocol::Method::WifiNetworks,
             crate::protocol::Method::WifiBandStatus,
             crate::protocol::Method::WifiBandSet,
@@ -1699,6 +1713,15 @@ mod tests {
             value["network-statistics.watch"]["result"]["interval_ms"],
             1_000
         );
+        assert_eq!(value["wifi-qr.parse"]["qr"]["auth"], "wpa");
+        assert_eq!(value["wifi-qr.parse"]["qr"]["has_password"], true);
+        assert!(
+            value["wifi-qr.parse"]["qr"].get("password").is_none(),
+            "a QR fixture must never carry the scanned secret"
+        );
+        assert_eq!(value["wifi-qr.parse-open"]["qr"]["auth"], "open");
+        assert_eq!(value["wifi-qr.parse-open"]["qr"]["hidden"], true);
+        assert_eq!(value["wifi-qr.connect"]["result"]["stream"], "wifi.connect");
         assert_eq!(value["vpn.list"]["vpns"][0]["plugin"], "openconnect");
         assert_eq!(value["vpn.list"]["vpns"][1]["plugin"], "wireguard");
         assert_eq!(

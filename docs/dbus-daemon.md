@@ -60,6 +60,8 @@ signal Event(s stream, s event_json)
 | `vpn.status` | `{}` (`Empty`) | `vpn` | `—` | Active VPN and WireGuard connections with plugin state, banner, and duration. |
 | `vpn.connect` | `{"uuid":"0a1c...","path":null,"timeout":45}` (`VpnConnect`) | `result` | `vpn` | Activates a saved VPN or WireGuard profile and returns a cancellable request id. |
 | `vpn.disconnect` | `{"uuid":null,"path":null}` (`VpnSelect`) | `result` | `—` | Deactivates one active VPN or WireGuard connection, or the only active one. |
+| `wifi.qr.parse` | `{"payload":"WIFI:T:WPA;S:Example;P:...;;"}` (`QrPayload`) | `qr` | `—` | Validates a scanned Wi-Fi QR payload without logging it or echoing its secret. |
+| `wifi.qr.connect` | `{"payload":"WIFI:T:WPA;S:Example;P:...;;","ifname":null}` (`QrConnect`) | `result` | `wifi.connect` | Connects to the network in a scanned Wi-Fi QR payload and returns a connect request id. |
 | `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `wifi.networks` | Visible networks enriched with saved-profile, capability, and snapshot freshness details; optionally emits local change deltas. |
 | `wifi.band.status` | `{"path":"/org/freedesktop/NetworkManager/Settings/1"}` (`BandStatus`) | `band` | `—` | Reports the active, selected, and available bands for an active Wi-Fi profile. |
 | `wifi.band.set` | `{"path":"/org/freedesktop/NetworkManager/Settings/1","band":"5"}` (`BandSet`) | `result` | `wifi.band` | Transactionally changes an active Wi-Fi profile band and returns a request id. |
@@ -387,6 +389,30 @@ Call("wifi.profile.operation", "{\"operation\":\"update\",\"path\":\"...\",\"set
 ```
 
 When the saved profile changed since `version` was read, the update is rejected with the typed error code `conflict` and `details.expected_version`/`details.current_version`, so a stale editor cannot silently overwrite an external change. Omitting `expected_version` keeps the previous last-write-wins behavior. The token is derived from the saved settings excluding NetworkManager's self-updating activation timestamp, and never from secret values.
+
+### `wifi.qr`
+
+Camera ownership stays with the frontend; the daemon validates what the camera read.
+
+```text
+Call("wifi.qr.parse", "{\"payload\":\"WIFI:T:WPA;S:Example;P:...;;\"}")   -> data.qr
+Call("wifi.qr.connect", "{\"payload\":\"WIFI:...\",\"ifname\":null}")     -> data.result.request_id
+```
+
+`wifi.qr.parse` validates a scanned payload and returns `ssid`, `ssid_bytes`, `ssid_hex`, the typed `auth` (`open`, `wpa`, `sae`, or `wep`), the raw `auth_token`, `hidden`, `has_password`, and — for WEP — the detected `wep_key_type`. It honours MECARD backslash escapes and NetworkManager's quoting of hex-only values, so an SSID or passphrase containing `;`, `:`, `,`, `\\`, or `"` round-trips exactly.
+
+Validation is real, not cosmetic:
+
+- The payload must start with `WIFI:` and carry an SSID.
+- The SSID is checked against the same length rules as every other SSID input.
+- WPA and WPA3 secrets must be 8-63 characters or a 64-character hex key; WEP key length is checked separately.
+- An open payload carrying a password, and a secured payload without one, are both rejected.
+- Enterprise (`WPA2-EAP`) payloads are rejected: they need credentials a QR code does not carry.
+- A dangling escape or a field without a key is rejected rather than silently truncated.
+
+**The payload is never logged, never echoed in a response, and never included in an error.** `parse` responses report `has_password` and omit `password` entirely; failures name the offending field (`S`, `T`, `P`, or `payload`) rather than quoting the input. Daemon logs record only the SSID hex, the authentication type, and whether a password was present.
+
+`wifi.qr.connect` parses the payload with the same rules, then starts an ordinary `wifi.connect` operation with the payload's SSID marked hidden when the code says so and its authentication used as the key-management hint. It returns a `wifi.connect` request id, so the existing connect stream, cancellation, and typed failure reasons all apply unchanged. An invalid payload is rejected before any connect work starts.
 
 ### `wifi.secret`
 

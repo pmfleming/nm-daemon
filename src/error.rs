@@ -113,6 +113,7 @@ pub(crate) enum ErrorOperation {
     Statistics,
     HotspotOperation,
     VpnOperation,
+    QrOperation,
     Networks,
     BandOperation,
     Scan,
