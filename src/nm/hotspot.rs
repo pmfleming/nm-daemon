@@ -382,11 +382,11 @@ impl Nm {
             message: format!("Hotspot {} is running", resolved.ssid),
             generated_passphrase: resolved.generated_passphrase,
             generated_ssid: resolved.generated_ssid,
-            passphrase: resolved.passphrase.clone(),
+            passphrase: resolved.passphrase,
             hotspot: HotspotStatus {
                 active: true,
-                device_path: Some(resolved.device.path.clone()),
-                device_iface: Some(resolved.device.interface.clone()),
+                device_path: Some(resolved.device.path),
+                device_iface: Some(resolved.device.interface),
                 ssid: Some(resolved.ssid),
                 ssid_hex: Some(ssid_hex(&resolved.ssid_bytes)),
                 band: Some(resolved.band),
@@ -657,7 +657,7 @@ fn inactive_hotspot_status() -> HotspotStatus {
 }
 
 fn root_path() -> OwnedObjectPath {
-    OwnedObjectPath::try_from("/").expect("root object path is always valid")
+    OwnedObjectPath::default()
 }
 
 fn check_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {

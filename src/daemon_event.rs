@@ -74,3 +74,18 @@ pub(crate) fn emit_json_event_nonfatal(
         || emit_json_event(emitter, stream, request_id, event, data),
     );
 }
+
+pub(crate) fn emit_cancelled_operation(
+    emitter: &SignalEmitter<'_>,
+    stream: Stream,
+    request_id: &str,
+    message: &str,
+) {
+    emit_json_event_nonfatal(
+        emitter,
+        stream,
+        Some(request_id),
+        "cancelled",
+        json!({ "request_id": request_id, "phase": "cancelled", "message": message }),
+    );
+}

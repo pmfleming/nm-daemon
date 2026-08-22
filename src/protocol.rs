@@ -10,7 +10,6 @@ pub(crate) const DBUS_OBJECT_PATH: &str = "/org/laufan/NmDaemon";
 pub(crate) const DBUS_INTERFACE: &str = "org.laufan.NmDaemon1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(usize)]
 pub(crate) enum Method {
     WifiStatus,
     WifiSetEnabled,
@@ -437,7 +436,6 @@ impl Serialize for Method {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(usize)]
 pub(crate) enum Stream {
     WifiStatus,
     NetworkConnectivity,

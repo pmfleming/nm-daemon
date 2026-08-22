@@ -124,7 +124,6 @@ fn run_statistics_worker(
                 if let Some(previous) = &previous {
                     statistics_rates(previous, &mut sample);
                 }
-                previous = Some(sample.clone());
                 emit_json_event_nonfatal(
                     emitter,
                     STREAM,
@@ -134,9 +133,10 @@ fn run_statistics_worker(
                         "request_id": request_id,
                         "device_path": device.path,
                         "device_iface": device.interface,
-                        "statistics": sample,
+                        "statistics": &sample,
                     }),
                 );
+                previous = Some(sample);
             }
             Err(error) => {
                 emit_failure(emitter, request_id, device, &error);

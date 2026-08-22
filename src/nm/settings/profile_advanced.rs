@@ -14,6 +14,7 @@ use crate::model::{
     ProfileEnterpriseSettings, ProfileEnterpriseUpdate, SecretFlags, WifiBand,
     WifiProfileAdvancedUpdate,
 };
+use crate::variant::insert_optional_value;
 
 const WIRELESS: &str = "802-11-wireless";
 const ENTERPRISE: &str = "802-1x";
@@ -137,7 +138,7 @@ fn apply_connection_fields(
     update: &WifiProfileAdvancedUpdate,
 ) -> Result<()> {
     let connection = settings.entry(CONNECTION.to_string()).or_default();
-    set_number(
+    insert_optional_value(
         connection,
         "autoconnect-priority",
         update.autoconnect_priority,
@@ -178,9 +179,7 @@ fn apply_wireless_fields(
         wireless.remove("mac-address-randomization");
         set_clearable_text(wireless, "assigned-mac-address", Some(cloned))?;
     }
-    if let Some(mtu) = update.mtu {
-        wireless.insert("mtu".to_string(), owned_value(mtu)?);
-    }
+    insert_optional_value(wireless, "mtu", update.mtu)?;
     if let Some(band) = update.band {
         match band.nm_value() {
             Some(value) => {
@@ -213,15 +212,15 @@ fn apply_ip_fields(
         update.ipv4_dhcp_client_id.as_deref(),
     )?;
     set_clearable_text(ipv4, "dhcp-hostname", update.ipv4_dhcp_hostname.as_deref())?;
-    set_bool(ipv4, "never-default", update.ipv4_never_default)?;
-    set_bool(ipv4, "ignore-auto-routes", update.ipv4_ignore_auto_routes)?;
-    set_bool(ipv4, "may-fail", update.ipv4_may_fail)?;
-    set_number(ipv4, "dad-timeout", update.ipv4_dad_timeout)?;
+    insert_optional_value(ipv4, "never-default", update.ipv4_never_default)?;
+    insert_optional_value(ipv4, "ignore-auto-routes", update.ipv4_ignore_auto_routes)?;
+    insert_optional_value(ipv4, "may-fail", update.ipv4_may_fail)?;
+    insert_optional_value(ipv4, "dad-timeout", update.ipv4_dad_timeout)?;
 
     let ipv6 = settings.entry("ipv6".to_string()).or_default();
-    set_bool(ipv6, "never-default", update.ipv6_never_default)?;
-    set_bool(ipv6, "ignore-auto-routes", update.ipv6_ignore_auto_routes)?;
-    set_bool(ipv6, "may-fail", update.ipv6_may_fail)?;
+    insert_optional_value(ipv6, "never-default", update.ipv6_never_default)?;
+    insert_optional_value(ipv6, "ignore-auto-routes", update.ipv6_ignore_auto_routes)?;
+    insert_optional_value(ipv6, "may-fail", update.ipv6_may_fail)?;
     if let Some(privacy) = update.ipv6_privacy {
         if !(-1..=2).contains(&privacy) {
             return Err(DomainError::validation(
@@ -231,7 +230,7 @@ fn apply_ip_fields(
             .with_detail("field", "advanced.ipv6_privacy")
             .into());
         }
-        ipv6.insert("ip6-privacy".to_string(), owned_value(privacy)?);
+        insert_optional_value(ipv6, "ip6-privacy", Some(privacy))?;
     }
     Ok(())
 }
@@ -284,7 +283,7 @@ fn apply_enterprise(
     ] {
         set_certificate(section, key, value.as_deref())?;
     }
-    set_bool(section, "system-ca-certs", update.system_ca_certs)?;
+    insert_optional_value(section, "system-ca-certs", update.system_ca_certs)?;
     for (key, value) in [
         ("phase1-auth-flags", update.phase1_auth_flags),
         ("password-flags", update.password_flags),
@@ -301,12 +300,9 @@ fn apply_enterprise(
             "client-cert-password-flags",
             update.client_cert_password_flags,
         ),
-        ("pin_flags", update.pin_flags),
+        ("pin-flags", update.pin_flags),
     ] {
-        let key = if key == "pin_flags" { "pin-flags" } else { key };
-        if let Some(value) = value {
-            section.insert(key.to_string(), owned_value(value)?);
-        }
+        insert_optional_value(section, key, value)?;
     }
     Ok(())
 }
@@ -401,28 +397,6 @@ fn set_list(
         section.remove(key);
     } else {
         section.insert(key.to_string(), owned_value(value.to_vec())?);
-    }
-    Ok(())
-}
-
-fn set_bool(
-    section: &mut HashMap<String, OwnedValue>,
-    key: &str,
-    value: Option<bool>,
-) -> Result<()> {
-    if let Some(value) = value {
-        section.insert(key.to_string(), owned_value(value)?);
-    }
-    Ok(())
-}
-
-fn set_number(
-    section: &mut HashMap<String, OwnedValue>,
-    key: &str,
-    value: Option<i32>,
-) -> Result<()> {
-    if let Some(value) = value {
-        section.insert(key.to_string(), owned_value(value)?);
     }
     Ok(())
 }

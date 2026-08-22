@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::Application;
-use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, next_request_id};
+use crate::daemon_event::{
+    emit_cancelled_operation, emit_json_event, emit_json_event_nonfatal, next_request_id,
+};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport};
 use crate::nm::VpnSelector;
@@ -207,18 +209,8 @@ fn run_vpn_worker(
     }
 }
 
-fn emit_cancelled(emitter: &SignalEmitter<'static>, request_id: &str) {
-    emit_json_event_nonfatal(
-        emitter,
-        STREAM,
-        Some(request_id),
-        "cancelled",
-        json!({
-            "request_id": request_id,
-            "phase": "cancelled",
-            "message": "VPN activation was cancelled",
-        }),
-    );
+fn emit_cancelled(emitter: &SignalEmitter<'_>, request_id: &str) {
+    emit_cancelled_operation(emitter, STREAM, request_id, "VPN activation was cancelled");
 }
 
 #[cfg(test)]

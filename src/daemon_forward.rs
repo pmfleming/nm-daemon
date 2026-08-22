@@ -140,14 +140,7 @@ fn forward_hotspot_start(
         "device": options.device,
     })
     .to_string();
-    run_operation(
-        proxy,
-        Method::HotspotStart,
-        params,
-        Stream::Hotspot,
-        || ForwardOutcome::Unavailable,
-        finish_operation_result,
-    )
+    forward_simple_operation(proxy, Method::HotspotStart, params, Stream::Hotspot)
 }
 
 fn forward_vpn_connect(proxy: &Proxy<'_>, options: &VpnConnectOptions) -> Result<ForwardOutcome> {
@@ -157,11 +150,20 @@ fn forward_vpn_connect(proxy: &Proxy<'_>, options: &VpnConnectOptions) -> Result
         "timeout": options.timeout,
     })
     .to_string();
+    forward_simple_operation(proxy, Method::VpnConnect, params, Stream::Vpn)
+}
+
+fn forward_simple_operation(
+    proxy: &Proxy<'_>,
+    method: Method,
+    params: String,
+    stream: Stream,
+) -> Result<ForwardOutcome> {
     run_operation(
         proxy,
-        Method::VpnConnect,
+        method,
         params,
-        Stream::Vpn,
+        stream,
         || ForwardOutcome::Unavailable,
         finish_operation_result,
     )

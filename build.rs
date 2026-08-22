@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    let manifest_dir = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR")
+            .unwrap_or_else(|| fail("CARGO_MANIFEST_DIR is unavailable")),
+    );
     let channels_path = manifest_dir.join("data/wifi-channels.csv");
     let timeouts_path = manifest_dir.join("config/timeouts.conf");
     let capacity_path = manifest_dir.join("config/daemon-capacity.conf");
@@ -46,16 +48,18 @@ fn main() {
     );
 
     let output =
-        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("generated_config.rs");
-    fs::write(&output, generated)
-        .unwrap_or_else(|error| panic!("write {}: {error}", output.display()));
+        PathBuf::from(env::var_os("OUT_DIR").unwrap_or_else(|| fail("OUT_DIR is unavailable")))
+            .join("generated_config.rs");
+    if let Err(error) = fs::write(&output, generated) {
+        fail(format!("write {}: {error}", output.display()));
+    }
 }
 
 fn generate_wifi_channels(path: &Path, generated: &mut String) {
     let input = read(path);
     let mut channels = Vec::new();
     let mut frequencies = BTreeSet::new();
-    let mut bounds = BTreeMap::<String, (u32, u32)>::new();
+    let mut bounds = BTreeMap::<&str, (u32, u32)>::new();
 
     for (index, raw_line) in input.lines().enumerate() {
         let line = raw_line.trim();
@@ -64,38 +68,38 @@ fn generate_wifi_channels(path: &Path, generated: &mut String) {
         }
         let fields: Vec<_> = line.split(',').map(str::trim).collect();
         if fields.len() != 3 {
-            panic!(
-                "{}:{}: expected band,frequency_mhz,channel",
-                path.display(),
-                index + 1
-            );
+            fail(at_line(
+                path,
+                index + 1,
+                "expected band,frequency_mhz,channel",
+            ));
         }
         let band = match fields[0] {
-            "2.4" | "5" | "6" => fields[0].to_string(),
-            value => panic!(
-                "{}:{}: unsupported Wi-Fi band {value:?}",
-                path.display(),
-                index + 1
-            ),
+            "2.4" | "5" | "6" => fields[0],
+            value => fail(at_line(
+                path,
+                index + 1,
+                format!("unsupported Wi-Fi band {value:?}"),
+            )),
         };
         let frequency = parse_u64(path, index + 1, "frequency", fields[1]) as u32;
         let channel = parse_u64(path, index + 1, "channel", fields[2]) as u32;
         if frequency == 0 || channel == 0 {
-            panic!(
-                "{}:{}: frequency and channel must be non-zero",
-                path.display(),
-                index + 1
-            );
+            fail(at_line(
+                path,
+                index + 1,
+                "frequency and channel must be non-zero",
+            ));
         }
         if !frequencies.insert(frequency) {
-            panic!(
-                "{}:{}: duplicate frequency {frequency}",
-                path.display(),
-                index + 1
-            );
+            fail(at_line(
+                path,
+                index + 1,
+                format!("duplicate frequency {frequency}"),
+            ));
         }
         bounds
-            .entry(band.clone())
+            .entry(band)
             .and_modify(|(minimum, maximum)| {
                 *minimum = (*minimum).min(frequency);
                 *maximum = (*maximum).max(frequency);
@@ -106,13 +110,16 @@ fn generate_wifi_channels(path: &Path, generated: &mut String) {
 
     for band in ["2.4", "5", "6"] {
         if !bounds.contains_key(band) {
-            panic!("{}: missing {band} GHz channel data", path.display());
+            fail(format!(
+                "{}: missing {band} GHz channel data",
+                path.display()
+            ));
         }
     }
 
     generated.push_str("pub(crate) const WIFI_CHANNELS: &[(u32, u32)] = &[\n");
     for (frequency, channel) in channels {
-        writeln!(generated, "    ({frequency}, {channel}),").expect("write generated channels");
+        generated.push_str(&format!("    ({frequency}, {channel}),\n"));
     }
     generated.push_str("];\n");
 
@@ -122,16 +129,10 @@ fn generate_wifi_channels(path: &Path, generated: &mut String) {
         ("6", "WIFI_BAND_6"),
     ] {
         let (minimum, maximum) = bounds[band];
-        writeln!(
-            generated,
-            "pub(crate) const {prefix}_MIN_MHZ: u32 = {minimum};"
-        )
-        .expect("write generated band minimum");
-        writeln!(
-            generated,
-            "pub(crate) const {prefix}_MAX_MHZ: u32 = {maximum};"
-        )
-        .expect("write generated band maximum");
+        generated.push_str(&format!(
+            "pub(crate) const {prefix}_MIN_MHZ: u32 = {minimum};\n\
+             pub(crate) const {prefix}_MAX_MHZ: u32 = {maximum};\n"
+        ));
     }
     generated.push('\n');
 }
@@ -185,13 +186,11 @@ fn generate_durations(path: &Path, generated: &mut String) {
     for (key, constant) in specs {
         let milliseconds = values[key];
         if milliseconds == 0 {
-            panic!("{}: {key} must be non-zero", path.display());
+            fail(format!("{}: {key} must be non-zero", path.display()));
         }
-        writeln!(
-            generated,
-            "pub(crate) const {constant}: ::std::time::Duration = ::std::time::Duration::from_millis({milliseconds});"
-        )
-        .expect("write generated duration");
+        generated.push_str(&format!(
+            "pub(crate) const {constant}: ::std::time::Duration = ::std::time::Duration::from_millis({milliseconds});\n"
+        ));
     }
     generated.push('\n');
 }
@@ -202,10 +201,9 @@ fn generate_integer_constants(path: &Path, specs: &[(&str, &str, &str)], generat
     for (key, constant, ty) in specs {
         let value = values[*key];
         if value == 0 {
-            panic!("{}: {key} must be non-zero", path.display());
+            fail(format!("{}: {key} must be non-zero", path.display()));
         }
-        writeln!(generated, "pub(crate) const {constant}: {ty} = {value};")
-            .expect("write generated integer");
+        generated.push_str(&format!("pub(crate) const {constant}: {ty} = {value};\n"));
     }
     generated.push('\n');
 }
@@ -220,14 +218,14 @@ fn parse_key_values(path: &Path) -> BTreeMap<String, u64> {
         }
         let (key, value) = line
             .split_once('=')
-            .unwrap_or_else(|| panic!("{}:{}: expected key=value", path.display(), index + 1));
+            .unwrap_or_else(|| fail(at_line(path, index + 1, "expected key=value")));
         let key = key.trim();
         if key.is_empty() {
-            panic!("{}:{}: empty key", path.display(), index + 1);
+            fail(at_line(path, index + 1, "empty key"));
         }
         let value = parse_u64(path, index + 1, key, value.trim());
         if values.insert(key.to_string(), value).is_some() {
-            panic!("{}:{}: duplicate key {key}", path.display(), index + 1);
+            fail(at_line(path, index + 1, format!("duplicate key {key}")));
         }
     }
     values
@@ -240,25 +238,37 @@ fn ensure_exact_keys<'a>(
 ) {
     let expected: BTreeSet<_> = expected.collect();
     let actual: BTreeSet<_> = values.keys().map(String::as_str).collect();
-    if actual != expected {
-        let missing: Vec<_> = expected.difference(&actual).copied().collect();
-        let unknown: Vec<_> = actual.difference(&expected).copied().collect();
-        panic!(
-            "{}: missing keys {missing:?}; unknown keys {unknown:?}",
-            path.display()
-        );
+    if actual == expected {
+        return;
     }
+    let missing: Vec<_> = expected.difference(&actual).copied().collect();
+    let unknown: Vec<_> = actual.difference(&expected).copied().collect();
+    fail(format!(
+        "{}: missing keys {missing:?}; unknown keys {unknown:?}",
+        path.display()
+    ));
 }
 
 fn parse_u64(path: &Path, line: usize, field: &str, value: &str) -> u64 {
     value.parse().unwrap_or_else(|error| {
-        panic!(
-            "{}:{line}: invalid {field} value {value:?}: {error}",
-            path.display()
-        )
+        fail(at_line(
+            path,
+            line,
+            format!("invalid {field} value {value:?}: {error}"),
+        ))
     })
 }
 
 fn read(path: &Path) -> String {
-    fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| fail(format!("read {}: {error}", path.display())))
+}
+
+fn at_line(path: &Path, line: usize, message: impl std::fmt::Display) -> String {
+    format!("{}:{line}: {message}", path.display())
+}
+
+fn fail(message: impl std::fmt::Display) -> ! {
+    eprintln!("cargo:error={message}");
+    std::process::exit(1)
 }
