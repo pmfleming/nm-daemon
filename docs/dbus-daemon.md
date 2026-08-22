@@ -108,6 +108,18 @@ if (response.ok) render(response.data.networks)
 else showTypedError(response.error.code, response.error.message)
 ```
 
+## Scan scheduling
+
+NetworkManager rate-limits `RequestScan`, so the daemon owns one scheduler per Wi-Fi device rather than letting each caller ask independently:
+
+- Explicit `wifi.scan` requests and background cache refreshes share one in-flight scan per device. A caller that arrives while a scan is running waits for that scan's results instead of spending the shared rate-limit budget on a duplicate request.
+- Before issuing `RequestScan` the daemon waits out NetworkManager's request interval, measured from whichever is more recent: the device's `LastScan` (CLOCK_BOOTTIME) or the daemon's own previous request for that device.
+- Transient rejections — `Scanning not allowed immediately following previous scan`, `Device.NotAllowed`, and similar — are retried inside the caller's deadline instead of failing the request. Non-transient failures, such as a permission error, fail immediately.
+- Deadline behavior is unchanged: a scan that cannot run inside the caller's timeout is a `timeout` error under `strict:true`, and otherwise emits a `warning` event and falls back to NetworkManager's current access-point list, exactly as before.
+- Cancellation is checked while waiting for the interval, so a cancelled scan does not sit out the delay.
+
+The interval, retry delay, and poll granularity are compile-time values in [`config/timeouts.conf`](../config/timeouts.conf).
+
 ## Cache refresh lifecycle
 
 Shelllist should own scan/cache refresh intent. Prefer on-demand refresh while the Wi-Fi UI is open or focused instead of an always-on user timer. On open, call `wifi.networks` with `cached:true, refresh_cache:true` to render the last snapshot immediately and warm the next one. For explicit refresh/spinner flows, subscribe to `wifi.scan`, then call `wifi.scan` with `cache:true` and filter events by `request_id`. Stop requesting refreshes when the UI closes. The daemon coalesces duplicate background refresh requests and performs them in its bounded runtime; it does not spawn another executable.

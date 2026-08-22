@@ -5,9 +5,14 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use zvariant::Value;
 
+use super::scan_schedule::{
+    ScanTurn, boottime_ms, is_transient_scan_rejection, rate_limit_wait, scan_deadline_expired,
+    sleep_within_deadline,
+};
 use super::{Nm, WIFI_IFACE};
 use crate::deadline::Deadline;
 use crate::error::{DomainError, ErrorOperation};
+use crate::generated::SCAN_RETRY_DELAY;
 use crate::model::{InterfaceName, ScanRequestOptions, WifiDevice};
 
 impl Nm {
@@ -76,10 +81,101 @@ impl Nm {
     ) -> Result<()> {
         check_scan_cancelled(cancellation)?;
         ensure_scan_deadline(deadline, "timed out waiting for LastScan to change")?;
+        let device_path = device.path.to_string();
+        if self.scan_schedule.claim(&device_path) == ScanTurn::Join {
+            // Another caller's scan for this device is already running; its
+            // results are the ones this caller wants, so wait rather than
+            // spending the shared rate-limit budget on a duplicate request.
+            tracing::debug!(iface = %device.iface, "joining an in-flight scan for this device");
+            if self
+                .scan_schedule
+                .wait_for_in_flight(&device_path, deadline)
+            {
+                return Ok(());
+            }
+            return Err(scan_deadline_expired(
+                "timed out waiting for an in-flight scan on this device",
+            ));
+        }
+        let lease = ScanLease {
+            nm: self,
+            device_path,
+        };
+        let result = self.run_owned_scan(device, deadline, ssids, cancellation);
+        drop(lease);
+        result
+    }
+
+    fn run_owned_scan(
+        &self,
+        device: &WifiDevice,
+        deadline: Deadline,
+        ssids: &[Vec<u8>],
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<()> {
         let before = self.last_scan(device);
         tracing::debug!(iface = %device.iface, before, ssid_count = ssids.len(), "requesting blocking scan for device");
-        self.request_scan_for_ssids(device, ssids)?;
+        self.request_scan_within_deadline(device, ssids, before, deadline, cancellation)?;
         self.wait_for_scan_completion(device, before, deadline, cancellation)
+    }
+
+    /// Waits out NetworkManager's request interval, then issues `RequestScan`,
+    /// retrying transient rate-limit rejections until the deadline.
+    fn request_scan_within_deadline(
+        &self,
+        device: &WifiDevice,
+        ssids: &[Vec<u8>],
+        last_scan: i64,
+        deadline: Deadline,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<()> {
+        let device_path = device.path.to_string();
+        let mut wait = self.rate_limit_wait_for(device, last_scan);
+        loop {
+            check_scan_cancelled(cancellation)?;
+            if !wait.is_zero() {
+                tracing::debug!(
+                    iface = %device.iface,
+                    wait_ms = wait.as_millis(),
+                    "delaying scan until NetworkManager's request interval allows it"
+                );
+                if !sleep_within_deadline(wait, deadline, cancellation, check_scan_cancelled)? {
+                    return Err(scan_deadline_expired(
+                        "timed out waiting for NetworkManager's scan request interval",
+                    ));
+                }
+            }
+            check_scan_cancelled(cancellation)?;
+            match self.request_scan_for_ssids(device, ssids) {
+                Ok(()) => {
+                    self.scan_schedule.note_request(&device_path);
+                    return Ok(());
+                }
+                Err(error) if !is_transient_scan_rejection(&error) => return Err(error),
+                Err(error) if deadline.expired() => return Err(error),
+                Err(error) => {
+                    tracing::debug!(
+                        iface = %device.iface,
+                        error = %crate::error::err_chain(&error),
+                        "NetworkManager rejected the scan request; retrying within the deadline"
+                    );
+                    wait = SCAN_RETRY_DELAY;
+                }
+            }
+        }
+    }
+
+    fn rate_limit_wait_for(&self, device: &WifiDevice, last_scan: i64) -> Duration {
+        let Some(boottime) = boottime_ms() else {
+            return Duration::ZERO;
+        };
+        rate_limit_wait(
+            last_scan,
+            boottime,
+            self.scan_schedule
+                .last_request_before_claim(device.path.as_str()),
+            std::time::Instant::now(),
+        )
     }
 
     fn wait_for_scan_completion(
@@ -135,6 +231,18 @@ impl Nm {
     fn last_scan_completed(&self, device: &WifiDevice, before: i64) -> bool {
         let after = self.last_scan(device);
         after != before && after >= 0
+    }
+}
+
+/// Releases the device's scan claim even when the scan fails or unwinds.
+struct ScanLease<'a> {
+    nm: &'a Nm,
+    device_path: String,
+}
+
+impl Drop for ScanLease<'_> {
+    fn drop(&mut self) {
+        self.nm.scan_schedule.release(&self.device_path);
     }
 }
 

@@ -20,6 +20,7 @@ mod inventory;
 mod ip_settings;
 mod ip_status;
 mod scan;
+mod scan_schedule;
 mod settings;
 mod statistics;
 mod status;
@@ -90,6 +91,7 @@ pub(crate) struct Nm {
     radio_restore: Mutex<RadioRestoreState>,
     profile_transaction: Mutex<()>,
     statistics: statistics::StatisticsRefresh,
+    scan_schedule: scan_schedule::ScanScheduler,
 }
 
 impl Nm {
@@ -137,6 +139,7 @@ impl Nm {
             radio_restore: Mutex::new(RadioRestoreState::default()),
             profile_transaction: Mutex::new(()),
             statistics: statistics::StatisticsRefresh::default(),
+            scan_schedule: scan_schedule::ScanScheduler::default(),
         })
     }
 

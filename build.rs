@@ -173,6 +173,12 @@ fn generate_durations(path: &Path, generated: &mut String) {
             "wifi_band_checkpoint_timeout_ms",
             "WIFI_BAND_CHECKPOINT_TIMEOUT",
         ),
+        ("scan_request_interval_ms", "SCAN_REQUEST_INTERVAL"),
+        ("scan_retry_delay_ms", "SCAN_RETRY_DELAY"),
+        (
+            "scan_schedule_poll_interval_ms",
+            "SCAN_SCHEDULE_POLL_INTERVAL",
+        ),
     ];
     let values = parse_key_values(path);
     ensure_exact_keys(path, &values, specs.iter().map(|(key, _)| *key));

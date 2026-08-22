@@ -226,6 +226,8 @@ Implemented in this repository:
 
 44. Completed advanced Wi-Fi profile parity: autoconnect priority, BSSID and adapter restriction, exact cloned MAC beside the keyword policy, MTU/mode/channel/persistent band, per-user permissions, firewall zone, secondary connections, IPv4 DHCP client id/hostname and DAD timeout, never-default, ignore-auto-routes, may-fail, IPv6 privacy mode, and the complete existing 802.1X configuration including certificate references, domain/subject constraints, phase settings, and typed secret flags. Profile updates now accept an optional `expected_version` optimistic-concurrency token and reject stale overwrites with the typed `conflict` error code.
 
+45. Added a per-device scan scheduler that coalesces explicit and background scan demand onto one in-flight scan, waits out NetworkManager's request interval measured from the more recent of `LastScan` or the daemon's own previous request, and retries transient rate-limit rejections inside the caller's deadline while preserving strict versus cached-fallback behavior.
+
 ## Remaining open items
 
 1. Optionally add desktop UI integration for Secret Service prompts. The daemon now dismisses create/delete/unlock prompts and reports `prompt_unsupported` instead of claiming success.
