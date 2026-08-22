@@ -816,15 +816,92 @@ pub(crate) struct WifiBandSelectionResult {
 pub(crate) struct WifiProfileDetails {
     pub(crate) path: String,
     pub(crate) id: String,
+    pub(crate) uuid: String,
     pub(crate) ssid: String,
+    /// Optimistic-concurrency token for this profile's current settings.
+    /// Pass it back as `expected_version` to reject a stale overwrite.
+    pub(crate) version: String,
     pub(crate) autoconnect: bool,
+    pub(crate) autoconnect_priority: i32,
     pub(crate) metered: String,
     pub(crate) hidden: bool,
     pub(crate) mac_address_policy: String,
+    /// Exact cloned MAC when the policy is a literal address rather than a keyword.
+    pub(crate) cloned_mac_address: Option<String>,
+    /// Restricts the profile to one adapter by permanent MAC.
+    pub(crate) mac_address: Option<String>,
+    /// Restricts the profile to one access point.
+    pub(crate) bssid: Option<String>,
+    pub(crate) mtu: Option<u32>,
+    pub(crate) mode: String,
+    pub(crate) band: WifiBand,
+    pub(crate) channel: Option<u32>,
     pub(crate) send_hostname: bool,
+    pub(crate) permissions: Vec<String>,
+    pub(crate) firewall_zone: Option<String>,
+    /// Secondary connection UUIDs, typically a VPN started with this profile.
+    pub(crate) secondaries: Vec<String>,
     pub(crate) security_type: String,
+    pub(crate) enterprise: Option<ProfileEnterpriseSettings>,
     pub(crate) ipv4: ProfileIpSettings,
     pub(crate) ipv6: ProfileIpSettings,
+}
+
+/// NetworkManager secret storage flags, rendered as named booleans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+pub(crate) struct SecretFlags {
+    pub(crate) code: u32,
+    pub(crate) agent_owned: bool,
+    pub(crate) not_saved: bool,
+    pub(crate) not_required: bool,
+}
+
+impl SecretFlags {
+    pub(crate) fn from_code(code: u32) -> Self {
+        Self {
+            code,
+            agent_owned: code & 0x1 != 0,
+            not_saved: code & 0x2 != 0,
+            not_required: code & 0x4 != 0,
+        }
+    }
+}
+
+/// Complete existing 802.1X configuration for a saved profile. Secret values
+/// are never included here; only their storage flags are.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct ProfileEnterpriseSettings {
+    pub(crate) eap: Vec<String>,
+    pub(crate) identity: Option<String>,
+    pub(crate) anonymous_identity: Option<String>,
+    pub(crate) domain_suffix_match: Option<String>,
+    pub(crate) domain_match: Option<String>,
+    pub(crate) subject_match: Option<String>,
+    pub(crate) altsubject_matches: Vec<String>,
+    pub(crate) ca_cert: Option<String>,
+    pub(crate) ca_path: Option<String>,
+    pub(crate) system_ca_certs: bool,
+    pub(crate) client_cert: Option<String>,
+    pub(crate) private_key: Option<String>,
+    pub(crate) phase1_peapver: Option<String>,
+    pub(crate) phase1_peaplabel: Option<String>,
+    pub(crate) phase1_fast_provisioning: Option<String>,
+    pub(crate) phase1_auth_flags: Option<u32>,
+    pub(crate) phase2_auth: Option<String>,
+    pub(crate) phase2_autheap: Option<String>,
+    pub(crate) phase2_ca_cert: Option<String>,
+    pub(crate) phase2_client_cert: Option<String>,
+    pub(crate) phase2_private_key: Option<String>,
+    pub(crate) phase2_domain_suffix_match: Option<String>,
+    pub(crate) phase2_subject_match: Option<String>,
+    pub(crate) phase2_altsubject_matches: Vec<String>,
+    pub(crate) pac_file: Option<String>,
+    pub(crate) password_flags: SecretFlags,
+    pub(crate) private_key_password_flags: SecretFlags,
+    pub(crate) phase2_private_key_password_flags: SecretFlags,
+    pub(crate) ca_cert_password_flags: SecretFlags,
+    pub(crate) client_cert_password_flags: SecretFlags,
+    pub(crate) pin_flags: SecretFlags,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -836,8 +913,19 @@ pub(crate) struct ProfileIpSettings {
     pub(crate) dns: Vec<String>,
     pub(crate) routes: Vec<TargetIpRoute>,
     pub(crate) ignore_auto_dns: bool,
+    pub(crate) ignore_auto_routes: bool,
+    pub(crate) never_default: bool,
+    /// False means this address family must succeed for the connection to activate.
+    pub(crate) may_fail: bool,
     pub(crate) dns_search: Vec<String>,
     pub(crate) route_metric: Option<i64>,
+    pub(crate) dhcp_hostname: Option<String>,
+    /// IPv4 only.
+    pub(crate) dhcp_client_id: Option<String>,
+    /// IPv4 duplicate-address-detection timeout in milliseconds; -1 is the default.
+    pub(crate) dad_timeout: Option<i32>,
+    /// IPv6 only: -1 unknown, 0 disabled, 1 prefer public, 2 prefer temporary.
+    pub(crate) ip6_privacy: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -857,7 +945,7 @@ pub(crate) struct WifiProfileSecret {
     pub(crate) password: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct WifiProfileUpdate {
     pub(crate) autoconnect: bool,
@@ -871,6 +959,87 @@ pub(crate) struct WifiProfileUpdate {
     pub(crate) password: Option<String>,
     /// Named replacements for supported security-setting secrets.
     pub(crate) secrets: BTreeMap<String, String>,
+    /// Rejects the update when the profile changed since this token was read.
+    pub(crate) expected_version: Option<String>,
+    pub(crate) advanced: WifiProfileAdvancedUpdate,
+}
+
+/// Advanced profile fields. Every field is optional; `None` leaves the saved
+/// value untouched, and an explicit `Some(None)`-style clear uses an empty
+/// string or zero as documented per field.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct WifiProfileAdvancedUpdate {
+    pub(crate) autoconnect_priority: Option<i32>,
+    /// Empty string clears the restriction.
+    pub(crate) bssid: Option<String>,
+    /// Empty string clears the adapter restriction.
+    pub(crate) mac_address: Option<String>,
+    /// Exact cloned MAC; overrides `mac_address_policy` when set.
+    pub(crate) cloned_mac_address: Option<String>,
+    /// Zero restores NetworkManager's automatic MTU.
+    pub(crate) mtu: Option<u32>,
+    pub(crate) mode: Option<String>,
+    pub(crate) band: Option<WifiBand>,
+    /// Zero clears the channel lock.
+    pub(crate) channel: Option<u32>,
+    /// Empty list makes the profile available to every user.
+    pub(crate) permissions: Option<Vec<String>>,
+    /// Empty string restores the default firewall zone.
+    pub(crate) firewall_zone: Option<String>,
+    pub(crate) secondaries: Option<Vec<String>>,
+    pub(crate) ipv4_dhcp_client_id: Option<String>,
+    pub(crate) ipv4_dhcp_hostname: Option<String>,
+    /// Seconds; -1 restores NetworkManager's default duplicate-address detection.
+    pub(crate) ipv4_dad_timeout: Option<i32>,
+    pub(crate) ipv4_never_default: Option<bool>,
+    pub(crate) ipv6_never_default: Option<bool>,
+    pub(crate) ipv4_ignore_auto_routes: Option<bool>,
+    pub(crate) ipv6_ignore_auto_routes: Option<bool>,
+    /// False marks the address family required for the connection to succeed.
+    pub(crate) ipv4_may_fail: Option<bool>,
+    pub(crate) ipv6_may_fail: Option<bool>,
+    /// NetworkManager ip6-privacy: -1 unknown, 0 disabled, 1 prefer public, 2 prefer temporary.
+    pub(crate) ipv6_privacy: Option<i32>,
+    pub(crate) enterprise: Option<ProfileEnterpriseUpdate>,
+}
+
+/// 802.1X fields a frontend can round-trip. Secret values move through the
+/// existing `secrets` map, never through this structure.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ProfileEnterpriseUpdate {
+    pub(crate) eap: Option<Vec<String>>,
+    pub(crate) identity: Option<String>,
+    pub(crate) anonymous_identity: Option<String>,
+    pub(crate) domain_suffix_match: Option<String>,
+    pub(crate) domain_match: Option<String>,
+    pub(crate) subject_match: Option<String>,
+    pub(crate) altsubject_matches: Option<Vec<String>>,
+    pub(crate) ca_cert: Option<String>,
+    pub(crate) ca_path: Option<String>,
+    pub(crate) system_ca_certs: Option<bool>,
+    pub(crate) client_cert: Option<String>,
+    pub(crate) private_key: Option<String>,
+    pub(crate) phase1_peapver: Option<String>,
+    pub(crate) phase1_peaplabel: Option<String>,
+    pub(crate) phase1_fast_provisioning: Option<String>,
+    pub(crate) phase1_auth_flags: Option<u32>,
+    pub(crate) phase2_auth: Option<String>,
+    pub(crate) phase2_autheap: Option<String>,
+    pub(crate) phase2_ca_cert: Option<String>,
+    pub(crate) phase2_client_cert: Option<String>,
+    pub(crate) phase2_private_key: Option<String>,
+    pub(crate) phase2_domain_suffix_match: Option<String>,
+    pub(crate) phase2_subject_match: Option<String>,
+    pub(crate) phase2_altsubject_matches: Option<Vec<String>>,
+    pub(crate) pac_file: Option<String>,
+    pub(crate) password_flags: Option<u32>,
+    pub(crate) private_key_password_flags: Option<u32>,
+    pub(crate) phase2_private_key_password_flags: Option<u32>,
+    pub(crate) ca_cert_password_flags: Option<u32>,
+    pub(crate) client_cert_password_flags: Option<u32>,
+    pub(crate) pin_flags: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1466,6 +1635,21 @@ pub(crate) fn frequency_channel(frequency: u32) -> u32 {
         .iter()
         .find_map(|(candidate, channel)| (*candidate == frequency).then_some(*channel))
         .unwrap_or(0)
+}
+
+/// True when a NetworkManager channel number belongs to the given band.
+/// The generated channel table is the authority, so this stays correct as the
+/// regulatory channel list changes.
+pub(crate) fn channel_is_in_band(channel: u32, band: WifiBand) -> bool {
+    let label = match band {
+        WifiBand::Auto => return true,
+        WifiBand::Ghz2_4 => "2.4 GHz",
+        WifiBand::Ghz5 => "5 GHz",
+        WifiBand::Ghz6 => "6 GHz",
+    };
+    crate::generated::WIFI_CHANNELS
+        .iter()
+        .any(|(frequency, candidate)| *candidate == channel && frequency_band(*frequency) == label)
 }
 
 pub(crate) fn frequency_band(frequency: u32) -> &'static str {

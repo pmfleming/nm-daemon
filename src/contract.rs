@@ -13,11 +13,11 @@ use crate::model::{
     Ip4Status, Ip6Status, IpAddressEntry, IpRouteEntry, LinkStateStatus, MeteredStatus,
     NetworkConnectionSummary, NetworkDeactivateResult, NetworkDeviceSummary, NetworkEntry,
     NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource, NetworkStateSummary,
-    ProfileActivationResult, ProfileIpSettings, ProfilePrivacy, RadioPowerResult, RadioStatus,
-    SavedWifiConnection, WifiBand, WifiBandSelectionResult, WifiBandStatus, WifiPowerResult,
-    WifiProfileDetails, WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus,
-    device_state_reason, network_entries_with_profile_matches, security_flags_label,
-    security_label,
+    ProfileActivationResult, ProfileEnterpriseSettings, ProfileIpSettings, ProfilePrivacy,
+    RadioPowerResult, RadioStatus, SavedWifiConnection, SecretFlags, WifiBand,
+    WifiBandSelectionResult, WifiBandStatus, WifiPowerResult, WifiProfileDetails,
+    WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus, device_state_reason,
+    network_entries_with_profile_matches, security_flags_label, security_label,
 };
 use crate::protocol::{Method, Stream};
 
@@ -110,6 +110,22 @@ fn wifi_method_fixtures() -> Value {
             "status": "ok",
             "message": "Saved Wi-Fi profile settings updated",
         })),
+        "wifi-profile.update-conflict": json!({
+            "protocol": crate::output::API_PROTOCOL,
+            "version": crate::output::API_VERSION,
+            "ok": false,
+            "error": {
+                "code": crate::error::ErrorCode::Conflict,
+                "message": "the saved profile changed since it was read; reload it and retry",
+                "details": {
+                    "operation": "profile-operation",
+                    "source": "validation",
+                    "expected_version": "1f0a3c5e7b9d2468",
+                    "current_version": "a7c1de904b2f3355",
+                },
+            },
+            "data": {},
+        }),
         "wifi-profile.reveal-secret": response_fixture(Method::WifiProfileOperation, json!(contract_profile_secret())),
         "wifi-profile.forget": response_fixture(Method::WifiProfileOperation, forget_result_fixture()),
         "wifi-profile.share": response_fixture(
@@ -1031,20 +1047,51 @@ fn contract_profile_details() -> WifiProfileDetails {
     WifiProfileDetails {
         path: "/org/freedesktop/NetworkManager/Settings/1".to_string(),
         id: "Example".to_string(),
+        uuid: "6f4a1a0c-1f4b-4f2c-9a1e-0f9a4c2d5e11".to_string(),
         ssid: "Example".to_string(),
+        version: "1f0a3c5e7b9d2468".to_string(),
         autoconnect: true,
+        autoconnect_priority: 10,
         metered: "auto".to_string(),
         hidden: false,
         mac_address_policy: "stable".to_string(),
+        cloned_mac_address: None,
+        mac_address: Some("02:00:00:00:00:01".to_string()),
+        bssid: Some("00:11:22:33:44:55".to_string()),
+        mtu: Some(1500),
+        mode: "infrastructure".to_string(),
+        band: WifiBand::Ghz5,
+        channel: Some(36),
         send_hostname: false,
+        permissions: vec!["user:laufan:".to_string()],
+        firewall_zone: Some("home".to_string()),
+        secondaries: vec!["0a1c9c6e-3d21-4a55-8c2b-1e5b9d6f7a22".to_string()],
         security_type: "WPA Enterprise".to_string(),
+        enterprise: Some(ProfileEnterpriseSettings {
+            eap: vec!["peap".to_string()],
+            identity: Some("laufan".to_string()),
+            anonymous_identity: Some("anonymous@example.test".to_string()),
+            domain_suffix_match: Some("example.test".to_string()),
+            ca_cert: Some("file:///etc/ssl/certs/example-ca.pem".to_string()),
+            system_ca_certs: false,
+            phase2_auth: Some("mschapv2".to_string()),
+            password_flags: SecretFlags::from_code(1),
+            private_key_password_flags: SecretFlags::from_code(0),
+            ..Default::default()
+        }),
         ipv4: ProfileIpSettings {
             method: "auto".to_string(),
             dns: vec!["1.1.1.1".to_string()],
+            may_fail: true,
+            dhcp_client_id: Some("mac".to_string()),
+            dhcp_hostname: Some("laufan".to_string()),
+            dad_timeout: Some(-1),
             ..Default::default()
         },
         ipv6: ProfileIpSettings {
             method: "auto".to_string(),
+            may_fail: true,
+            ip6_privacy: Some(2),
             ..Default::default()
         },
     }
@@ -1363,6 +1410,24 @@ mod tests {
         assert_eq!(
             value["wifi-profile.details"]["result"]["security_type"],
             "WPA Enterprise"
+        );
+        assert_eq!(
+            value["wifi-profile.details"]["result"]["enterprise"]["eap"][0],
+            "peap"
+        );
+        assert_eq!(
+            value["wifi-profile.details"]["result"]["enterprise"]["password_flags"]["agent_owned"],
+            true
+        );
+        assert_eq!(value["wifi-profile.details"]["result"]["band"], "5");
+        assert!(
+            value["wifi-profile.details"]["result"]["version"]
+                .as_str()
+                .is_some_and(|version| version.len() == 16)
+        );
+        assert_eq!(
+            value["wifi-profile.update-conflict"]["error"]["code"],
+            "conflict"
         );
         assert_eq!(
             value["wifi-profile.reveal-secret"]["result"]["primary_secret_key"],

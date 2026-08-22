@@ -290,6 +290,33 @@ The underlying connection workflow is the canonical `AlreadyActive → SavedProf
 
 `wifi.band.status` reports the active band, the profile's selected constraint, and all currently visible bands for the same exact SSID and interface. `wifi.band.set` accepts `auto`, `2.4`, `5`, or `6`, creates a NetworkManager checkpoint, updates the saved profile, reactivates it, and verifies the resulting band. An unavailable requested band is rejected before mutation. Activation failure or cancellation restores the original profile settings and rolls back the checkpoint; success destroys the checkpoint. The operation is owner-scoped, cancellable, and emits `started`, `progress`, `succeeded`, `failed`, or `cancelled` on `wifi.band`.
 
+### Advanced Wi-Fi profile editing
+
+`wifi.profile.operation` with `operation: "details"` returns the complete editable profile, and `operation: "update"` writes it back. Beyond the basic fields, `details` reports:
+
+- Identity: `uuid` beside `path`/`id`, and a `version` optimistic-concurrency token.
+- Autoconnect: `autoconnect` and `autoconnect_priority`.
+- Adapter and AP restriction: `mac_address` (permanent MAC of the required adapter) and `bssid`.
+- MAC privacy: `mac_address_policy` for the keyword policy, plus `cloned_mac_address` when the profile pins a literal address instead.
+- Radio: `mtu`, `mode`, `band`, and `channel`.
+- Access and integration: `permissions`, `firewall_zone`, and `secondaries` (typically a VPN started with this profile).
+- IPv4/IPv6: `ignore_auto_routes`, `never_default`, `may_fail`, `dhcp_hostname`, plus IPv4 `dhcp_client_id` and `dad_timeout`, and IPv6 `ip6_privacy`.
+- `enterprise`: the complete existing 802.1X configuration — EAP methods, identities, certificate and key references, `ca_path`/`system_ca_certs`, domain/subject/altsubject constraints, phase-1 and phase-2 settings, `pac_file`, and every secret flag rendered as `{ code, agent_owned, not_saved, not_required }`.
+
+Secret *values* never appear in `details`; use `operation: "reveal-secret"` for those. Certificate properties are reported as their `file://` or `pkcs11:` URI; a stored DER blob reports `blob:<n> bytes` rather than mangled text.
+
+Updates send the same basic fields plus an `advanced` object whose members are all optional. A field that is absent leaves the saved value untouched; an empty string or empty list clears a restriction, `mtu: 0` restores the automatic MTU, `channel: 0` clears a channel lock, and `band: "auto"` clears both band and channel. `cloned_mac_address` overrides `mac_address_policy` when both are sent. `mode` accepts `infrastructure`, `ap`, or `mesh` — ad-hoc is rejected because it has no modern secure ciphersuite — and `advanced.enterprise.eap` accepts only NetworkManager's supported EAP methods. Enterprise secrets continue to move through the existing top-level `secrets` map, never through `advanced.enterprise`.
+
+Optimistic concurrency is opt-in per update:
+
+```text
+details  = Call("wifi.profile.operation", "{\"operation\":\"details\",\"path\":\"...\"}")
+version  = details.data.result.version
+Call("wifi.profile.operation", "{\"operation\":\"update\",\"path\":\"...\",\"settings\":{...,\"expected_version\":\"<version>\"}}")
+```
+
+When the saved profile changed since `version` was read, the update is rejected with the typed error code `conflict` and `details.expected_version`/`details.current_version`, so a stale editor cannot silently overwrite an external change. Omitting `expected_version` keeps the previous last-write-wins behavior. The token is derived from the saved settings excluding NetworkManager's self-updating activation timestamp, and never from secret values.
+
 ### `wifi.secret`
 
 SecretAgent registration is live when NetworkManager is available on the system bus. The daemon exports `/org/laufan/NmDaemon/SecretAgent` on the system bus, registers it with `org.freedesktop.NetworkManager.AgentManager`, and bridges `GetSecrets` to Shelllist through `wifi.secret` events. A frontend must hold an active `wifi.secret` subscription before the request begins; prompt events are directed only to those subscribers, and only an owner that received the prompt may answer it.

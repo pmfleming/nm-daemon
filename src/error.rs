@@ -43,6 +43,7 @@ pub(crate) fn best_effort<T>(
 pub(crate) enum ErrorCode {
     ValidationError,
     NetworkmanagerUnavailable,
+    Conflict,
     AuthorizationRequired,
     NotFound,
     Timeout,
@@ -91,7 +92,10 @@ impl ErrorCode {
             Self::PasswordUnavailable => ConnectFailureReason::PasswordUnavailable,
             Self::UnsupportedAuth => ConnectFailureReason::UnsupportedAuth,
             Self::DhcpFailed => ConnectFailureReason::DhcpFailed,
-            Self::NetworkmanagerUnavailable | Self::InternalError | Self::Unknown => return None,
+            Self::Conflict
+            | Self::NetworkmanagerUnavailable
+            | Self::InternalError
+            | Self::Unknown => return None,
         })
     }
 }
@@ -256,6 +260,16 @@ impl DomainError {
             ErrorCode::Timeout,
             operation,
             ErrorSource::NetworkManager,
+            message,
+        )
+    }
+
+    /// The caller's view of a resource is stale; reload and retry.
+    pub(crate) fn conflict(operation: ErrorOperation, message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorCode::Conflict,
+            operation,
+            ErrorSource::Validation,
             message,
         )
     }

@@ -436,36 +436,132 @@
   "profile_details": {
     "result": {
       "autoconnect": true,
+      "autoconnect_priority": 10,
+      "band": "5",
+      "bssid": "00:11:22:33:44:55",
+      "channel": 36,
+      "cloned_mac_address": null,
+      "enterprise": {
+        "altsubject_matches": [],
+        "anonymous_identity": "anonymous@example.test",
+        "ca_cert": "file:///etc/ssl/certs/example-ca.pem",
+        "ca_cert_password_flags": {
+          "agent_owned": false,
+          "code": 0,
+          "not_required": false,
+          "not_saved": false
+        },
+        "ca_path": null,
+        "client_cert": null,
+        "client_cert_password_flags": {
+          "agent_owned": false,
+          "code": 0,
+          "not_required": false,
+          "not_saved": false
+        },
+        "domain_match": null,
+        "domain_suffix_match": "example.test",
+        "eap": [
+          "peap"
+        ],
+        "identity": "laufan",
+        "pac_file": null,
+        "password_flags": {
+          "agent_owned": true,
+          "code": 1,
+          "not_required": false,
+          "not_saved": false
+        },
+        "phase1_auth_flags": null,
+        "phase1_fast_provisioning": null,
+        "phase1_peaplabel": null,
+        "phase1_peapver": null,
+        "phase2_altsubject_matches": [],
+        "phase2_auth": "mschapv2",
+        "phase2_autheap": null,
+        "phase2_ca_cert": null,
+        "phase2_client_cert": null,
+        "phase2_domain_suffix_match": null,
+        "phase2_private_key": null,
+        "phase2_private_key_password_flags": {
+          "agent_owned": false,
+          "code": 0,
+          "not_required": false,
+          "not_saved": false
+        },
+        "phase2_subject_match": null,
+        "pin_flags": {
+          "agent_owned": false,
+          "code": 0,
+          "not_required": false,
+          "not_saved": false
+        },
+        "private_key": null,
+        "private_key_password_flags": {
+          "agent_owned": false,
+          "code": 0,
+          "not_required": false,
+          "not_saved": false
+        },
+        "subject_match": null,
+        "system_ca_certs": false
+      },
+      "firewall_zone": "home",
       "hidden": false,
       "id": "Example",
       "ipv4": {
         "addresses": [],
+        "dad_timeout": -1,
+        "dhcp_client_id": "mac",
+        "dhcp_hostname": "laufan",
         "dns": [
           "1.1.1.1"
         ],
         "dns_search": [],
         "gateway": null,
         "ignore_auto_dns": false,
+        "ignore_auto_routes": false,
+        "ip6_privacy": null,
+        "may_fail": true,
         "method": "auto",
+        "never_default": false,
         "route_metric": null,
         "routes": []
       },
       "ipv6": {
         "addresses": [],
+        "dad_timeout": null,
+        "dhcp_client_id": null,
+        "dhcp_hostname": null,
         "dns": [],
         "dns_search": [],
         "gateway": null,
         "ignore_auto_dns": false,
+        "ignore_auto_routes": false,
+        "ip6_privacy": 2,
+        "may_fail": true,
         "method": "auto",
+        "never_default": false,
         "route_metric": null,
         "routes": []
       },
+      "mac_address": "02:00:00:00:00:01",
       "mac_address_policy": "stable",
       "metered": "auto",
+      "mode": "infrastructure",
+      "mtu": 1500,
       "path": "/org/freedesktop/NetworkManager/Settings/1",
+      "permissions": [
+        "user:laufan:"
+      ],
+      "secondaries": [
+        "0a1c9c6e-3d21-4a55-8c2b-1e5b9d6f7a22"
+      ],
       "security_type": "WPA Enterprise",
       "send_hostname": false,
-      "ssid": "Example"
+      "ssid": "Example",
+      "uuid": "6f4a1a0c-1f4b-4f2c-9a1e-0f9a4c2d5e11",
+      "version": "1f0a3c5e7b9d2468"
     }
   },
   "profile_forget": {

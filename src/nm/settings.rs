@@ -5,6 +5,7 @@ use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{ConnectionSettings, DEVICE_IFACE, Nm, SETTINGS_CONNECTION_IFACE, owned_value};
 
+mod profile_advanced;
 mod profile_secrets;
 
 use crate::error::{DomainError, ErrorOperation};
@@ -14,6 +15,7 @@ use crate::model::{
     WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload, display_ssid,
     network_entries_with_profile_matches, security_class,
 };
+use profile_advanced::{apply_advanced, check_expected_version, profile_version, read_enterprise};
 use profile_secrets::{
     enterprise_secret_needs_agent, profile_secret_spec, profile_secret_values,
     required_secret_needs_agent, setting_secret_string, update_profile_secrets,
@@ -136,19 +138,58 @@ impl Nm {
         })?;
         let connection = settings.get("connection").cloned().unwrap_or_default();
         let wireless = settings.get("802-11-wireless").cloned().unwrap_or_default();
+        let assigned_mac = setting_string(&wireless, "assigned-mac-address");
         Ok(WifiProfileDetails {
             path: profile.path,
             id: profile.id,
+            uuid: setting_string(&connection, "uuid").unwrap_or_default(),
             ssid: profile.ssid,
+            version: profile_version(&settings),
             autoconnect: profile.autoconnect,
+            autoconnect_priority: connection
+                .get("autoconnect-priority")
+                .and_then(setting_i64)
+                .and_then(|value| i32::try_from(value).ok())
+                .unwrap_or(0),
             metered: metered_from_settings(&connection),
             hidden: wireless
                 .get("hidden")
                 .and_then(setting_bool)
                 .unwrap_or(false),
             mac_address_policy: profile.privacy.mac_address_policy,
+            // A literal address and the keyword policy share one property, so
+            // report the exact address only when it is not a policy keyword.
+            cloned_mac_address: assigned_mac.filter(|value| {
+                !matches!(
+                    value.as_str(),
+                    "default" | "stable" | "random" | "permanent"
+                )
+            }),
+            mac_address: setting_string(&wireless, "mac-address").filter(|v| !v.is_empty()),
+            bssid: setting_string(&wireless, "bssid").filter(|v| !v.is_empty()),
+            mtu: wireless.get("mtu").and_then(setting_u32).filter(|v| *v > 0),
+            mode: setting_string(&wireless, "mode")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "infrastructure".to_string()),
+            band: setting_string(&wireless, "band")
+                .map(|band| crate::model::WifiBand::from_nm_value(&band))
+                .unwrap_or(crate::model::WifiBand::Auto),
+            channel: wireless
+                .get("channel")
+                .and_then(setting_u32)
+                .filter(|v| *v > 0),
             send_hostname: profile.privacy.send_hostname,
+            permissions: connection
+                .get("permissions")
+                .and_then(setting_string_list)
+                .unwrap_or_default(),
+            firewall_zone: setting_string(&connection, "zone").filter(|v| !v.is_empty()),
+            secondaries: connection
+                .get("secondaries")
+                .and_then(setting_string_list)
+                .unwrap_or_default(),
             security_type: security_type_from_settings(&settings),
+            enterprise: read_enterprise(&settings),
             ipv4: profile_ip_settings(&settings, "ipv4"),
             ipv6: profile_ip_settings(&settings, "ipv6"),
         })
@@ -193,6 +234,7 @@ impl Nm {
     ) -> Result<()> {
         validate_profile_update(update)?;
         self.mutate_connection_settings(path, "advanced Wi-Fi profile", |settings| {
+            check_expected_version(settings, update.expected_version.as_deref())?;
             let connection = settings.entry("connection".to_string()).or_default();
             connection.insert("autoconnect".to_string(), owned_value(update.autoconnect)?);
             connection.insert(
@@ -208,6 +250,7 @@ impl Nm {
             super::ip_settings::set_send_hostname(settings, "ipv6", update.send_hostname)?;
             super::ip_settings::replace(settings, "ipv4", &update.ipv4)?;
             super::ip_settings::replace(settings, "ipv6", &update.ipv6)?;
+            apply_advanced(settings, &update.advanced)?;
             update_profile_secrets(settings, update)
         })
     }
@@ -840,6 +883,41 @@ fn profile_ip_settings(settings: &ConnectionSettings, section: &str) -> ProfileI
         route_metric: values
             .and_then(|values| values.get("route-metric"))
             .and_then(setting_i64),
+        ignore_auto_routes: values
+            .and_then(|values| values.get("ignore-auto-routes"))
+            .and_then(setting_bool)
+            .unwrap_or(false),
+        never_default: values
+            .and_then(|values| values.get("never-default"))
+            .and_then(setting_bool)
+            .unwrap_or(false),
+        may_fail: values
+            .and_then(|values| values.get("may-fail"))
+            .and_then(setting_bool)
+            .unwrap_or(true),
+        dhcp_hostname: values
+            .and_then(|values| setting_string(values, "dhcp-hostname"))
+            .filter(|value| !value.is_empty()),
+        dhcp_client_id: (section == "ipv4")
+            .then(|| values.and_then(|values| setting_string(values, "dhcp-client-id")))
+            .flatten()
+            .filter(|value| !value.is_empty()),
+        dad_timeout: (section == "ipv4")
+            .then(|| {
+                values
+                    .and_then(|values| values.get("dad-timeout"))
+                    .and_then(setting_i64)
+                    .and_then(|value| i32::try_from(value).ok())
+            })
+            .flatten(),
+        ip6_privacy: (section == "ipv6")
+            .then(|| {
+                values
+                    .and_then(|values| values.get("ip6-privacy"))
+                    .and_then(setting_i64)
+                    .and_then(|value| i32::try_from(value).ok())
+            })
+            .flatten(),
     }
 }
 
@@ -880,7 +958,7 @@ fn setting_string_list(value: &OwnedValue) -> Option<Vec<String>> {
     value.try_clone().ok()?.try_into().ok()
 }
 
-fn setting_i64(value: &OwnedValue) -> Option<i64> {
+pub(super) fn setting_i64(value: &OwnedValue) -> Option<i64> {
     value
         .try_clone()
         .ok()
@@ -1059,7 +1137,7 @@ fn wifi_settings_section(settings: &ConnectionSettings) -> Option<&HashMap<Strin
     Some(wireless)
 }
 
-fn setting_string(settings: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+pub(super) fn setting_string(settings: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
     settings.get(key).and_then(setting_value_string)
 }
 

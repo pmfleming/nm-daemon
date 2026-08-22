@@ -119,6 +119,7 @@ Use these codes at the Shelllist boundary:
 
 - `validation-error`
 - `networkmanager-unavailable`
+- `conflict`
 - `authorization-required`
 - `not-found`
 - `timeout`
@@ -222,6 +223,8 @@ Implemented in this repository:
 42. Completed active-connection detail and telemetry: full IPv4/IPv6 address, gateway, DNS, domain, search, route, and DHCP lease reporting; typed device/active-connection state reasons with stable names and categories; primary and default-route attribution; device MAC, MTU, carrier, and wired speed; and an owner-scoped `network.statistics.watch` operation that enables NetworkManager's statistics refresh only while watched and releases it when the last watcher leaves.
 
 43. Added Wi-Fi hotspot lifecycle: `hotspot.capabilities`, `hotspot.status`, `hotspot.start`, `hotspot.stop`, and a cancellable `hotspot` operation stream. Start prefers an unused AP-capable device, creates a volatile `AddAndActivateConnection2` profile with IPv4 sharing, accepts only WPA2/WPA3 personal security, generates CSPRNG credentials when omitted, returns a Wi-Fi QR payload, reports a typed reason when a hotspot cannot be started, and rolls the profile back on failure or cancellation.
+
+44. Completed advanced Wi-Fi profile parity: autoconnect priority, BSSID and adapter restriction, exact cloned MAC beside the keyword policy, MTU/mode/channel/persistent band, per-user permissions, firewall zone, secondary connections, IPv4 DHCP client id/hostname and DAD timeout, never-default, ignore-auto-routes, may-fail, IPv6 privacy mode, and the complete existing 802.1X configuration including certificate references, domain/subject constraints, phase settings, and typed secret flags. Profile updates now accept an optional `expected_version` optimistic-concurrency token and reject stale overwrites with the typed `conflict` error code.
 
 ## Remaining open items
 

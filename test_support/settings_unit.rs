@@ -103,6 +103,8 @@ fn advanced_profile_ip_settings_round_trip_and_validate_address_families() {
         },
         password: None,
         secrets: BTreeMap::new(),
+        expected_version: None,
+        advanced: Default::default(),
     };
     validate_profile_update(&update).expect("valid advanced profile");
 
