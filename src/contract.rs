@@ -7,13 +7,14 @@ use serde_json::{Value, json};
 use crate::forget::{ForgetProfile, ForgetResult, ForgetStatus};
 use crate::model::{
     AccessPoint, ActiveConnectionSummary, ConnectEnginePath, ConnectFailureReason, ConnectPhase,
-    ConnectResult, ConnectTargetIdentity, ConnectivityStatus, DhcpLeaseStatus, DisconnectResult,
-    Ip4Status, MeteredStatus, NetworkConnectionSummary, NetworkDeactivateResult,
+    ConnectResult, ConnectTargetIdentity, ConnectivityStatus, DeviceStatisticsSample,
+    DhcpLeaseStatus, DisconnectResult, Ip4Status, Ip6Status, IpAddressEntry, IpRouteEntry,
+    LinkStateStatus, MeteredStatus, NetworkConnectionSummary, NetworkDeactivateResult,
     NetworkDeviceSummary, NetworkEntry, NetworkInventory, NetworkSnapshotMetadata,
     NetworkSnapshotSource, NetworkStateSummary, ProfileActivationResult, ProfileIpSettings,
     ProfilePrivacy, RadioPowerResult, RadioStatus, SavedWifiConnection, WifiBand,
     WifiBandSelectionResult, WifiBandStatus, WifiPowerResult, WifiProfileDetails,
-    WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus,
+    WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus, device_state_reason,
     network_entries_with_profile_matches, security_flags_label, security_label,
 };
 use crate::protocol::{Method, Stream};
@@ -81,6 +82,16 @@ fn method_contract_fixtures() -> Value {
         "network-status.connected": response_fixture(Method::NetworkState, json!(contract_network_state())),
         "network-activate-profile.started": response_fixture(Method::NetworkActivateProfile, json!(contract_activation_result())),
         "network-deactivate.success": response_fixture(Method::NetworkDeactivate, json!(contract_deactivate_result())),
+        "network-statistics.watch": response_fixture(Method::NetworkStatisticsWatch, json!({
+            "status": "started",
+            "request_id": "stats-contract",
+            "stream": Stream::NetworkStatistics,
+            "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+            "device_iface": "wlan0",
+            "interval_ms": 1_000,
+            "message": "Device statistics watch started; listen for Event('network.statistics', event_json) signals",
+        })),
+        "network-statistics.stream": { "events": statistics_stream_events() },
         "wifi-connect.success": response_fixture(Method::WifiConnectTarget, json!(combined.connect_success)),
         "wifi-connect.secret-required": response_fixture(Method::WifiConnectTarget, json!(combined.connect_error)),
         "wifi-connect.stream": { "events": operation_stream_events(Stream::WifiConnect) },
@@ -154,6 +165,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
             radios: contract_radio_status(),
             active: true,
             device_iface: Some("wlan0".to_string()),
+            device_path: Some("/org/freedesktop/NetworkManager/Devices/1".to_string()),
             active_connection_path: Some(
                 "/org/freedesktop/NetworkManager/ActiveConnection/1".to_string(),
             ),
@@ -164,13 +176,55 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
             ip4: Some(Ip4Status {
                 address: Some("192.0.2.10".to_string()),
                 prefix: Some(24),
+                addresses: vec![
+                    IpAddressEntry {
+                        address: "192.0.2.10".to_string(),
+                        prefix: 24,
+                    },
+                    IpAddressEntry {
+                        address: "192.0.2.11".to_string(),
+                        prefix: 24,
+                    },
+                ],
                 gateway: Some("192.0.2.1".to_string()),
                 dns: vec!["192.0.2.1".to_string(), "1.1.1.1".to_string()],
+                domains: vec!["example.test".to_string()],
+                searches: vec!["example.test".to_string()],
+                routes: vec![IpRouteEntry {
+                    dest: "0.0.0.0".to_string(),
+                    prefix: 0,
+                    next_hop: Some("192.0.2.1".to_string()),
+                    metric: Some(600),
+                }],
                 dhcp_lease: Some(DhcpLeaseStatus {
                     server_identifier: Some("192.0.2.1".to_string()),
                     domain_name: Some("example.test".to_string()),
                     lease_time_seconds: Some(86_400),
                     expires_at_ms: Some(1_762_086_400_000),
+                }),
+            }),
+            ip6: Some(Ip6Status {
+                address: Some("2001:db8::10".to_string()),
+                prefix: Some(64),
+                addresses: vec![IpAddressEntry {
+                    address: "2001:db8::10".to_string(),
+                    prefix: 64,
+                }],
+                gateway: Some("fe80::1".to_string()),
+                dns: vec!["2001:db8::1".to_string()],
+                domains: vec!["example.test".to_string()],
+                searches: Vec::new(),
+                routes: vec![IpRouteEntry {
+                    dest: "::".to_string(),
+                    prefix: 0,
+                    next_hop: Some("fe80::1".to_string()),
+                    metric: Some(1024),
+                }],
+                dhcp_lease: Some(DhcpLeaseStatus {
+                    server_identifier: None,
+                    domain_name: Some("example.test".to_string()),
+                    lease_time_seconds: Some(3_600),
+                    expires_at_ms: Some(1_762_003_600_000),
                 }),
             }),
             wireless: Some(WirelessStatus {
@@ -181,6 +235,17 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
             }),
             metered: Some(MeteredStatus::from_nm_code(4)),
             active_since_ms: Some(1_762_000_000_000),
+            link: Some(LinkStateStatus {
+                device_state: 100,
+                device_state_name: "activated",
+                device_state_reason: device_state_reason(0),
+                active_connection_state: Some(2),
+                active_connection_state_name: Some("activated"),
+                active_connection_state_flags: Some(92),
+                primary: true,
+                default4: true,
+                default6: false,
+            }),
         },
         connect_success: connected_fixture(),
         connect_error: connect_error_fixture(),
@@ -266,6 +331,54 @@ fn network_from_production(
         .expect("canonical access point produces one network")
 }
 
+fn statistics_stream_events() -> Vec<Value> {
+    let device = json!({
+        "request_id": "stats-contract",
+        "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+        "device_iface": "wlan0",
+    });
+    let with = |extra: Value| {
+        let mut event = device.clone();
+        if let (Some(event), Some(extra)) = (event.as_object_mut(), extra.as_object()) {
+            event.extend(extra.clone());
+        }
+        event
+    };
+    stream_events(
+        Stream::NetworkStatistics,
+        "stats-contract",
+        vec![
+            subscribed_event("statistics-subscription"),
+            ("started", with(json!({ "interval_ms": 1_000 }))),
+            (
+                "sample",
+                with(json!({
+                    "statistics": DeviceStatisticsSample {
+                        rx_bytes: 4_294_967_296,
+                        tx_bytes: 1_073_741_824,
+                        rx_bytes_per_second: Some(125_000.0),
+                        tx_bytes_per_second: Some(64_000.0),
+                        interval_ms: 1_000,
+                        sampled_at_ms: 1_762_000_000_000,
+                    },
+                })),
+            ),
+            (
+                "failed",
+                with(json!({
+                    "code": crate::error::ErrorCode::NetworkmanagerUnavailable,
+                    "message": "read RxBytes for /org/freedesktop/NetworkManager/Devices/1",
+                    "details": { "operation": "statistics", "source": "dbus" },
+                })),
+            ),
+            (
+                "cancelled",
+                with(json!({ "message": "Device statistics watch stopped" })),
+            ),
+        ],
+    )
+}
+
 fn contract_devices() -> Vec<NetworkDeviceSummary> {
     vec![
         NetworkDeviceSummary {
@@ -276,11 +389,15 @@ fn contract_devices() -> Vec<NetworkDeviceSummary> {
             type_name: "wifi",
             state: 100,
             state_name: "activated",
-            state_reason: 0,
+            state_reason: device_state_reason(0),
             managed: true,
             autoconnect: true,
             driver: Some("iwlwifi".to_string()),
             firmware_version: Some("77.a20a2p1".to_string()),
+            hw_address: Some("02:00:00:00:00:01".to_string()),
+            mtu: Some(1500),
+            carrier: None,
+            speed_mbps: None,
             active_connection: Some(
                 "/org/freedesktop/NetworkManager/ActiveConnection/1".to_string(),
             ),
@@ -294,11 +411,15 @@ fn contract_devices() -> Vec<NetworkDeviceSummary> {
             type_name: "ethernet",
             state: 20,
             state_name: "unavailable",
-            state_reason: 40,
+            state_reason: device_state_reason(40),
             managed: true,
             autoconnect: true,
             driver: Some("r8169".to_string()),
             firmware_version: None,
+            hw_address: Some("02:00:00:00:00:02".to_string()),
+            mtu: Some(1500),
+            carrier: Some(false),
+            speed_mbps: None,
             active_connection: None,
             available_connections: Vec::new(),
         },
@@ -949,6 +1070,7 @@ mod tests {
             crate::protocol::Method::NetworkState,
             crate::protocol::Method::NetworkActivateProfile,
             crate::protocol::Method::NetworkDeactivate,
+            crate::protocol::Method::NetworkStatisticsWatch,
             crate::protocol::Method::WifiNetworks,
             crate::protocol::Method::WifiBandStatus,
             crate::protocol::Method::WifiBandSet,
@@ -1070,16 +1192,26 @@ mod tests {
             value["wifi-secret.provide"]["result"]["persistence_status"],
             "pending"
         );
+        assert_eq!(
+            value["network-statistics.watch"]["result"]["interval_ms"],
+            1_000
+        );
+        assert_eq!(
+            value["network-statistics.stream"]["events"][2]["statistics"]["rx_bytes_per_second"],
+            125_000.0
+        );
         for fixture in [
             "wifi-connect.stream",
             "wifi-band.stream",
             "wifi-scan.stream",
             "wifi-secret.stream",
+            "network-statistics.stream",
         ] {
             let stream = match fixture {
                 "wifi-connect.stream" => crate::protocol::Stream::WifiConnect,
                 "wifi-band.stream" => crate::protocol::Stream::WifiBand,
                 "wifi-scan.stream" => crate::protocol::Stream::WifiScan,
+                "network-statistics.stream" => crate::protocol::Stream::NetworkStatistics,
                 _ => crate::protocol::Stream::WifiSecret,
             };
             let actual = value[fixture]["events"]

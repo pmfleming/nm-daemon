@@ -51,6 +51,7 @@ signal Event(s stream, s event_json)
 | `network.status` | `{}` (`Empty`) | `network` | `network.inventory` | Overall NetworkManager state, radios, connectivity, and primary/activating connection identity. |
 | `network.activateProfile` | `{"uuid":"0f6c...","path":null,"device":null}` (`ActivateProfile`) | `result` | `network.inventory` | Activates one saved profile of any connection type on a compatible device. |
 | `network.deactivate` | `{"path":"/org/freedesktop/NetworkManager/ActiveConnection/1","uuid":null}` (`Deactivate`) | `result` | `network.inventory` | Deactivates one active connection by active-connection path or profile UUID. |
+| `network.statistics.watch` | `{"device":"wlan0","interval_ms":1000}` (`StatisticsWatch`) | `result` | `network.statistics` | Starts an owner-scoped device transfer-counter watch and returns its request id. |
 | `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `wifi.networks` | Visible networks enriched with saved-profile, capability, and snapshot freshness details; optionally emits local change deltas. |
 | `wifi.band.status` | `{"path":"/org/freedesktop/NetworkManager/Settings/1"}` (`BandStatus`) | `band` | `—` | Reports the active, selected, and available bands for an active Wi-Fi profile. |
 | `wifi.band.set` | `{"path":"/org/freedesktop/NetworkManager/Settings/1","band":"5"}` (`BandSet`) | `result` | `wifi.band` | Transactionally changes an active Wi-Fi profile band and returns a request id. |
@@ -69,6 +70,7 @@ signal Event(s stream, s event_json)
 | `wifi.status` | true | true | `Continuous` | `subscribed, changed` | Current Wi-Fi status, emitted immediately and whenever it changes. |
 | `network.connectivity` | true | true | `Continuous` | `subscribed, changed` | Connectivity and portal state, emitted immediately and on change. |
 | `network.inventory` | true | false | `Continuous` | `subscribed, changed` | Cross-type device, profile, and active-connection inventory emitted on local NetworkManager changes. |
+| `network.statistics` | true | false | `Operation` | `subscribed, started, sample, failed, cancelled` | Device transfer counters and derived rates for a network.statistics.watch request id. |
 | `wifi.networks` | true | false | `Continuous` | `subscribed, changed` | Added, removed, and changed visible networks emitted from local NetworkManager state without requesting scans. |
 | `wifi.scan` | true | true | `Operation` | `subscribed, status, warning, snapshot, complete, cancelled, failed` | Events associated with a wifi.scan request id. |
 | `wifi.connect` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a wifi.connectTarget request id. |
@@ -190,6 +192,37 @@ Call("network.deactivate", "{\"uuid\":\"...\"}")
 `network.activateProfile` requires `uuid` or `path`; `device` accepts either a device object path or an interface name and defaults to the profile's first available device. `network.deactivate` requires `path` or `uuid`. Unknown selectors return typed `not-found` errors, and an empty selector returns `validation-error`.
 
 The optional `network.inventory` stream emits a full `changed` snapshot whenever the serialized inventory differs, using the same coalesced daemon event loop as the other continuous streams. The daemon only queries devices, profiles, and active connections while at least one subscriber watches this stream.
+
+### `network.statistics`
+
+`network.statistics.watch` is an owner-scoped telemetry operation rather than a continuous stream, because NetworkManager only counts bytes while a refresh rate is set:
+
+```text
+subscription_json = Subscribe(["network.statistics"])
+start_json = Call("network.statistics.watch", "{\"device\":\"wlan0\",\"interval_ms\":1000}")
+request_id = JSON.parse(start_json).data.result.request_id
+Cancel(request_id)
+```
+
+`device` accepts a device object path or an interface name and defaults to the first NetworkManager device. `interval_ms` must be between 200 and 60000 and defaults to 1000.
+
+Events are `started`, `sample`, `failed`, and `cancelled`. Each `sample` carries `statistics` with `rx_bytes`, `tx_bytes`, `interval_ms`, `sampled_at_ms`, and the derived `rx_bytes_per_second`/`tx_bytes_per_second`. Rates are absent on the first sample and after a NetworkManager counter reset, so clients render "—" rather than a negative rate.
+
+The daemon sets `Device.Statistics.RefreshRateMs` when the first watcher for a device starts and clears it when the last watcher leaves. Concurrent watchers share one device: the shared rate is the fastest requested, and cancelling one watch does not stop the others. Cancelling the request id, or disconnecting the owning client, stops the watch and releases the refresh rate.
+
+### Active connection details
+
+`wifi.status` reports the active link in full:
+
+- `ip4` carries the first `address`/`prefix` for existing clients plus the complete `addresses` array, `gateway`, `dns`, `domains`, `searches`, `routes`, and the DHCPv4 `dhcp_lease`.
+- `ip6` mirrors that shape for IPv6, including the DHCPv6 lease when NetworkManager has one.
+- `routes` entries carry `dest`, `prefix`, `next_hop`, and `metric`; a default route supplies `gateway` when NetworkManager does not set the property directly.
+- `link` carries the device's numeric `device_state` with a stable `device_state_name`, the typed `device_state_reason` (`code`, `name`, `category`), the `active_connection_state`/`_name`/`_flags`, and the `primary`, `default4`, and `default6` route attribution flags.
+- `device_path` accompanies `device_iface` so clients can address the device directly, for example when starting a statistics watch.
+
+`network.devices` entries also carry `hw_address`, `mtu`, and — for wired-style device types — `carrier` and the negotiated `speed_mbps`.
+
+Reason categories are `none`, `user-requested`, `authentication`, `configuration`, `hardware`, `carrier`, `address-assignment`, `service`, `dependency`, `lifecycle`, and `unknown`. Clients should branch on `category` and label with `name` instead of parsing NetworkManager's numbers directly.
 
 ### Continuous local-state streams
 

@@ -106,6 +106,7 @@ pub(crate) enum ErrorOperation {
     Status,
     Connectivity,
     Inventory,
+    Statistics,
     Networks,
     BandOperation,
     Scan,
@@ -517,6 +518,7 @@ fn networkmanager_operation(operation: ErrorOperation) -> bool {
             | ErrorOperation::Status
             | ErrorOperation::Connectivity
             | ErrorOperation::Inventory
+            | ErrorOperation::Statistics
             | ErrorOperation::Networks
             | ErrorOperation::Scan
             | ErrorOperation::Connect

@@ -9,9 +9,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zvariant::OwnedObjectPath;
 
 mod identity;
+mod reason;
 mod wire_v1;
 
 pub(crate) use identity::{Bssid, InterfaceName, NmObjectPath, Ssid};
+pub(crate) use reason::{TypedReason, device_state_reason};
 
 pub(crate) const NM_AP_FLAGS_PRIVACY: u32 = 0x1;
 pub(crate) const NM_AP_SEC_PAIR_WEP40: u32 = 0x0000_0001;
@@ -234,15 +236,33 @@ pub(crate) struct WifiStatus {
     pub(crate) radios: RadioStatus,
     pub(crate) active: bool,
     pub(crate) device_iface: Option<String>,
+    pub(crate) device_path: Option<String>,
     pub(crate) active_connection_path: Option<String>,
     pub(crate) access_point: Option<AccessPoint>,
     pub(crate) network: Option<NetworkEntry>,
     pub(crate) profile: Option<SavedWifiConnection>,
     pub(crate) connectivity: Option<ConnectivityStatus>,
     pub(crate) ip4: Option<Ip4Status>,
+    pub(crate) ip6: Option<Ip6Status>,
     pub(crate) wireless: Option<WirelessStatus>,
     pub(crate) metered: Option<MeteredStatus>,
     pub(crate) active_since_ms: Option<u64>,
+    /// Device and active-connection transition detail for the active link.
+    pub(crate) link: Option<LinkStateStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct LinkStateStatus {
+    pub(crate) device_state: u32,
+    pub(crate) device_state_name: &'static str,
+    pub(crate) device_state_reason: TypedReason,
+    pub(crate) active_connection_state: Option<u32>,
+    pub(crate) active_connection_state_name: Option<&'static str>,
+    pub(crate) active_connection_state_flags: Option<u32>,
+    /// True while this active connection is NetworkManager's primary connection.
+    pub(crate) primary: bool,
+    pub(crate) default4: bool,
+    pub(crate) default6: bool,
 }
 
 impl WifiStatus {
@@ -257,15 +277,18 @@ impl WifiStatus {
             radios,
             active: false,
             device_iface,
+            device_path: None,
             active_connection_path: None,
             access_point: None,
             network: None,
             profile: None,
             connectivity,
             ip4: None,
+            ip6: None,
             wireless: None,
             metered: None,
             active_since_ms: None,
+            link: None,
         }
     }
 }
@@ -273,6 +296,8 @@ impl WifiStatus {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ConnectionDetails {
     pub(crate) ip4: Option<Ip4Status>,
+    #[serde(default)]
+    pub(crate) ip6: Option<Ip6Status>,
     pub(crate) wireless: Option<WirelessStatus>,
     pub(crate) metered: Option<MeteredStatus>,
     pub(crate) active_since_ms: Option<u64>,
@@ -281,11 +306,53 @@ pub(crate) struct ConnectionDetails {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct Ip4Status {
+    /// First active address; kept beside `addresses` for existing clients.
     pub(crate) address: Option<String>,
+    /// Prefix length of `address`.
     pub(crate) prefix: Option<u32>,
+    #[serde(default)]
+    pub(crate) addresses: Vec<IpAddressEntry>,
     pub(crate) gateway: Option<String>,
     pub(crate) dns: Vec<String>,
+    #[serde(default)]
+    pub(crate) domains: Vec<String>,
+    #[serde(default)]
+    pub(crate) searches: Vec<String>,
+    #[serde(default)]
+    pub(crate) routes: Vec<IpRouteEntry>,
     pub(crate) dhcp_lease: Option<DhcpLeaseStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct Ip6Status {
+    /// First active address; mirrors `Ip4Status` so clients share one shape.
+    pub(crate) address: Option<String>,
+    pub(crate) prefix: Option<u32>,
+    #[serde(default)]
+    pub(crate) addresses: Vec<IpAddressEntry>,
+    pub(crate) gateway: Option<String>,
+    pub(crate) dns: Vec<String>,
+    #[serde(default)]
+    pub(crate) domains: Vec<String>,
+    #[serde(default)]
+    pub(crate) searches: Vec<String>,
+    #[serde(default)]
+    pub(crate) routes: Vec<IpRouteEntry>,
+    pub(crate) dhcp_lease: Option<DhcpLeaseStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct IpAddressEntry {
+    pub(crate) address: String,
+    pub(crate) prefix: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct IpRouteEntry {
+    pub(crate) dest: String,
+    pub(crate) prefix: u32,
+    pub(crate) next_hop: Option<String>,
+    pub(crate) metric: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -352,11 +419,17 @@ pub(crate) struct NetworkDeviceSummary {
     pub(crate) type_name: &'static str,
     pub(crate) state: u32,
     pub(crate) state_name: &'static str,
-    pub(crate) state_reason: u32,
+    pub(crate) state_reason: TypedReason,
     pub(crate) managed: bool,
     pub(crate) autoconnect: bool,
     pub(crate) driver: Option<String>,
     pub(crate) firmware_version: Option<String>,
+    pub(crate) hw_address: Option<String>,
+    pub(crate) mtu: Option<u32>,
+    /// Physical link presence for wired-capable devices.
+    pub(crate) carrier: Option<bool>,
+    /// Negotiated wired link speed in Mb/s, when the device reports one.
+    pub(crate) speed_mbps: Option<u32>,
     pub(crate) active_connection: Option<String>,
     pub(crate) available_connections: Vec<String>,
 }
@@ -392,6 +465,19 @@ pub(crate) struct ActiveConnectionSummary {
     pub(crate) profile_path: Option<String>,
     pub(crate) specific_object: Option<String>,
     pub(crate) devices: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct DeviceStatisticsSample {
+    pub(crate) rx_bytes: u64,
+    pub(crate) tx_bytes: u64,
+    /// Derived from the previous sample; absent on the first sample and after a
+    /// NetworkManager counter reset.
+    pub(crate) rx_bytes_per_second: Option<f64>,
+    pub(crate) tx_bytes_per_second: Option<f64>,
+    /// Milliseconds between this sample and the previous one.
+    pub(crate) interval_ms: u128,
+    pub(crate) sampled_at_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-use std::net::Ipv4Addr;
-
 use anyhow::{Context, Result};
 use zbus::blocking::Proxy;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
+use super::inventory::{active_connection_state_name, device_state_name};
 use super::{
     ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_DEVICE_TYPE_MODEM,
     NM_DEVICE_TYPE_WIFI, Nm, RadioRestoreState, SETTINGS_CONNECTION_IFACE, WIFI_IFACE,
@@ -12,12 +10,10 @@ use super::{
 use crate::command::nmcli::Nmcli;
 use crate::error::ErrorOperation;
 use crate::model::{
-    DhcpLeaseStatus, DisconnectResult, Ip4Status, MeteredStatus, RadioPowerResult, RadioStatus,
+    DisconnectResult, Ip4Status, LinkStateStatus, MeteredStatus, RadioPowerResult, RadioStatus,
     SavedWifiConnection, WifiDevice, WifiPowerResult, WifiStatus, WirelessStatus,
+    device_state_reason,
 };
-
-const DHCP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.DHCP4Config";
-const IP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.IP4Config";
 
 #[derive(Clone, Copy)]
 enum Radio {
@@ -224,20 +220,65 @@ impl Nm {
             radios: radios.clone(),
             active: true,
             device_iface: Some(device.iface.clone()),
+            device_path: Some(device.path.to_string()),
             active_connection_path: Some(active_connection_path.to_string()),
             access_point: Some(access_point),
             network: entry,
             profile,
             connectivity: connectivity.clone(),
             ip4: self.enriched_ip4_status(device),
+            ip6: self.device_ip6_status(&device.path).ok().flatten(),
             wireless: self.wireless_status(device).ok(),
             metered: self.metered_status(&device.path).ok(),
             active_since_ms,
+            link: self.link_state_status(device, &active_connection_path),
         }))
     }
 
+    fn link_state_status(
+        &self,
+        device: &WifiDevice,
+        active_connection_path: &OwnedObjectPath,
+    ) -> Option<LinkStateStatus> {
+        let device_proxy = self.proxy_path(&device.path, DEVICE_IFACE).ok()?;
+        let device_state: u32 = device_proxy.get_property("State").ok()?;
+        let (_, reason_code): (u32, u32) = device_proxy
+            .get_property("StateReason")
+            .unwrap_or((device_state, 0));
+        drop(device_proxy);
+        let active = self
+            .proxy_path(active_connection_path, ACTIVE_CONNECTION_IFACE)
+            .ok();
+        let active_connection_state: Option<u32> = active
+            .as_ref()
+            .and_then(|proxy| proxy.get_property("State").ok());
+        let primary = self
+            .root_proxy()
+            .get_property::<OwnedObjectPath>("PrimaryConnection")
+            .is_ok_and(|primary| primary.as_str() == active_connection_path.as_str());
+        Some(LinkStateStatus {
+            device_state,
+            device_state_name: device_state_name(device_state),
+            device_state_reason: device_state_reason(reason_code),
+            active_connection_state,
+            active_connection_state_name: active_connection_state.map(active_connection_state_name),
+            active_connection_state_flags: active
+                .as_ref()
+                .and_then(|proxy| proxy.get_property("StateFlags").ok()),
+            primary,
+            default4: active
+                .as_ref()
+                .and_then(|proxy| proxy.get_property("Default").ok())
+                .unwrap_or(false),
+            default6: active
+                .as_ref()
+                .and_then(|proxy| proxy.get_property("Default6").ok())
+                .unwrap_or(false),
+        })
+    }
+
     fn enriched_ip4_status(&self, device: &WifiDevice) -> Option<Ip4Status> {
-        let dbus_ip4 = self.ip4_status(&device.path).ok().flatten();
+        let dbus_ip4 = self.device_ip4_status(&device.path).ok().flatten();
         if !ip4_status_needs_nmcli_fill(&dbus_ip4) {
             return dbus_ip4;
         }
@@ -359,66 +400,6 @@ impl Nm {
             .map(|seconds| seconds.saturating_mul(1000))
     }
 
-    fn ip4_status(&self, device_path: &OwnedObjectPath) -> Result<Option<Ip4Status>> {
-        let device = self.proxy_path(device_path, DEVICE_IFACE)?;
-        let ip4_config_path: OwnedObjectPath = device
-            .get_property("Ip4Config")
-            .with_context(|| format!("read Ip4Config for {device_path}"))?;
-        if ip4_config_path.as_str() == "/" {
-            return Ok(None);
-        }
-
-        let ip4 = self.proxy_path(&ip4_config_path, IP4_CONFIG_IFACE)?;
-        let route_data = ip4
-            .get_property::<Vec<HashMap<String, OwnedValue>>>("RouteData")
-            .ok();
-        let gateway = ip4
-            .get_property("Gateway")
-            .ok()
-            .filter(|value: &String| !value.is_empty())
-            .or_else(|| route_data.as_deref().and_then(gateway_from_route_data));
-        let (address, prefix) = ip4
-            .get_property::<Vec<HashMap<String, OwnedValue>>>("AddressData")
-            .ok()
-            .and_then(|entries| first_address_data(&entries))
-            .unwrap_or((None, None));
-        let dns = ip4
-            .get_property::<Vec<HashMap<String, OwnedValue>>>("NameserverData")
-            .ok()
-            .map(|entries| nameserver_data(&entries))
-            .filter(|entries| !entries.is_empty())
-            .or_else(|| {
-                ip4.get_property::<Vec<u32>>("Nameservers")
-                    .ok()
-                    .map(legacy_nameservers)
-            })
-            .unwrap_or_default();
-
-        Ok(Some(Ip4Status {
-            address,
-            prefix,
-            gateway,
-            dns,
-            dhcp_lease: self.dhcp4_lease(device_path).ok().flatten(),
-        }))
-    }
-
-    fn dhcp4_lease(&self, device_path: &OwnedObjectPath) -> Result<Option<DhcpLeaseStatus>> {
-        let device = self.proxy_path(device_path, DEVICE_IFACE)?;
-        let dhcp4_config_path: OwnedObjectPath = device
-            .get_property("Dhcp4Config")
-            .with_context(|| format!("read Dhcp4Config for {device_path}"))?;
-        if dhcp4_config_path.as_str() == "/" {
-            return Ok(None);
-        }
-
-        let dhcp4 = self.proxy_path(&dhcp4_config_path, DHCP4_CONFIG_IFACE)?;
-        let options: HashMap<String, OwnedValue> = dhcp4
-            .get_property("Options")
-            .with_context(|| format!("read DHCP options for {device_path}"))?;
-        Ok(dhcp_lease_from_options(&options))
-    }
-
     fn wireless_status(&self, device: &crate::model::WifiDevice) -> Result<WirelessStatus> {
         let wifi = self.proxy_path(&device.path, WIFI_IFACE)?;
         let bitrate_kbps: Option<u32> = wifi.get_property("Bitrate").ok();
@@ -486,77 +467,6 @@ fn rollback_wireless(root: &Proxy<'_>, enabled: bool) {
     }
 }
 
-fn first_address_data(
-    entries: &[HashMap<String, OwnedValue>],
-) -> Option<(Option<String>, Option<u32>)> {
-    let first = entries.first()?;
-    Some((
-        first.get("address").and_then(value_string),
-        first.get("prefix").and_then(value_u32),
-    ))
-}
-
-fn dhcp_lease_from_options(options: &HashMap<String, OwnedValue>) -> Option<DhcpLeaseStatus> {
-    let option_string = |key: &str| {
-        options
-            .get(key)
-            .and_then(value_string)
-            .filter(|value| !value.is_empty())
-    };
-    let option_u64 = |key: &str| {
-        options.get(key).and_then(|value| {
-            value_u64(value)
-                .or_else(|| value_u32(value).map(u64::from))
-                .or_else(|| value_string(value)?.parse().ok())
-        })
-    };
-    let lease = DhcpLeaseStatus {
-        server_identifier: option_string("dhcp_server_identifier"),
-        domain_name: option_string("domain_name"),
-        lease_time_seconds: option_u64("dhcp_lease_time"),
-        expires_at_ms: option_u64("expiry").map(|seconds| seconds.saturating_mul(1000)),
-    };
-    (lease.server_identifier.is_some()
-        || lease.domain_name.is_some()
-        || lease.lease_time_seconds.is_some()
-        || lease.expires_at_ms.is_some())
-    .then_some(lease)
-}
-
-fn nameserver_data(entries: &[HashMap<String, OwnedValue>]) -> Vec<String> {
-    entries
-        .iter()
-        .filter_map(|entry| entry.get("address").and_then(value_string))
-        .collect()
-}
-
-fn legacy_nameservers(entries: Vec<u32>) -> Vec<String> {
-    entries
-        .into_iter()
-        .map(|value| Ipv4Addr::from(u32::from_be(value)).to_string())
-        .collect()
-}
-
-fn gateway_from_route_data(entries: &[HashMap<String, OwnedValue>]) -> Option<String> {
-    entries.iter().find_map(|entry| {
-        let prefix = entry.get("prefix").and_then(value_u32)?;
-        if prefix != 0 {
-            return None;
-        }
-        if entry
-            .get("dest")
-            .and_then(value_string)
-            .is_some_and(|dest| dest != "0.0.0.0")
-        {
-            return None;
-        }
-        entry
-            .get("next-hop")
-            .and_then(value_string)
-            .filter(|next_hop| !next_hop.is_empty() && next_hop != "0.0.0.0")
-    })
-}
-
 fn ip4_status_needs_nmcli_fill(status: &Option<Ip4Status>) -> bool {
     let Some(status) = status else {
         return true;
@@ -601,28 +511,13 @@ fn active_connection_profile(
         .cloned()
 }
 
-fn value_string(value: &OwnedValue) -> Option<String> {
-    value.try_clone().ok()?.try_into().ok()
-}
-
-fn value_u32(value: &OwnedValue) -> Option<u32> {
-    value.try_clone().ok()?.try_into().ok()
-}
-
 fn value_u64(value: &OwnedValue) -> Option<u64> {
     value.try_clone().ok()?.try_into().ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use zvariant::{DynamicType, OwnedValue, Value};
-
-    use super::{
-        Radio, dhcp_lease_from_options, gateway_from_route_data, ip4_status_needs_nmcli_fill,
-        legacy_nameservers,
-    };
+    use super::{Radio, ip4_status_needs_nmcli_fill};
     use crate::model::Ip4Status;
     use crate::nm::RadioRestoreState;
 
@@ -639,34 +534,18 @@ mod tests {
         assert!(!state.airplane_mode && state.wireless_enabled);
     }
 
-    #[test]
-    fn parses_legacy_ipv4_nameservers_from_network_byte_order() {
-        assert_eq!(legacy_nameservers(vec![0xd3acb90a]), vec!["10.185.172.211"]);
-    }
-
-    #[test]
-    fn parses_networkmanager_dhcp_lease_options() {
-        let options = HashMap::from([
-            (
-                "dhcp_server_identifier".to_string(),
-                owned_value("192.0.2.1".to_string()),
-            ),
-            (
-                "domain_name".to_string(),
-                owned_value("example.test".to_string()),
-            ),
-            (
-                "dhcp_lease_time".to_string(),
-                owned_value("86400".to_string()),
-            ),
-            ("expiry".to_string(), owned_value("1762086400".to_string())),
-        ]);
-
-        let lease = dhcp_lease_from_options(&options).expect("DHCP lease");
-        assert_eq!(lease.server_identifier.as_deref(), Some("192.0.2.1"));
-        assert_eq!(lease.domain_name.as_deref(), Some("example.test"));
-        assert_eq!(lease.lease_time_seconds, Some(86_400));
-        assert_eq!(lease.expires_at_ms, Some(1_762_086_400_000));
+    fn empty_ip4() -> Ip4Status {
+        Ip4Status {
+            address: None,
+            prefix: None,
+            addresses: Vec::new(),
+            gateway: None,
+            dns: Vec::new(),
+            domains: Vec::new(),
+            searches: Vec::new(),
+            routes: Vec::new(),
+            dhcp_lease: None,
+        }
     }
 
     #[test]
@@ -678,6 +557,7 @@ mod tests {
             gateway: None,
             dns: vec!["10.0.0.1".to_string()],
             dhcp_lease: None,
+            ..empty_ip4()
         })));
         assert!(!ip4_status_needs_nmcli_fill(&Some(Ip4Status {
             address: Some("10.0.0.2".to_string()),
@@ -685,33 +565,7 @@ mod tests {
             gateway: Some("10.0.0.1".to_string()),
             dns: vec!["10.0.0.1".to_string()],
             dhcp_lease: None,
+            ..empty_ip4()
         })));
-    }
-
-    #[test]
-    fn finds_default_gateway_from_route_data() {
-        let routes = vec![
-            HashMap::from([
-                ("dest".to_string(), owned_value("10.0.0.0".to_string())),
-                ("prefix".to_string(), owned_value(24_u32)),
-            ]),
-            HashMap::from([
-                ("dest".to_string(), owned_value("0.0.0.0".to_string())),
-                ("prefix".to_string(), owned_value(0_u32)),
-                ("next-hop".to_string(), owned_value("10.0.0.1".to_string())),
-            ]),
-        ];
-
-        assert_eq!(
-            gateway_from_route_data(&routes),
-            Some("10.0.0.1".to_string())
-        );
-    }
-
-    fn owned_value<T>(value: T) -> OwnedValue
-    where
-        T: Into<Value<'static>> + DynamicType,
-    {
-        OwnedValue::try_from(Value::new(value)).unwrap()
     }
 }

@@ -17,12 +17,15 @@ mod devices;
 mod events;
 mod inventory;
 mod ip_settings;
+mod ip_status;
 mod scan;
 mod settings;
+mod statistics;
 mod status;
 mod wifi_settings;
 
 pub(crate) use inventory::{ActiveConnectionSelector, ProfileSelector};
+pub(crate) use statistics::{StatisticsDevice, statistics_rates};
 
 pub(crate) const NM_DEST: &str = "org.freedesktop.NetworkManager";
 pub(crate) const WIFI_IFACE: &str = "org.freedesktop.NetworkManager.Device.Wireless";
@@ -84,6 +87,7 @@ pub(crate) struct Nm {
     wireless_telemetry: Arc<dyn WirelessTelemetry>,
     radio_restore: Mutex<RadioRestoreState>,
     profile_transaction: Mutex<()>,
+    statistics: statistics::StatisticsRefresh,
 }
 
 impl Nm {
@@ -130,6 +134,7 @@ impl Nm {
             wireless_telemetry,
             radio_restore: Mutex::new(RadioRestoreState::default()),
             profile_transaction: Mutex::new(()),
+            statistics: statistics::StatisticsRefresh::default(),
         })
     }
 
@@ -180,6 +185,16 @@ impl Nm {
     pub(super) fn proxy<'a>(&'a self, path: &'a str, iface: &'a str) -> Result<Proxy<'a>> {
         Proxy::new(&self.conn, self.destination.as_str(), path, iface)
             .map_err(|error| ensure_domain(ErrorOperation::CreateDbusProxy, error.into()))
+    }
+
+    pub(super) fn owned_proxy(&self, path: &str, iface: &str) -> Result<Proxy<'static>> {
+        Proxy::new_owned(
+            self.conn.clone(),
+            self.destination.clone(),
+            path.to_string(),
+            iface.to_string(),
+        )
+        .map_err(|error| ensure_domain(ErrorOperation::CreateDbusProxy, error.into()))
     }
 
     pub(super) fn proxy_path<'a>(

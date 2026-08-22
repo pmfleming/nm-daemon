@@ -215,6 +215,7 @@ pub(crate) fn cache_connected_network_status(status: &WifiStatus) -> Result<()> 
                 known.connections.insert(
                     network_key(access_point),
                     ConnectionDetails {
+                        ip6: status.ip6.clone(),
                         ip4: status.ip4.clone(),
                         wireless: status.wireless.clone(),
                         metered: status.metered.clone(),

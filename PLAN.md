@@ -215,6 +215,8 @@ Implemented in this repository:
 
 41. Added a cross-type NetworkManager inventory: `network.inventory`, `network.devices`, `network.connections`, `network.status`, `network.activateProfile`, and `network.deactivate`, plus an optional `network.inventory` change stream computed only while subscribed. Devices, saved profiles of every connection type, and active connections carry stable typed names beside NetworkManager's numeric types, states, and reasons.
 
+42. Completed active-connection detail and telemetry: full IPv4/IPv6 address, gateway, DNS, domain, search, route, and DHCP lease reporting; typed device/active-connection state reasons with stable names and categories; primary and default-route attribution; device MAC, MTU, carrier, and wired speed; and an owner-scoped `network.statistics.watch` operation that enables NetworkManager's statistics refresh only while watched and releases it when the last watcher leaves.
+
 ## Remaining open items
 
 1. Optionally add desktop UI integration for Secret Service prompts. The daemon now dismisses create/delete/unlock prompts and reports `prompt_unsupported` instead of claiming success.

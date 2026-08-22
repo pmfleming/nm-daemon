@@ -23,6 +23,7 @@ pub(crate) enum Method {
     NetworkState,
     NetworkActivateProfile,
     NetworkDeactivate,
+    NetworkStatisticsWatch,
     WifiNetworks,
     WifiBandStatus,
     WifiBandSet,
@@ -42,6 +43,7 @@ pub(crate) enum ParameterKind {
     Enabled,
     ActivateProfile,
     Deactivate,
+    StatisticsWatch,
     Networks,
     BandStatus,
     BandSet,
@@ -64,7 +66,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static METHOD_REGISTRY: &[MethodSpec; 21] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 22] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -174,6 +176,16 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 21] = &[
         stream: Some(Stream::NetworkInventory),
         operation: ErrorOperation::Disconnect,
         description: "Deactivates one active connection by active-connection path or profile UUID.",
+    },
+    MethodSpec {
+        method: Method::NetworkStatisticsWatch,
+        name: "network.statistics.watch",
+        parameters: ParameterKind::StatisticsWatch,
+        params_example: r#"{"device":"wlan0","interval_ms":1000}"#,
+        response_key: "result",
+        stream: Some(Stream::NetworkStatistics),
+        operation: ErrorOperation::Statistics,
+        description: "Starts an owner-scoped device transfer-counter watch and returns its request id.",
     },
     MethodSpec {
         method: Method::WifiNetworks,
@@ -315,6 +327,7 @@ pub(crate) enum Stream {
     WifiStatus,
     NetworkConnectivity,
     NetworkInventory,
+    NetworkStatistics,
     WifiNetworks,
     WifiScan,
     WifiConnect,
@@ -344,7 +357,7 @@ pub(crate) struct StreamSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static STREAM_REGISTRY: &[StreamSpec; 10] = &[
+pub(crate) static STREAM_REGISTRY: &[StreamSpec; 11] = &[
     StreamSpec {
         stream: Stream::WifiStatus,
         name: "wifi.status",
@@ -371,6 +384,15 @@ pub(crate) static STREAM_REGISTRY: &[StreamSpec; 10] = &[
         delivery: StreamDelivery::Continuous,
         events: &["subscribed", "changed"],
         description: "Cross-type device, profile, and active-connection inventory emitted on local NetworkManager changes.",
+    },
+    StreamSpec {
+        stream: Stream::NetworkStatistics,
+        name: "network.statistics",
+        subscribable: true,
+        default: false,
+        delivery: StreamDelivery::Operation,
+        events: &["subscribed", "started", "sample", "failed", "cancelled"],
+        description: "Device transfer counters and derived rates for a network.statistics.watch request id.",
     },
     StreamSpec {
         stream: Stream::WifiNetworks,

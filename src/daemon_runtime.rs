@@ -25,6 +25,7 @@ pub(crate) enum TaskKind {
     Connect,
     Scan,
     Band,
+    Statistics,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -442,6 +443,7 @@ impl TaskKind {
             Self::Connect => ErrorOperation::Connect,
             Self::Scan => ErrorOperation::Scan,
             Self::Band => ErrorOperation::BandOperation,
+            Self::Statistics => ErrorOperation::Statistics,
         }
     }
 }

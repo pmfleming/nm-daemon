@@ -8,6 +8,7 @@ use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     ActiveConnectionSummary, ConnectivityStatus, NetworkConnectionSummary, NetworkDeactivateResult,
     NetworkDeviceSummary, NetworkInventory, NetworkStateSummary, ProfileActivationResult,
+    device_state_reason,
 };
 use crate::variant::value_string;
 
@@ -225,14 +226,36 @@ impl Nm {
             type_name: device_type_name(device_type),
             state,
             state_name: device_state_name(state),
-            state_reason: state_reason.1,
+            state_reason: device_state_reason(state_reason.1),
             managed: device.get_property("Managed").unwrap_or(false),
             autoconnect: device.get_property("Autoconnect").unwrap_or(false),
             driver: nonempty(device.get_property("Driver").ok()),
             firmware_version: nonempty(device.get_property("FirmwareVersion").ok()),
+            hw_address: nonempty(device.get_property("HwAddress").ok()),
+            mtu: device.get_property("Mtu").ok().filter(|mtu| *mtu > 0),
+            carrier: self.device_carrier(path, device_type),
+            speed_mbps: self.device_speed_mbps(path, device_type),
             active_connection: object_path_property(&device, "ActiveConnection"),
             available_connections: object_path_list_property(&device, "AvailableConnections"),
         })
+    }
+
+    /// Wired-style link presence, read from the device's typed sub-interface.
+    fn device_carrier(&self, path: &OwnedObjectPath, device_type: u32) -> Option<bool> {
+        let interface = wired_interface(device_type)?;
+        self.proxy(path.as_str(), interface)
+            .ok()?
+            .get_property("Carrier")
+            .ok()
+    }
+
+    fn device_speed_mbps(&self, path: &OwnedObjectPath, device_type: u32) -> Option<u32> {
+        let interface = wired_interface(device_type)?;
+        self.proxy(path.as_str(), interface)
+            .ok()?
+            .get_property::<u32>("Speed")
+            .ok()
+            .filter(|speed| *speed > 0)
     }
 
     fn active_connection_summary(
@@ -449,6 +472,18 @@ fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
 }
 
+/// NetworkManager exposes carrier/speed on the type-specific device interface.
+fn wired_interface(device_type: u32) -> Option<&'static str> {
+    match device_type {
+        1 => Some("org.freedesktop.NetworkManager.Device.Wired"),
+        13 => Some("org.freedesktop.NetworkManager.Device.Bridge"),
+        10 => Some("org.freedesktop.NetworkManager.Device.Bond"),
+        15 => Some("org.freedesktop.NetworkManager.Device.Team"),
+        11 => Some("org.freedesktop.NetworkManager.Device.Vlan"),
+        _ => None,
+    }
+}
+
 fn device_type_name(value: u32) -> &'static str {
     match value {
         1 => "ethernet",
@@ -507,7 +542,7 @@ fn network_state_name(value: u32) -> &'static str {
     }
 }
 
-fn device_state_name(value: u32) -> &'static str {
+pub(super) fn device_state_name(value: u32) -> &'static str {
     match value {
         10 => "unmanaged",
         20 => "unavailable",
@@ -525,7 +560,7 @@ fn device_state_name(value: u32) -> &'static str {
     }
 }
 
-fn active_connection_state_name(value: u32) -> &'static str {
+pub(super) fn active_connection_state_name(value: u32) -> &'static str {
     match value {
         1 => "activating",
         2 => "activated",

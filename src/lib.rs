@@ -21,6 +21,7 @@ mod daemon_methods;
 mod daemon_runtime;
 mod daemon_scan;
 mod daemon_secret;
+mod daemon_statistics;
 mod daemon_status;
 mod deadline;
 mod diagnose;

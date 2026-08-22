@@ -62,8 +62,12 @@ pub(crate) fn parse_device_ip4(output: &str) -> Option<Ip4Status> {
     let mut ip4 = Ip4Status {
         address: None,
         prefix: None,
+        addresses: Vec::new(),
         gateway: None,
         dns: Vec::new(),
+        domains: Vec::new(),
+        searches: Vec::new(),
+        routes: Vec::new(),
         dhcp_lease: None,
     };
     output
@@ -76,7 +80,14 @@ pub(crate) fn parse_device_ip4(output: &str) -> Option<Ip4Status> {
 fn apply_device_ip4_field(ip4: &mut Ip4Status, key: &str, value: String) {
     match key {
         key if key.starts_with("IP4.ADDRESS") => {
-            (ip4.address, ip4.prefix) = parse_cidr(&value);
+            let (address, prefix) = parse_cidr(&value);
+            if let (Some(address), Some(prefix)) = (address.clone(), prefix) {
+                ip4.addresses
+                    .push(crate::model::IpAddressEntry { address, prefix });
+            }
+            if ip4.address.is_none() {
+                (ip4.address, ip4.prefix) = (address, prefix);
+            }
         }
         "IP4.GATEWAY" if !value.is_empty() => ip4.gateway = Some(value),
         key if key.starts_with("IP4.DNS") && !value.is_empty() => ip4.dns.push(value),

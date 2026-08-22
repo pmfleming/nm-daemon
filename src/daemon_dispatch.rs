@@ -71,6 +71,12 @@ fn dispatch_method(
             owner,
             emitter,
         ),
+        Method::NetworkStatisticsWatch => crate::daemon_statistics::start_watch(
+            runtime,
+            parse_params::<crate::daemon_statistics::StatisticsWatchParams>(params_json)?,
+            owner,
+            emitter,
+        ),
         Method::WifiBandSet => crate::daemon_band::start_set(
             runtime,
             parse_required_params::<crate::daemon_band::BandSetParams>(params_json)?,
