@@ -274,10 +274,8 @@ fn forward_event(
     event: Value,
 ) -> Result<()> {
     let request_id = event.get("request_id").and_then(Value::as_str);
-    let correlated = matches!(
-        stream.as_str(),
-        "wifi.status" | "network.connectivity" | "wifi.networks" | "wifi.scan" | "wifi.connect"
-    ) || event.get("event").and_then(Value::as_str) == Some("subscribed");
+    let correlated = needs_correlation(&stream)
+        || event.get("event").and_then(Value::as_str) == Some("subscribed");
     if correlated && let Some(request_id) = request_id {
         let mut state = recover_lock(state, "frontend client state");
         if !state.active_ids.contains(request_id) {
@@ -291,6 +289,21 @@ fn forward_event(
     )?;
     forget_terminal_id(state, &event);
     Ok(())
+}
+
+/// True for streams whose events are only meaningful next to the response that
+/// produced their request id. Buffering those until the caller has seen the
+/// response keeps a fast `started` event from arriving before it. The set is
+/// derived from the stream registry so a newly added operation stream is
+/// correlated without editing a second list.
+fn needs_correlation(stream: &str) -> bool {
+    crate::protocol::Stream::parse(stream).is_some_and(|stream| {
+        matches!(
+            stream.spec().delivery,
+            crate::protocol::StreamDelivery::Operation
+                | crate::protocol::StreamDelivery::Continuous
+        )
+    })
 }
 
 fn forget_terminal_id(state: &Mutex<ClientState>, event: &Value) {
@@ -360,6 +373,24 @@ mod tests {
             state.pending_event_order.front().map(String::as_str),
             Some("request-1")
         );
+    }
+
+    #[test]
+    fn every_operation_and_continuous_stream_is_correlated_with_its_response() {
+        for spec in crate::protocol::STREAM_REGISTRY {
+            let expected = matches!(
+                spec.delivery,
+                crate::protocol::StreamDelivery::Operation
+                    | crate::protocol::StreamDelivery::Continuous
+            );
+            assert_eq!(
+                super::needs_correlation(spec.name),
+                expected,
+                "{}",
+                spec.name
+            );
+        }
+        assert!(!super::needs_correlation("not.a.stream"));
     }
 
     #[test]
