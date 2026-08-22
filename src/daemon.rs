@@ -133,6 +133,12 @@ impl NmDaemonInterface {
     -> zbus::Result<()>;
 }
 
+/// Makes every event originating from a method call private to that caller.
+///
+/// This is a security boundary, not just routing: operation results may carry
+/// short-lived credentials (for example a newly generated hotspot passphrase),
+/// so callers must never receive a broadcast emitter when D-Bus supplied a
+/// unique sender name.
 fn directed_emitter(emitter: &SignalEmitter<'_>, header: &Header<'_>) -> SignalEmitter<'static> {
     match header.sender() {
         Some(sender) => emitter.to_owned().set_destination(sender.to_owned().into()),

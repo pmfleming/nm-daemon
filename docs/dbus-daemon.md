@@ -291,7 +291,7 @@ Call("hotspot.stop", "{}")         -> data.result
 - `band` must be one the selected device advertises; an unavailable band is rejected before anything is created.
 - `device` accepts a device object path or interface name and must be access-point capable.
 
-The profile is created with `AddAndActivateConnection2` and `persist: "volatile"`, IPv4 `shared`, and IPv6 `ignore`, so the generated passphrase never reaches persistent NetworkManager storage. Events are `started`, `progress`, `succeeded`, `failed`, and `cancelled`. A successful `succeeded` event carries `result.passphrase`, `result.generated_passphrase`, `result.generated_ssid`, and `result.hotspot.share.qr_payload` — a standard Wi-Fi QR payload the frontend can render directly.
+The profile is created with `AddAndActivateConnection2` and `persist: "volatile"`, IPv4 `shared`, and IPv6 `ignore`, so the generated passphrase never reaches persistent NetworkManager storage. Events are `started`, `progress`, `succeeded`, `failed`, and `cancelled`. A successful `succeeded` event carries `result.passphrase`, `result.generated_passphrase`, `result.generated_ssid`, and `result.hotspot.share.qr_payload` — a standard Wi-Fi QR payload the frontend can render directly. This secret-bearing completion signal uses the caller's destination-addressed D-Bus emitter and is therefore unicast to the owner that started the operation, never broadcast on the session bus.
 
 Cancelling the request id rolls back cleanly: the activation wait aborts, the partially created profile is deactivated and deleted, and a hotspot that came up in the race between cancellation and activation is stopped so a cancelled request never leaves a radio broadcasting.
 
