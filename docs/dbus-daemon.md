@@ -81,6 +81,7 @@ signal Event(s stream, s event_json)
 | `network.statistics` | true | false | `Operation` | `subscribed, started, sample, failed, cancelled` | Device transfer counters and derived rates for a network.statistics.watch request id. |
 | `hotspot` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a hotspot.start request id. |
 | `vpn` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | VPN and WireGuard activation state and typed failure reasons for a vpn.connect request id. |
+| `network.health` | true | false | `External` | `subscribed, device, connection, vpn` | Typed device, active-connection, and VPN state transitions with NetworkManager's reason. Presentation stays with the frontend. |
 | `wifi.networks` | true | false | `Continuous` | `subscribed, changed` | Added, removed, and changed visible networks emitted from local NetworkManager state without requesting scans. |
 | `wifi.scan` | true | true | `Operation` | `subscribed, status, warning, snapshot, complete, cancelled, failed` | Events associated with a wifi.scan request id. |
 | `wifi.connect` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a wifi.connectTarget request id. |
@@ -295,6 +296,38 @@ Cancelling the request id rolls back cleanly: the activation wait aborts, the pa
 `hotspot.status` reports the running hotspot by finding a Wi-Fi device in access-point mode and reading its active profile. It returns `active: false` with null fields when no hotspot is running. `share` is present only on the `hotspot.start` result: NetworkManager does not hand a running profile's secret back, so the daemon does not invent one.
 
 `hotspot.stop` deactivates the hotspot and removes the volatile profile, returning `noop` when nothing was running.
+
+### `network.health`
+
+`network.health` carries NetworkManager's device, active-connection, and VPN transitions with the reason code NetworkManager only ever reports on the signal itself. It deliberately does **not** produce notifications: the daemon reports what happened and Shelllist decides what, if anything, to show.
+
+Subscribe explicitly; it is not a default stream:
+
+```text
+Subscribe(["network.health"])
+Event("network.health", event_json)   // event is "device", "connection", or "vpn"
+```
+
+Each event carries `health` with:
+
+- `subject` — `device`, `connection`, or `vpn`, matching the event name.
+- `state`/`state_name` and `previous_state`/`previous_state_name`, using that subject's own vocabulary. Device states are NetworkManager's device states, active-connection states its activation states, and VPN states the plugin's.
+- `reason` — `{ code, name, category }`. The numeric code is NetworkManager's, the name is stable, and the category is one of `none`, `user-requested`, `authentication`, `configuration`, `hardware`, `carrier`, `address-assignment`, `service`, `dependency`, `lifecycle`, or `unknown`.
+- `user_requested` and `unexpected`, so a frontend can tell a deliberate disconnect from a failure without interpreting reason codes.
+- Identity: `device_path`, `device_iface`, `device_type`, `active_connection_path`, `profile_path`, `id`, `uuid`, and `connection_type`. Device events resolve the connection through the device's active connection, and connection events resolve the device through the active connection's device list, so both directions are populated where NetworkManager knows them.
+- `at_ms`.
+
+An unmapped reason code is reported as `name: "unknown"` with its numeric `code` intact rather than dropped, so a newer NetworkManager cannot silence an event.
+
+Payloads are built only while at least one subscriber is watching; an idle daemon does no extra D-Bus work per NetworkManager transition.
+
+### Captive-portal context
+
+`network.connectivity` payloads carry the context needed to act on a portal verdict rather than just the verdict:
+
+- `check_uri` — NetworkManager's own connectivity-check URI, so a portal flow opens the URL NetworkManager actually probed instead of a guessed one.
+- `check_enabled` and `check_available` — whether connectivity checking is on, and whether this NetworkManager build supports it at all. A `state` of `unknown` with `check_available: false` means "not measured", not "no connectivity".
+- `primary_connection` — `path`, `id`, `uuid`, `connection_type`, `type_name`, and `device_iface` of the connection the verdict applies to, so a portal banner names the right network on a machine with several.
 
 ### Continuous local-state streams
 

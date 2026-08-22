@@ -110,6 +110,10 @@ impl DaemonRuntime {
         runtime.nm.subscribe_events(Arc::new(move || {
             let _ = control.try_send(Control::NetworkChanged);
         }));
+        let health_control = runtime.control.clone();
+        runtime.nm.subscribe_health(Arc::new(move |signal| {
+            let _ = health_control.try_send(Control::HealthSignal(signal));
+        }));
         Ok(runtime)
     }
 
@@ -474,6 +478,7 @@ enum Control {
         data: Value,
     },
     DropOwner(String),
+    HealthSignal(crate::nm::HealthSignal),
     NetworkChanged,
     Refreshed(SharedPayloads),
 }
@@ -595,6 +600,7 @@ fn handle_control(
             data,
         } => emit_external_to_subscribers(subscriptions, stream, &request_id, event, &data),
         Control::DropOwner(owner) => drop_subscriptions_for_owner(&owner, subscriptions),
+        Control::HealthSignal(signal) => publish_health_signal(signal, runtime, subscriptions),
         Control::NetworkChanged => request_shared_refresh(runtime, subscriptions, refresh),
         Control::Refreshed(payloads) => {
             complete_shared_refresh(payloads, runtime, subscriptions, refresh)
@@ -637,6 +643,46 @@ fn drop_subscriptions_for_owner(
     subscriptions: &mut HashMap<String, SubscriptionState>,
 ) {
     subscriptions.retain(|_, subscription| !subscription.owned_by(owner));
+}
+
+/// Builds and fans out one `network.health` event. The payload is only
+/// resolved while somebody is watching, so an idle daemon does no D-Bus work
+/// for every NetworkManager transition.
+fn publish_health_signal(
+    signal: crate::nm::HealthSignal,
+    runtime: &Arc<DaemonRuntime>,
+    subscriptions: &HashMap<String, SubscriptionState>,
+) {
+    if !subscriptions
+        .values()
+        .any(|subscription| subscription.watches(Stream::NetworkHealth))
+    {
+        return;
+    }
+    let event = signal.subject.as_str();
+    let control = runtime.control.clone();
+    let queued = runtime.submit_fast(
+        ErrorOperation::Status,
+        Box::new(move |nm| {
+            let request_id = crate::daemon_event::next_request_id("health");
+            match nm.network_health_event(&signal) {
+                Ok(health) => {
+                    let _ = control.send(Control::ExternalEvent {
+                        stream: Stream::NetworkHealth,
+                        request_id: request_id.clone(),
+                        event,
+                        data: serde_json::json!({ "request_id": request_id, "health": health }),
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(error = %crate::error::err_chain(&error), "could not describe a NetworkManager health transition");
+                }
+            }
+        }),
+    );
+    if let Err(error) = queued {
+        tracing::warn!(error = %crate::error::err_chain(&error), "could not queue a NetworkManager health transition");
+    }
 }
 
 fn emit_external_to_subscribers(

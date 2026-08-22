@@ -421,6 +421,7 @@ pub(crate) enum Stream {
     NetworkStatistics,
     Hotspot,
     Vpn,
+    NetworkHealth,
     WifiNetworks,
     WifiScan,
     WifiConnect,
@@ -450,7 +451,7 @@ pub(crate) struct StreamSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static STREAM_REGISTRY: &[StreamSpec; 13] = &[
+pub(crate) static STREAM_REGISTRY: &[StreamSpec; 14] = &[
     StreamSpec {
         stream: Stream::WifiStatus,
         name: "wifi.status",
@@ -518,6 +519,15 @@ pub(crate) static STREAM_REGISTRY: &[StreamSpec; 13] = &[
             "cancelled",
         ],
         description: "VPN and WireGuard activation state and typed failure reasons for a vpn.connect request id.",
+    },
+    StreamSpec {
+        stream: Stream::NetworkHealth,
+        name: "network.health",
+        subscribable: true,
+        default: false,
+        delivery: StreamDelivery::External,
+        events: &["subscribed", "device", "connection", "vpn"],
+        description: "Typed device, active-connection, and VPN state transitions with NetworkManager's reason. Presentation stays with the frontend.",
     },
     StreamSpec {
         stream: Stream::WifiNetworks,

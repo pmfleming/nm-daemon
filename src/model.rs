@@ -9,9 +9,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zvariant::OwnedObjectPath;
 
 mod identity;
-mod reason;
+pub(crate) mod reason;
 mod wire_v1;
 
+pub(crate) use crate::nm::NetworkHealthEvent;
 pub(crate) use identity::{Bssid, InterfaceName, NmObjectPath, Ssid};
 pub(crate) use reason::{
     TypedReason, active_connection_state_reason, device_state_reason, vpn_state_name,
@@ -715,6 +716,24 @@ pub(crate) struct ConnectivityStatus {
     pub(crate) state: &'static str,
     pub(crate) captive_portal: bool,
     pub(crate) full: bool,
+    /// NetworkManager's connectivity-check URI, so a portal flow opens the same
+    /// URL NetworkManager probed instead of guessing one.
+    pub(crate) check_uri: Option<String>,
+    pub(crate) check_enabled: bool,
+    pub(crate) check_available: bool,
+    /// Identity of the connection the portal verdict applies to. Boxed so the
+    /// portal context does not inflate every value that embeds connectivity.
+    pub(crate) primary_connection: Option<Box<PrimaryConnectionIdentity>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PrimaryConnectionIdentity {
+    pub(crate) path: String,
+    pub(crate) id: String,
+    pub(crate) uuid: String,
+    pub(crate) connection_type: String,
+    pub(crate) type_name: Option<String>,
+    pub(crate) device_iface: Option<String>,
 }
 
 impl ConnectivityStatus {
@@ -731,7 +750,26 @@ impl ConnectivityStatus {
             state,
             captive_portal: code == 2,
             full: code == 4,
+            check_uri: None,
+            check_enabled: false,
+            check_available: false,
+            primary_connection: None,
         }
+    }
+
+    /// Attaches the portal context a frontend needs to act on this verdict.
+    pub(crate) fn with_portal_context(
+        mut self,
+        check_uri: Option<String>,
+        check_enabled: bool,
+        check_available: bool,
+        primary_connection: Option<PrimaryConnectionIdentity>,
+    ) -> Self {
+        self.check_uri = check_uri.filter(|uri| !uri.is_empty());
+        self.check_enabled = check_enabled;
+        self.check_available = check_available;
+        self.primary_connection = primary_connection.map(Box::new);
+        self
     }
 }
 

@@ -89,7 +89,8 @@ impl Nm {
             state_name: network_state_name(state),
             networking_enabled: root.get_property("NetworkingEnabled").unwrap_or(true),
             radios: self.radio_status()?,
-            connectivity: ConnectivityStatus::from_nm_code(connectivity_code),
+            connectivity: self
+                .with_portal_context(ConnectivityStatus::from_nm_code(connectivity_code)),
             connectivity_check_uri: root
                 .get_property::<String>("ConnectivityCheckUri")
                 .ok()

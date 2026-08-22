@@ -234,6 +234,8 @@ Implemented in this repository:
 
 46. Added VPN and WireGuard activation before full editing: `vpn.list`, `vpn.status`, `vpn.connect`, `vpn.disconnect`, and a cancellable `vpn` stream carrying plugin state, banner, active duration, underlying connection, and typed failure reasons. SecretAgent registration now negotiates VPN-hint capabilities, accepts arbitrary plugin secret names for `vpn` and `wireguard` instead of only password/pin, strips NetworkManager's hint prefixes, writes VPN answers into the plugin's `vpn.secrets` map, handles WireGuard private/preshared keys, and reports NetworkManager's secret flags decoded for temporary-secret and re-prompt handling.
 
+47. Added the typed `network.health` stream: device, active-connection, and VPN transitions carrying NetworkManager's own reason code with a stable name and coarse category, `user_requested`/`unexpected` classification, and device/profile identity resolved in both directions. Presentation stays with Shelllist; the daemon emits no desktop notifications. Connectivity payloads now also carry NetworkManager's connectivity-check URI, check enabled/available flags, and the primary connection's identity.
+
 ## Remaining open items
 
 1. Optionally add desktop UI integration for Secret Service prompts. The daemon now dismisses create/delete/unlock prompts and reports `prompt_unsupported` instead of claiming success.

@@ -12,13 +12,14 @@ use crate::model::{
     HotspotShare, HotspotStartResult, HotspotStatus, HotspotStopResult, HotspotUnavailableReason,
     Ip4Status, Ip6Status, IpAddressEntry, IpRouteEntry, LinkStateStatus, MeteredStatus,
     NetworkConnectionSummary, NetworkDeactivateResult, NetworkDeviceSummary, NetworkEntry,
-    NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource, NetworkStateSummary,
-    ProfileActivationResult, ProfileEnterpriseSettings, ProfileIpSettings, ProfilePrivacy,
-    RadioPowerResult, RadioStatus, SavedWifiConnection, SecretFlags, VpnActivationResult,
-    VpnActiveStatus, VpnDisconnectResult, VpnProfileSummary, VpnStatus, WifiBand,
-    WifiBandSelectionResult, WifiBandStatus, WifiPowerResult, WifiProfileDetails,
-    WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus, device_state_reason,
-    network_entries_with_profile_matches, security_flags_label, security_label,
+    NetworkHealthEvent, NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource,
+    NetworkStateSummary, ProfileActivationResult, ProfileEnterpriseSettings, ProfileIpSettings,
+    ProfilePrivacy, RadioPowerResult, RadioStatus, SavedWifiConnection, SecretFlags, TypedReason,
+    VpnActivationResult, VpnActiveStatus, VpnDisconnectResult, VpnProfileSummary, VpnStatus,
+    WifiBand, WifiBandSelectionResult, WifiBandStatus, WifiPowerResult, WifiProfileDetails,
+    WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus,
+    active_connection_state_reason, device_state_reason, network_entries_with_profile_matches,
+    security_flags_label, security_label, vpn_state_reason,
 };
 use crate::protocol::{Method, Stream};
 
@@ -150,6 +151,7 @@ fn wifi_method_fixtures() -> Value {
         })),
         "wifi-secret.stream": { "events": operation_stream_events(Stream::WifiSecret) },
         "continuous.streams": { "events": continuous_stream_events() },
+        "network-health.stream": { "events": health_stream_events() },
     })
 }
 
@@ -1105,6 +1107,79 @@ fn subscribed_event(subscription_id: &str) -> (&'static str, Value) {
     ("subscribed", json!({ "subscription_id": subscription_id }))
 }
 
+fn contract_health_event(
+    subject: &'static str,
+    state: u32,
+    state_name: &'static str,
+    previous_state: Option<u32>,
+    previous_state_name: Option<&'static str>,
+    reason: TypedReason,
+) -> NetworkHealthEvent {
+    NetworkHealthEvent {
+        subject,
+        state,
+        state_name,
+        previous_state,
+        previous_state_name,
+        reason,
+        user_requested: reason.name == "user-requested" || reason.name == "user-disconnected",
+        unexpected: !matches!(reason.name, "none" | "user-requested" | "user-disconnected"),
+        device_path: Some("/org/freedesktop/NetworkManager/Devices/1".to_string()),
+        device_iface: Some("wlan0".to_string()),
+        device_type: Some(2),
+        active_connection_path: Some(
+            "/org/freedesktop/NetworkManager/ActiveConnection/1".to_string(),
+        ),
+        profile_path: Some("/org/freedesktop/NetworkManager/Settings/1".to_string()),
+        id: Some("Example".to_string()),
+        uuid: Some("6f4a1a0c-1f4b-4f2c-9a1e-0f9a4c2d5e11".to_string()),
+        connection_type: Some("802-11-wireless".to_string()),
+        at_ms: 1_762_000_000_000,
+    }
+}
+
+fn health_stream_events() -> Vec<Value> {
+    let event = |name: &'static str, health: NetworkHealthEvent| {
+        (
+            name,
+            json!({ "request_id": "health-contract", "health": health }),
+        )
+    };
+    stream_events(
+        Stream::NetworkHealth,
+        "health-contract",
+        vec![
+            subscribed_event("health-subscription"),
+            event(
+                "device",
+                contract_health_event(
+                    "device",
+                    120,
+                    "failed",
+                    Some(60),
+                    Some("need-auth"),
+                    device_state_reason(7),
+                ),
+            ),
+            event(
+                "connection",
+                contract_health_event(
+                    "connection",
+                    4,
+                    "deactivated",
+                    None,
+                    None,
+                    active_connection_state_reason(2),
+                ),
+            ),
+            event(
+                "vpn",
+                contract_health_event("vpn", 6, "failed", None, None, vpn_state_reason(9)),
+            ),
+        ],
+    )
+}
+
 fn continuous_stream_events() -> Vec<Value> {
     let mut events = stream_events(
         Stream::WifiStatus,
@@ -1550,6 +1625,18 @@ mod tests {
             "deactivated"
         );
         assert_eq!(
+            value["network-health.stream"]["events"][1]["health"]["reason"]["name"],
+            "no-secrets"
+        );
+        assert_eq!(
+            value["network-health.stream"]["events"][1]["health"]["unexpected"],
+            true
+        );
+        assert_eq!(
+            value["network-health.stream"]["events"][2]["health"]["user_requested"],
+            true
+        );
+        assert_eq!(
             value["continuous.streams"]["events"][4]["stream"],
             "network.inventory"
         );
@@ -1656,6 +1743,7 @@ mod tests {
             "network-statistics.stream",
             "hotspot.stream",
             "vpn.stream",
+            "network-health.stream",
         ] {
             let stream = match fixture {
                 "wifi-connect.stream" => crate::protocol::Stream::WifiConnect,
@@ -1664,6 +1752,7 @@ mod tests {
                 "network-statistics.stream" => crate::protocol::Stream::NetworkStatistics,
                 "hotspot.stream" => crate::protocol::Stream::Hotspot,
                 "vpn.stream" => crate::protocol::Stream::Vpn,
+                "network-health.stream" => crate::protocol::Stream::NetworkHealth,
                 _ => crate::protocol::Stream::WifiSecret,
             };
             let actual = value[fixture]["events"]

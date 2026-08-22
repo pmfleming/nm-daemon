@@ -15,6 +15,7 @@ mod band;
 mod connectivity;
 mod devices;
 mod events;
+mod health;
 mod hotspot;
 mod inventory;
 mod ip_settings;
@@ -27,6 +28,8 @@ mod status;
 mod vpn;
 mod wifi_settings;
 
+pub(crate) use events::{HealthSignal, HealthSubject};
+pub(crate) use health::NetworkHealthEvent;
 pub(crate) use hotspot::HotspotRequest;
 pub(crate) use inventory::{ActiveConnectionSelector, ProfileSelector};
 pub(crate) use statistics::{StatisticsDevice, statistics_rates};
@@ -175,6 +178,10 @@ impl Nm {
 
     pub(crate) fn subscribe_events(&self, listener: Arc<dyn Fn() + Send + Sync>) {
         self.events.subscribe(listener);
+    }
+
+    pub(crate) fn subscribe_health(&self, listener: Arc<dyn Fn(HealthSignal) + Send + Sync>) {
+        self.events.subscribe_health(listener);
     }
 
     pub(crate) fn wake_waiters(&self) {

@@ -9,11 +9,47 @@ use zbus::message::Type;
 use super::NM_DEST;
 use crate::generated::NETWORKMANAGER_EVENT_RETRY_DELAY;
 
+const DEVICE_IFACE: &str = "org.freedesktop.NetworkManager.Device";
+const ACTIVE_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.Connection.Active";
+const VPN_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.VPN.Connection";
+
+/// Which NetworkManager object reported a transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HealthSubject {
+    Device,
+    ActiveConnection,
+    Vpn,
+}
+
+impl HealthSubject {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::ActiveConnection => "connection",
+            Self::Vpn => "vpn",
+        }
+    }
+}
+
+/// One NetworkManager state transition, carried with the reason NetworkManager
+/// only ever reports on the signal itself.
+#[derive(Debug, Clone)]
+pub(crate) struct HealthSignal {
+    pub(crate) subject: HealthSubject,
+    pub(crate) path: String,
+    pub(crate) state: u32,
+    pub(crate) previous_state: Option<u32>,
+    pub(crate) reason: u32,
+}
+
+type HealthListener = Arc<dyn Fn(HealthSignal) + Send + Sync>;
+
 #[derive(Default)]
 pub(super) struct NetworkEvents {
     generation: Mutex<u64>,
     changed: Condvar,
     listeners: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
+    health_listeners: Mutex<Vec<HealthListener>>,
 }
 
 impl NetworkEvents {
@@ -54,6 +90,16 @@ impl NetworkEvents {
         recover_lock(&self.listeners).push(listener);
     }
 
+    pub(super) fn subscribe_health(&self, listener: HealthListener) {
+        recover_lock(&self.health_listeners).push(listener);
+    }
+
+    fn notify_health(&self, signal: HealthSignal) {
+        for listener in recover_lock(&self.health_listeners).iter() {
+            listener(signal.clone());
+        }
+    }
+
     pub(super) fn notify(&self) {
         let mut generation = recover_lock(&self.generation);
         *generation = generation.wrapping_add(1);
@@ -80,10 +126,57 @@ fn monitor_signals(connection: Connection, events: &NetworkEvents) -> Result<()>
         .context("subscribe to NetworkManager signals")?;
     events.notify();
     for message in &mut messages {
-        message.context("receive NetworkManager signal")?;
+        let message = message.context("receive NetworkManager signal")?;
+        if let Some(signal) = health_signal(&message) {
+            events.notify_health(signal);
+        }
         events.notify();
     }
     Ok(())
+}
+
+/// Extracts a state transition from the signals that carry NetworkManager's
+/// reason code. Every other NetworkManager signal still advances the shared
+/// generation; only these carry health detail.
+fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
+    let header = message.header();
+    let interface = header.interface()?.as_str().to_string();
+    let member = header.member()?.as_str().to_string();
+    let path = header.path()?.as_str().to_string();
+    let body = message.body();
+    match (interface.as_str(), member.as_str()) {
+        (DEVICE_IFACE, "StateChanged") => {
+            let (state, previous_state, reason): (u32, u32, u32) = body.deserialize().ok()?;
+            Some(HealthSignal {
+                subject: HealthSubject::Device,
+                path,
+                state,
+                previous_state: Some(previous_state),
+                reason,
+            })
+        }
+        (ACTIVE_CONNECTION_IFACE, "StateChanged") => {
+            let (state, reason): (u32, u32) = body.deserialize().ok()?;
+            Some(HealthSignal {
+                subject: HealthSubject::ActiveConnection,
+                path,
+                state,
+                previous_state: None,
+                reason,
+            })
+        }
+        (VPN_CONNECTION_IFACE, "VpnStateChanged") => {
+            let (state, reason): (u32, u32) = body.deserialize().ok()?;
+            Some(HealthSignal {
+                subject: HealthSubject::Vpn,
+                path,
+                state,
+                previous_state: None,
+                reason,
+            })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -91,7 +184,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::NetworkEvents;
+    use super::{HealthSignal, HealthSubject, NetworkEvents};
 
     #[test]
     fn notifications_advance_generation_and_wake_shared_listeners() {
@@ -108,5 +201,37 @@ mod tests {
 
         assert_ne!(events.generation(), before);
         assert_eq!(notifications.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn health_listeners_receive_each_transition_without_disturbing_the_generation() {
+        let events = NetworkEvents::default();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = Arc::clone(&seen);
+        events.subscribe_health(Arc::new(move |signal: HealthSignal| {
+            observed.lock().expect("health signals").push(signal);
+        }));
+        let before = events.generation();
+
+        events.notify_health(HealthSignal {
+            subject: HealthSubject::Device,
+            path: "/devices/1".to_string(),
+            state: 120,
+            previous_state: Some(70),
+            reason: 7,
+        });
+
+        assert_eq!(events.generation(), before);
+        let seen = seen.lock().expect("health signals");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].subject, HealthSubject::Device);
+        assert_eq!(seen[0].reason, 7);
+    }
+
+    #[test]
+    fn health_subject_names_are_stable() {
+        assert_eq!(HealthSubject::Device.as_str(), "device");
+        assert_eq!(HealthSubject::ActiveConnection.as_str(), "connection");
+        assert_eq!(HealthSubject::Vpn.as_str(), "vpn");
     }
 }

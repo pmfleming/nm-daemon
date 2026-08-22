@@ -186,8 +186,12 @@
         "result": {
           "connectivity": {
             "captive_portal": false,
+            "check_available": false,
+            "check_enabled": false,
+            "check_uri": null,
             "code": 4,
             "full": true,
+            "primary_connection": null,
             "state": "full"
           },
           "message": "Connected to Example via D-Bus",
@@ -287,8 +291,12 @@
   "connect_success": {
     "connectivity": {
       "captive_portal": false,
+      "check_available": false,
+      "check_enabled": false,
+      "check_uri": null,
       "code": 4,
       "full": true,
+      "primary_connection": null,
       "state": "full"
     },
     "message": "Connected to Example via D-Bus",
@@ -1013,8 +1021,12 @@
   "status": {
     "connectivity": {
       "captive_portal": true,
+      "check_available": false,
+      "check_enabled": false,
+      "check_uri": null,
       "code": 2,
       "full": false,
+      "primary_connection": null,
       "state": "portal"
     },
     "enabled": true,
