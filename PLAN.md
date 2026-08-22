@@ -82,6 +82,10 @@ nm-daemon network connections
 nm-daemon network inventory
 nm-daemon network activate --uuid <uuid> | --path <path> [--device <iface-or-path>]
 nm-daemon network deactivate --path <active-path> | --uuid <uuid>
+nm-daemon hotspot capabilities
+nm-daemon hotspot status
+nm-daemon hotspot start [--ssid <ssid>] [--passphrase-stdin] [--security wpa-psk|sae] [--band auto|2.4|5|6] [--channel <n>] [--hidden] [--device <iface-or-path>]
+nm-daemon hotspot stop
 ```
 
 Debug and unstable surfaces:
@@ -216,6 +220,8 @@ Implemented in this repository:
 41. Added a cross-type NetworkManager inventory: `network.inventory`, `network.devices`, `network.connections`, `network.status`, `network.activateProfile`, and `network.deactivate`, plus an optional `network.inventory` change stream computed only while subscribed. Devices, saved profiles of every connection type, and active connections carry stable typed names beside NetworkManager's numeric types, states, and reasons.
 
 42. Completed active-connection detail and telemetry: full IPv4/IPv6 address, gateway, DNS, domain, search, route, and DHCP lease reporting; typed device/active-connection state reasons with stable names and categories; primary and default-route attribution; device MAC, MTU, carrier, and wired speed; and an owner-scoped `network.statistics.watch` operation that enables NetworkManager's statistics refresh only while watched and releases it when the last watcher leaves.
+
+43. Added Wi-Fi hotspot lifecycle: `hotspot.capabilities`, `hotspot.status`, `hotspot.start`, `hotspot.stop`, and a cancellable `hotspot` operation stream. Start prefers an unused AP-capable device, creates a volatile `AddAndActivateConnection2` profile with IPv4 sharing, accepts only WPA2/WPA3 personal security, generates CSPRNG credentials when omitted, returns a Wi-Fi QR payload, reports a typed reason when a hotspot cannot be started, and rolls the profile back on failure or cancellation.
 
 ## Remaining open items
 

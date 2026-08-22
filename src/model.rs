@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::qr::wifi_qr_payload;
+pub(crate) use crate::qr::wifi_qr_payload;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -467,6 +467,121 @@ pub(crate) struct ActiveConnectionSummary {
     pub(crate) devices: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HotspotUnavailableReason {
+    NoWifiDevice,
+    ApModeUnsupported,
+    WifiDisabled,
+    DeviceBusy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
+pub(crate) enum HotspotSecurity {
+    /// WPA2-Personal; the widest-compatibility secure option.
+    WpaPsk,
+    /// WPA3-Personal.
+    Sae,
+}
+
+impl HotspotSecurity {
+    pub(crate) fn key_management(self) -> &'static str {
+        match self {
+            Self::WpaPsk => "wpa-psk",
+            Self::Sae => "sae",
+        }
+    }
+
+    /// Wi-Fi QR authentication token for this security type.
+    pub(crate) fn qr_auth_type(self) -> &'static str {
+        match self {
+            Self::WpaPsk => "WPA",
+            Self::Sae => "SAE",
+        }
+    }
+
+    pub(crate) fn minimum_passphrase_len(self) -> usize {
+        match self {
+            Self::WpaPsk | Self::Sae => 8,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct HotspotCapabilities {
+    pub(crate) supported: bool,
+    pub(crate) unsupported_reason: Option<HotspotUnavailableReason>,
+    pub(crate) message: String,
+    pub(crate) devices: Vec<HotspotDevice>,
+    pub(crate) recommended_device: Option<String>,
+    pub(crate) supported_security: Vec<HotspotSecurity>,
+    pub(crate) supported_bands: Vec<WifiBand>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct HotspotDevice {
+    pub(crate) path: String,
+    pub(crate) interface: String,
+    /// True when the driver advertises NM_WIFI_DEVICE_CAP_AP.
+    pub(crate) ap_capable: bool,
+    /// True while the device already carries an active connection.
+    pub(crate) in_use: bool,
+    pub(crate) state: u32,
+    pub(crate) state_name: &'static str,
+    pub(crate) mode: &'static str,
+    pub(crate) bands: Vec<WifiBand>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct HotspotStatus {
+    pub(crate) active: bool,
+    pub(crate) device_path: Option<String>,
+    pub(crate) device_iface: Option<String>,
+    pub(crate) ssid: Option<String>,
+    pub(crate) ssid_hex: Option<String>,
+    pub(crate) band: Option<WifiBand>,
+    pub(crate) channel: Option<u32>,
+    pub(crate) security: Option<HotspotSecurity>,
+    pub(crate) hidden: bool,
+    pub(crate) profile_path: Option<String>,
+    pub(crate) active_connection: Option<String>,
+    pub(crate) state: Option<u32>,
+    pub(crate) state_name: Option<&'static str>,
+    /// Present only when the caller started this hotspot in the current daemon
+    /// session; NetworkManager does not hand secrets back for a running profile.
+    pub(crate) share: Option<HotspotShare>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct HotspotShare {
+    pub(crate) ssid: String,
+    pub(crate) auth_type: &'static str,
+    pub(crate) hidden: bool,
+    pub(crate) qr_payload: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct HotspotStartResult {
+    pub(crate) status: &'static str,
+    pub(crate) message: String,
+    /// True when the daemon generated the passphrase because none was supplied.
+    pub(crate) generated_passphrase: bool,
+    /// True when the daemon generated the SSID because none was supplied.
+    pub(crate) generated_ssid: bool,
+    pub(crate) passphrase: String,
+    pub(crate) hotspot: HotspotStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct HotspotStopResult {
+    pub(crate) status: &'static str,
+    pub(crate) message: String,
+    pub(crate) ssid: Option<String>,
+    pub(crate) device_iface: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct DeviceStatisticsSample {
     pub(crate) rx_bytes: u64,
@@ -631,15 +746,21 @@ impl Default for ProfilePrivacy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, clap::ValueEnum,
+)]
 pub(crate) enum WifiBand {
     #[serde(rename = "auto")]
+    #[clap(name = "auto")]
     Auto,
     #[serde(rename = "2.4")]
+    #[clap(name = "2.4")]
     Ghz2_4,
     #[serde(rename = "5")]
+    #[clap(name = "5")]
     Ghz5,
     #[serde(rename = "6")]
+    #[clap(name = "6")]
     Ghz6,
 }
 

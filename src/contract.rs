@@ -8,14 +8,16 @@ use crate::forget::{ForgetProfile, ForgetResult, ForgetStatus};
 use crate::model::{
     AccessPoint, ActiveConnectionSummary, ConnectEnginePath, ConnectFailureReason, ConnectPhase,
     ConnectResult, ConnectTargetIdentity, ConnectivityStatus, DeviceStatisticsSample,
-    DhcpLeaseStatus, DisconnectResult, Ip4Status, Ip6Status, IpAddressEntry, IpRouteEntry,
-    LinkStateStatus, MeteredStatus, NetworkConnectionSummary, NetworkDeactivateResult,
-    NetworkDeviceSummary, NetworkEntry, NetworkInventory, NetworkSnapshotMetadata,
-    NetworkSnapshotSource, NetworkStateSummary, ProfileActivationResult, ProfileIpSettings,
-    ProfilePrivacy, RadioPowerResult, RadioStatus, SavedWifiConnection, WifiBand,
-    WifiBandSelectionResult, WifiBandStatus, WifiPowerResult, WifiProfileDetails,
-    WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus, device_state_reason,
-    network_entries_with_profile_matches, security_flags_label, security_label,
+    DhcpLeaseStatus, DisconnectResult, HotspotCapabilities, HotspotDevice, HotspotSecurity,
+    HotspotShare, HotspotStartResult, HotspotStatus, HotspotStopResult, HotspotUnavailableReason,
+    Ip4Status, Ip6Status, IpAddressEntry, IpRouteEntry, LinkStateStatus, MeteredStatus,
+    NetworkConnectionSummary, NetworkDeactivateResult, NetworkDeviceSummary, NetworkEntry,
+    NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource, NetworkStateSummary,
+    ProfileActivationResult, ProfileIpSettings, ProfilePrivacy, RadioPowerResult, RadioStatus,
+    SavedWifiConnection, WifiBand, WifiBandSelectionResult, WifiBandStatus, WifiPowerResult,
+    WifiProfileDetails, WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus,
+    device_state_reason, network_entries_with_profile_matches, security_flags_label,
+    security_label,
 };
 use crate::protocol::{Method, Stream};
 
@@ -40,15 +42,35 @@ fn print_fixture(fixture: &impl Serialize, key: &str) -> Result<()> {
 }
 
 fn method_contract_fixtures() -> Value {
-    let combined = shelllist_contract_fixture();
-    let password_network = canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_PSK, false, false);
-    let enterprise_network =
-        canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_802_1X, false, false);
+    let mut fixtures = serde_json::Map::new();
+    for group in [
+        registry_fixtures(),
+        wifi_method_fixtures(),
+        network_method_fixtures(),
+        hotspot_method_fixtures(),
+    ] {
+        if let Value::Object(group) = group {
+            fixtures.extend(group);
+        }
+    }
+    Value::Object(fixtures)
+}
+
+fn registry_fixtures() -> Value {
     json!({
         "protocol-registry": {
             "metadata": crate::protocol::contract_registry(),
             "markdown": crate::protocol::markdown_reference(),
         },
+    })
+}
+
+fn wifi_method_fixtures() -> Value {
+    let combined = shelllist_contract_fixture();
+    let password_network = canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_PSK, false, false);
+    let enterprise_network =
+        canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_802_1X, false, false);
+    json!({
         "wifi-networks.saved": network_response_fixture(vec![combined.network]),
         "wifi-networks.password-required": network_response_fixture(vec![password_network]),
         "wifi-networks.enterprise-required": network_response_fixture(vec![enterprise_network]),
@@ -75,23 +97,6 @@ fn method_contract_fixtures() -> Value {
             radios: RadioStatus { airplane_mode: true, wireless_enabled: false, wwan_enabled: false, ..contract_radio_status() },
             message: "Airplane mode enabled".to_string(),
         })),
-        "network-connectivity.full": response_fixture(Method::NetworkConnectivity, json!(ConnectivityStatus::from_nm_code(4))),
-        "network-inventory.snapshot": response_fixture(Method::NetworkInventory, json!(contract_inventory())),
-        "network-devices.list": response_fixture(Method::NetworkDevices, json!(contract_devices())),
-        "network-connections.list": response_fixture(Method::NetworkConnections, json!(contract_connections())),
-        "network-status.connected": response_fixture(Method::NetworkState, json!(contract_network_state())),
-        "network-activate-profile.started": response_fixture(Method::NetworkActivateProfile, json!(contract_activation_result())),
-        "network-deactivate.success": response_fixture(Method::NetworkDeactivate, json!(contract_deactivate_result())),
-        "network-statistics.watch": response_fixture(Method::NetworkStatisticsWatch, json!({
-            "status": "started",
-            "request_id": "stats-contract",
-            "stream": Stream::NetworkStatistics,
-            "device_path": "/org/freedesktop/NetworkManager/Devices/1",
-            "device_iface": "wlan0",
-            "interval_ms": 1_000,
-            "message": "Device statistics watch started; listen for Event('network.statistics', event_json) signals",
-        })),
-        "network-statistics.stream": { "events": statistics_stream_events() },
         "wifi-connect.success": response_fixture(Method::WifiConnectTarget, json!(combined.connect_success)),
         "wifi-connect.secret-required": response_fixture(Method::WifiConnectTarget, json!(combined.connect_error)),
         "wifi-connect.stream": { "events": operation_stream_events(Stream::WifiConnect) },
@@ -127,6 +132,73 @@ fn method_contract_fixtures() -> Value {
         })),
         "wifi-secret.stream": { "events": operation_stream_events(Stream::WifiSecret) },
         "continuous.streams": { "events": continuous_stream_events() },
+    })
+}
+
+fn network_method_fixtures() -> Value {
+    json!({
+        "network-connectivity.full": response_fixture(Method::NetworkConnectivity, json!(ConnectivityStatus::from_nm_code(4))),
+        "network-inventory.snapshot": response_fixture(Method::NetworkInventory, json!(contract_inventory())),
+        "network-devices.list": response_fixture(Method::NetworkDevices, json!(contract_devices())),
+        "network-connections.list": response_fixture(Method::NetworkConnections, json!(contract_connections())),
+        "network-status.connected": response_fixture(Method::NetworkState, json!(contract_network_state())),
+        "network-activate-profile.started": response_fixture(Method::NetworkActivateProfile, json!(contract_activation_result())),
+        "network-deactivate.success": response_fixture(Method::NetworkDeactivate, json!(contract_deactivate_result())),
+        "network-statistics.watch": response_fixture(Method::NetworkStatisticsWatch, json!({
+            "status": "started",
+            "request_id": "stats-contract",
+            "stream": Stream::NetworkStatistics,
+            "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+            "device_iface": "wlan0",
+            "interval_ms": 1_000,
+            "message": "Device statistics watch started; listen for Event('network.statistics', event_json) signals",
+        })),
+        "network-statistics.stream": { "events": statistics_stream_events() },
+    })
+}
+
+fn hotspot_method_fixtures() -> Value {
+    json!({
+        "hotspot.capabilities": response_fixture(Method::HotspotCapabilities, json!(contract_hotspot_capabilities())),
+        "hotspot.capabilities-unsupported": response_fixture(Method::HotspotCapabilities, json!(HotspotCapabilities {
+            supported: false,
+            unsupported_reason: Some(HotspotUnavailableReason::ApModeUnsupported),
+            message: "No Wi-Fi device advertises access-point mode".to_string(),
+            recommended_device: None,
+            devices: vec![HotspotDevice { ap_capable: false, ..contract_hotspot_device() }],
+            supported_security: vec![HotspotSecurity::WpaPsk, HotspotSecurity::Sae],
+            supported_bands: vec![WifiBand::Auto, WifiBand::Ghz2_4, WifiBand::Ghz5],
+        })),
+        "hotspot.status-active": response_fixture(Method::HotspotStatus, json!(contract_hotspot_status())),
+        "hotspot.status-inactive": response_fixture(Method::HotspotStatus, json!(HotspotStatus {
+            active: false,
+            device_path: None,
+            device_iface: None,
+            ssid: None,
+            ssid_hex: None,
+            band: None,
+            channel: None,
+            security: None,
+            hidden: false,
+            profile_path: None,
+            active_connection: None,
+            state: None,
+            state_name: None,
+            share: None,
+        })),
+        "hotspot.start": response_fixture(Method::HotspotStart, json!({
+            "status": "started",
+            "request_id": "hotspot-contract",
+            "stream": Stream::Hotspot,
+            "message": "Hotspot start requested; listen for Event('hotspot', event_json) signals",
+        })),
+        "hotspot.stop": response_fixture(Method::HotspotStop, json!(HotspotStopResult {
+            status: "stopped",
+            message: "Hotspot laufan-hotspot stopped".to_string(),
+            ssid: Some("laufan-hotspot".to_string()),
+            device_iface: Some("wlan0".to_string()),
+        })),
+        "hotspot.stream": { "events": hotspot_stream_events() },
     })
 }
 
@@ -329,6 +401,123 @@ fn network_from_production(
     network_entries_with_profile_matches(vec![access_point], &profile_matches)
         .pop()
         .expect("canonical access point produces one network")
+}
+
+fn contract_hotspot_device() -> HotspotDevice {
+    HotspotDevice {
+        path: "/org/freedesktop/NetworkManager/Devices/1".to_string(),
+        interface: "wlan0".to_string(),
+        ap_capable: true,
+        in_use: false,
+        state: 30,
+        state_name: "disconnected",
+        mode: "infrastructure",
+        bands: vec![WifiBand::Ghz2_4, WifiBand::Ghz5],
+    }
+}
+
+fn contract_hotspot_capabilities() -> HotspotCapabilities {
+    HotspotCapabilities {
+        supported: true,
+        unsupported_reason: None,
+        message: "A Wi-Fi hotspot can be started".to_string(),
+        recommended_device: Some("/org/freedesktop/NetworkManager/Devices/1".to_string()),
+        devices: vec![contract_hotspot_device()],
+        supported_security: vec![HotspotSecurity::WpaPsk, HotspotSecurity::Sae],
+        supported_bands: vec![WifiBand::Auto, WifiBand::Ghz2_4, WifiBand::Ghz5],
+    }
+}
+
+fn contract_hotspot_status() -> HotspotStatus {
+    HotspotStatus {
+        active: true,
+        device_path: Some("/org/freedesktop/NetworkManager/Devices/1".to_string()),
+        device_iface: Some("wlan0".to_string()),
+        ssid: Some("laufan-hotspot".to_string()),
+        ssid_hex: Some(crate::model::ssid_hex(b"laufan-hotspot")),
+        band: Some(WifiBand::Ghz5),
+        channel: Some(36),
+        security: Some(HotspotSecurity::WpaPsk),
+        hidden: false,
+        profile_path: Some("/org/freedesktop/NetworkManager/Settings/3".to_string()),
+        active_connection: Some("/org/freedesktop/NetworkManager/ActiveConnection/3".to_string()),
+        state: Some(2),
+        state_name: Some("activated"),
+        share: None,
+    }
+}
+
+fn contract_hotspot_start_result() -> HotspotStartResult {
+    let passphrase = "kq7mreb2xa4t";
+    HotspotStartResult {
+        status: "started",
+        message: "Hotspot laufan-hotspot is running".to_string(),
+        generated_passphrase: true,
+        generated_ssid: true,
+        passphrase: passphrase.to_string(),
+        hotspot: HotspotStatus {
+            share: Some(HotspotShare {
+                ssid: "laufan-hotspot".to_string(),
+                auth_type: HotspotSecurity::WpaPsk.qr_auth_type(),
+                hidden: false,
+                qr_payload: crate::model::wifi_qr_payload(
+                    HotspotSecurity::WpaPsk.qr_auth_type(),
+                    "laufan-hotspot",
+                    Some(passphrase),
+                    false,
+                ),
+            }),
+            ..contract_hotspot_status()
+        },
+    }
+}
+
+fn hotspot_stream_events() -> Vec<Value> {
+    stream_events(
+        Stream::Hotspot,
+        "hotspot-contract",
+        vec![
+            subscribed_event("hotspot-subscription"),
+            (
+                "started",
+                json!({ "request_id": "hotspot-contract", "phase": "preparing" }),
+            ),
+            (
+                "progress",
+                json!({ "request_id": "hotspot-contract", "phase": "activating" }),
+            ),
+            (
+                "succeeded",
+                json!({
+                    "request_id": "hotspot-contract",
+                    "phase": "complete",
+                    "result": contract_hotspot_start_result(),
+                }),
+            ),
+            (
+                "failed",
+                json!({
+                    "request_id": "hotspot-contract",
+                    "phase": "failed",
+                    "code": crate::error::ErrorCode::ValidationError,
+                    "message": "No Wi-Fi device advertises access-point mode",
+                    "details": {
+                        "operation": "hotspot-operation",
+                        "source": "validation",
+                        "unsupported_reason": "ap-mode-unsupported",
+                    },
+                }),
+            ),
+            (
+                "cancelled",
+                json!({
+                    "request_id": "hotspot-contract",
+                    "phase": "cancelled",
+                    "message": "Hotspot start was cancelled",
+                }),
+            ),
+        ],
+    )
 }
 
 fn statistics_stream_events() -> Vec<Value> {
@@ -1071,6 +1260,10 @@ mod tests {
             crate::protocol::Method::NetworkActivateProfile,
             crate::protocol::Method::NetworkDeactivate,
             crate::protocol::Method::NetworkStatisticsWatch,
+            crate::protocol::Method::HotspotCapabilities,
+            crate::protocol::Method::HotspotStatus,
+            crate::protocol::Method::HotspotStart,
+            crate::protocol::Method::HotspotStop,
             crate::protocol::Method::WifiNetworks,
             crate::protocol::Method::WifiBandStatus,
             crate::protocol::Method::WifiBandSet,
@@ -1196,6 +1389,19 @@ mod tests {
             value["network-statistics.watch"]["result"]["interval_ms"],
             1_000
         );
+        assert_eq!(value["hotspot.capabilities"]["hotspot"]["supported"], true);
+        assert_eq!(
+            value["hotspot.capabilities-unsupported"]["hotspot"]["unsupported_reason"],
+            "ap-mode-unsupported"
+        );
+        assert_eq!(value["hotspot.status-active"]["hotspot"]["active"], true);
+        assert_eq!(value["hotspot.status-inactive"]["hotspot"]["active"], false);
+        assert_eq!(value["hotspot.stop"]["result"]["status"], "stopped");
+        assert!(
+            value["hotspot.stream"]["events"][3]["result"]["hotspot"]["share"]["qr_payload"]
+                .as_str()
+                .is_some_and(|payload| payload.starts_with("WIFI:T:WPA;S:laufan-hotspot;"))
+        );
         assert_eq!(
             value["network-statistics.stream"]["events"][2]["statistics"]["rx_bytes_per_second"],
             125_000.0
@@ -1206,12 +1412,14 @@ mod tests {
             "wifi-scan.stream",
             "wifi-secret.stream",
             "network-statistics.stream",
+            "hotspot.stream",
         ] {
             let stream = match fixture {
                 "wifi-connect.stream" => crate::protocol::Stream::WifiConnect,
                 "wifi-band.stream" => crate::protocol::Stream::WifiBand,
                 "wifi-scan.stream" => crate::protocol::Stream::WifiScan,
                 "network-statistics.stream" => crate::protocol::Stream::NetworkStatistics,
+                "hotspot.stream" => crate::protocol::Stream::Hotspot,
                 _ => crate::protocol::Stream::WifiSecret,
             };
             let actual = value[fixture]["events"]

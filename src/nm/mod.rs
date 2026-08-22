@@ -15,6 +15,7 @@ mod band;
 mod connectivity;
 mod devices;
 mod events;
+mod hotspot;
 mod inventory;
 mod ip_settings;
 mod ip_status;
@@ -24,6 +25,7 @@ mod statistics;
 mod status;
 mod wifi_settings;
 
+pub(crate) use hotspot::HotspotRequest;
 pub(crate) use inventory::{ActiveConnectionSelector, ProfileSelector};
 pub(crate) use statistics::{StatisticsDevice, statistics_rates};
 

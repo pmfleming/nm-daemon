@@ -26,6 +26,7 @@ pub(crate) enum TaskKind {
     Scan,
     Band,
     Statistics,
+    Hotspot,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -444,6 +445,7 @@ impl TaskKind {
             Self::Scan => ErrorOperation::Scan,
             Self::Band => ErrorOperation::BandOperation,
             Self::Statistics => ErrorOperation::Statistics,
+            Self::Hotspot => ErrorOperation::HotspotOperation,
         }
     }
 }

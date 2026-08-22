@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::actions;
-use crate::cli::{Cli, Command, DebugCommand, NetworkCommand, WifiCommand};
+use crate::cli::{Cli, Command, DebugCommand, HotspotCommand, NetworkCommand, WifiCommand};
 use crate::logging;
 use crate::nm::Nm;
 
@@ -47,6 +47,7 @@ fn run_command(command: Command) -> Result<()> {
         Command::Client => crate::client::run(),
         Command::Wifi { command } => run_wifi_command(command),
         Command::Network { command } => run_network_command(command),
+        Command::Hotspot { command } => run_hotspot_command(command),
         Command::Debug { command } => run_debug_command(command),
     }
 }
@@ -64,6 +65,15 @@ fn run_network_command(command: NetworkCommand) -> Result<()> {
         NetworkCommand::Deactivate(options) => {
             with_nm(|nm| actions::deactivate_network_connection(nm, &options))
         }
+    }
+}
+
+fn run_hotspot_command(command: HotspotCommand) -> Result<()> {
+    match command {
+        HotspotCommand::Capabilities => with_nm(actions::print_hotspot_capabilities),
+        HotspotCommand::Status => with_nm(actions::print_hotspot_status),
+        HotspotCommand::Start(options) => with_nm(|nm| actions::start_hotspot(nm, &options)),
+        HotspotCommand::Stop => with_nm(actions::stop_hotspot),
     }
 }
 

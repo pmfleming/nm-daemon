@@ -6,7 +6,10 @@ use zbus::blocking::Proxy;
 use zbus::blocking::proxy::SignalIterator;
 
 use crate::application::ConnectRequest;
-use crate::cli::{Command, NetworkCommand, ProfileCommand, ScanOptions, WifiCommand};
+use crate::cli::{
+    Command, HotspotCommand, HotspotStartOptions, NetworkCommand, ProfileCommand, ScanOptions,
+    WifiCommand,
+};
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Method, Stream};
 
 pub(crate) enum ForwardOutcome {
@@ -49,6 +52,9 @@ fn dispatch_forward(proxy: &Proxy<'_>, command: &Command) -> Result<ForwardOutco
             proxy,
             crate::actions::connect_target_request(options.clone())?,
         ),
+        Command::Hotspot {
+            command: HotspotCommand::Start(options),
+        } => forward_hotspot_start(proxy, options),
         _ => forward_immediate(proxy, command),
     }
 }
@@ -58,6 +64,8 @@ fn is_forwardable(command: &Command) -> bool {
         command,
         Command::Wifi {
             command: WifiCommand::Scan(_) | WifiCommand::Connect(_) | WifiCommand::ConnectTarget(_),
+        } | Command::Hotspot {
+            command: HotspotCommand::Start(_),
         }
     ) || immediate_request(command).is_some()
 }
@@ -111,6 +119,49 @@ fn forward_connect(proxy: &Proxy<'_>, request: ConnectRequest) -> Result<Forward
         || ForwardOutcome::DirectConnect(Box::new(request)),
         finish_connect,
     )
+}
+
+fn forward_hotspot_start(
+    proxy: &Proxy<'_>,
+    options: &HotspotStartOptions,
+) -> Result<ForwardOutcome> {
+    let params = json!({
+        "ssid": options.ssid,
+        "passphrase": crate::actions::resolve_password(options.passphrase_stdin)?,
+        "security": options.security,
+        "band": options.band,
+        "channel": options.channel,
+        "hidden": options.hidden,
+        "device": options.device,
+    })
+    .to_string();
+    run_operation(
+        proxy,
+        Method::HotspotStart,
+        params,
+        Stream::Hotspot,
+        || ForwardOutcome::Unavailable,
+        finish_hotspot_start,
+    )
+}
+
+fn finish_hotspot_start(mut events: CorrelatedEvents<'_>) -> Result<ForwardOutcome> {
+    while let Some(event) = events.next()? {
+        match event.get("event").and_then(Value::as_str) {
+            Some("succeeded") => print_response(
+                &crate::output::api_data_value(
+                    "result",
+                    event.get("result").unwrap_or(&Value::Null),
+                    "serialize forwarded hotspot response JSON",
+                )?
+                .to_string(),
+            )?,
+            Some("failed" | "cancelled") => print_response(&event_error(&event).to_string())?,
+            _ => continue,
+        }
+        return Ok(ForwardOutcome::Handled);
+    }
+    anyhow::bail!("nm-daemon hotspot event stream ended before completion")
 }
 
 fn run_operation<'a>(
@@ -306,6 +357,7 @@ fn immediate_request(command: &Command) -> Option<(Method, String)> {
             .to_string(),
         )),
         Command::Network { command } => network_request(command),
+        Command::Hotspot { command } => hotspot_request(command),
         Command::Wifi {
             command: WifiCommand::Disconnect,
         } => empty(Method::WifiDisconnect),
@@ -339,6 +391,16 @@ fn network_request(command: &NetworkCommand) -> Option<(Method, String)> {
             Method::NetworkDeactivate,
             json!({ "path": options.path, "uuid": options.uuid }).to_string(),
         )),
+    }
+}
+
+fn hotspot_request(command: &HotspotCommand) -> Option<(Method, String)> {
+    match command {
+        HotspotCommand::Capabilities => empty(Method::HotspotCapabilities),
+        HotspotCommand::Status => empty(Method::HotspotStatus),
+        HotspotCommand::Stop => empty(Method::HotspotStop),
+        // Start is an event-driven operation handled by forward_hotspot_start.
+        HotspotCommand::Start(_) => None,
     }
 }
 

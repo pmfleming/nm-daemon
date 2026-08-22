@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 
-use crate::model::{Bssid, InterfaceName, NmObjectPath, WepKeyType};
+use crate::model::{Bssid, HotspotSecurity, InterfaceName, NmObjectPath, WepKeyType, WifiBand};
 
 #[derive(Parser)]
 #[command(name = "nm-daemon")]
@@ -36,6 +36,11 @@ pub(crate) enum Command {
     Network {
         #[command(subcommand)]
         command: NetworkCommand,
+    },
+    /// Wi-Fi hotspot lifecycle operations.
+    Hotspot {
+        #[command(subcommand)]
+        command: HotspotCommand,
     },
     /// Debug and unstable development probes.
     Debug {
@@ -106,6 +111,44 @@ pub(crate) struct DeactivateOptions {
     /// Profile UUID of the active connection to deactivate.
     #[arg(long)]
     pub(crate) uuid: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum HotspotCommand {
+    /// Report whether a Wi-Fi hotspot can be started, and why not when it cannot.
+    Capabilities,
+    /// Report the running Wi-Fi hotspot, if any.
+    Status,
+    /// Start a volatile Wi-Fi hotspot.
+    Start(HotspotStartOptions),
+    /// Stop the running Wi-Fi hotspot.
+    Stop,
+}
+
+#[derive(Clone, Args)]
+pub(crate) struct HotspotStartOptions {
+    /// Hotspot SSID. Defaults to a hostname-derived name.
+    #[arg(long)]
+    pub(crate) ssid: Option<String>,
+    /// Read the hotspot passphrase from the first line of stdin. A secure random
+    /// passphrase is generated when omitted.
+    #[arg(long)]
+    pub(crate) passphrase_stdin: bool,
+    /// Hotspot security. WEP and ad-hoc fallbacks are intentionally unsupported.
+    #[arg(long, value_enum, default_value_t = HotspotSecurity::WpaPsk)]
+    pub(crate) security: HotspotSecurity,
+    /// Restrict the hotspot to a band.
+    #[arg(long, value_enum, default_value_t = WifiBand::Auto)]
+    pub(crate) band: WifiBand,
+    /// Restrict the hotspot to a channel.
+    #[arg(long)]
+    pub(crate) channel: Option<u32>,
+    /// Do not broadcast the SSID.
+    #[arg(long)]
+    pub(crate) hidden: bool,
+    /// Wi-Fi device object path or interface name to host the hotspot.
+    #[arg(long)]
+    pub(crate) device: Option<String>,
 }
 
 #[derive(Subcommand)]

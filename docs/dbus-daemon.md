@@ -52,6 +52,10 @@ signal Event(s stream, s event_json)
 | `network.activateProfile` | `{"uuid":"0f6c...","path":null,"device":null}` (`ActivateProfile`) | `result` | `network.inventory` | Activates one saved profile of any connection type on a compatible device. |
 | `network.deactivate` | `{"path":"/org/freedesktop/NetworkManager/ActiveConnection/1","uuid":null}` (`Deactivate`) | `result` | `network.inventory` | Deactivates one active connection by active-connection path or profile UUID. |
 | `network.statistics.watch` | `{"device":"wlan0","interval_ms":1000}` (`StatisticsWatch`) | `result` | `network.statistics` | Starts an owner-scoped device transfer-counter watch and returns its request id. |
+| `hotspot.capabilities` | `{}` (`Empty`) | `hotspot` | `—` | Reports whether a Wi-Fi hotspot can be started, and why not when it cannot. |
+| `hotspot.status` | `{}` (`Empty`) | `hotspot` | `—` | Reports the running Wi-Fi hotspot, if any. |
+| `hotspot.start` | `{"ssid":null,"passphrase":null,"security":"wpa-psk","band":"auto","channel":null,"hidden":false,"device":null}` (`HotspotStart`) | `result` | `hotspot` | Starts a volatile Wi-Fi hotspot and returns a cancellable request id. |
+| `hotspot.stop` | `{}` (`Empty`) | `result` | `—` | Stops the running Wi-Fi hotspot and removes its volatile profile. |
 | `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `wifi.networks` | Visible networks enriched with saved-profile, capability, and snapshot freshness details; optionally emits local change deltas. |
 | `wifi.band.status` | `{"path":"/org/freedesktop/NetworkManager/Settings/1"}` (`BandStatus`) | `band` | `—` | Reports the active, selected, and available bands for an active Wi-Fi profile. |
 | `wifi.band.set` | `{"path":"/org/freedesktop/NetworkManager/Settings/1","band":"5"}` (`BandSet`) | `result` | `wifi.band` | Transactionally changes an active Wi-Fi profile band and returns a request id. |
@@ -71,6 +75,7 @@ signal Event(s stream, s event_json)
 | `network.connectivity` | true | true | `Continuous` | `subscribed, changed` | Connectivity and portal state, emitted immediately and on change. |
 | `network.inventory` | true | false | `Continuous` | `subscribed, changed` | Cross-type device, profile, and active-connection inventory emitted on local NetworkManager changes. |
 | `network.statistics` | true | false | `Operation` | `subscribed, started, sample, failed, cancelled` | Device transfer counters and derived rates for a network.statistics.watch request id. |
+| `hotspot` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a hotspot.start request id. |
 | `wifi.networks` | true | false | `Continuous` | `subscribed, changed` | Added, removed, and changed visible networks emitted from local NetworkManager state without requesting scans. |
 | `wifi.scan` | true | true | `Operation` | `subscribed, status, warning, snapshot, complete, cancelled, failed` | Events associated with a wifi.scan request id. |
 | `wifi.connect` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a wifi.connectTarget request id. |
@@ -224,6 +229,35 @@ The daemon sets `Device.Statistics.RefreshRateMs` when the first watcher for a d
 
 Reason categories are `none`, `user-requested`, `authentication`, `configuration`, `hardware`, `carrier`, `address-assignment`, `service`, `dependency`, `lifecycle`, and `unknown`. Clients should branch on `category` and label with `name` instead of parsing NetworkManager's numbers directly.
 
+### `hotspot`
+
+Hotspot lifecycle is a separate surface from Wi-Fi client connection:
+
+```text
+Call("hotspot.capabilities", "{}") -> data.hotspot
+Call("hotspot.status", "{}")       -> data.hotspot
+Call("hotspot.start", "{...}")     -> data.result.request_id, then Event("hotspot", ...)
+Call("hotspot.stop", "{}")         -> data.result
+```
+
+`hotspot.capabilities` always answers, including when a hotspot cannot be started. It reports `supported`, a human `message`, and a typed `unsupported_reason` of `no-wifi-device`, `ap-mode-unsupported`, `wifi-disabled`, or `device-busy`. Each listed device carries `ap_capable` (NetworkManager's `NM_WIFI_DEVICE_CAP_AP` bit), `in_use`, the current `mode`, and the `bands` its driver advertises. `recommended_device` is the first access-point-capable device that is not already carrying an active connection.
+
+`hotspot.start` parameters are `ssid`, `passphrase`, `security`, `band`, `channel`, `hidden`, and `device`; every one is optional:
+
+- `security` accepts only `wpa-psk` (WPA2-Personal) or `sae` (WPA3-Personal). WEP and ad-hoc fallbacks are rejected at the parameter boundary rather than silently downgraded.
+- `passphrase` is accepted only over the protected D-Bus/JSON transport (or `--passphrase-stdin` on the CLI) and is never logged. When omitted, the daemon generates one from the kernel CSPRNG using an alphabet without visually ambiguous characters.
+- `ssid` defaults to a hostname-derived name.
+- `band` must be one the selected device advertises; an unavailable band is rejected before anything is created.
+- `device` accepts a device object path or interface name and must be access-point capable.
+
+The profile is created with `AddAndActivateConnection2` and `persist: "volatile"`, IPv4 `shared`, and IPv6 `ignore`, so the generated passphrase never reaches persistent NetworkManager storage. Events are `started`, `progress`, `succeeded`, `failed`, and `cancelled`. A successful `succeeded` event carries `result.passphrase`, `result.generated_passphrase`, `result.generated_ssid`, and `result.hotspot.share.qr_payload` — a standard Wi-Fi QR payload the frontend can render directly.
+
+Cancelling the request id rolls back cleanly: the activation wait aborts, the partially created profile is deactivated and deleted, and a hotspot that came up in the race between cancellation and activation is stopped so a cancelled request never leaves a radio broadcasting.
+
+`hotspot.status` reports the running hotspot by finding a Wi-Fi device in access-point mode and reading its active profile. It returns `active: false` with null fields when no hotspot is running. `share` is present only on the `hotspot.start` result: NetworkManager does not hand a running profile's secret back, so the daemon does not invent one.
+
+`hotspot.stop` deactivates the hotspot and removes the volatile profile, returning `noop` when nothing was running.
+
 ### Continuous local-state streams
 
 Continuous status/connectivity subscriptions emit a `changed` event immediately, then whenever the serialized status/connectivity payload changes. The optional `wifi.networks` subscription follows the delta behavior above. One daemon event loop listens to the shared NetworkManager connection, coalesces change notifications, computes each needed payload once, and fans changes out to subscribers. Cancel the subscription id returned by `Subscribe` to remove that subscription; there is no per-subscription polling worker.
@@ -298,6 +332,10 @@ nm-daemon network connections
 nm-daemon network inventory
 nm-daemon network activate --uuid <uuid> | --path <path> [--device <iface-or-path>]
 nm-daemon network deactivate --path <active-path> | --uuid <uuid>
+nm-daemon hotspot capabilities
+nm-daemon hotspot status
+nm-daemon hotspot start [--ssid <ssid>] [--passphrase-stdin] [--security wpa-psk|sae] [--band auto|2.4|5|6] [--channel <n>] [--hidden] [--device <iface-or-path>]
+nm-daemon hotspot stop
 nm-daemon wifi disconnect
 nm-daemon wifi profile delete|autoconnect|mac-randomization|share|send-hostname ...
 ```

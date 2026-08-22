@@ -9,15 +9,16 @@ use crate::error::{
 use crate::generated::REQUEST_TIMEOUT_MAX;
 use crate::model::{
     AccessPoint, ConnectPhase, ConnectResult, ConnectTargetIdentity, ConnectivityStatus,
-    DisconnectResult, InterfaceName, NetworkConnectionSummary, NetworkDeactivateResult,
-    NetworkDeviceSummary, NetworkEntry, NetworkInventory, NetworkSnapshotMetadata,
-    NetworkSnapshotSource, NetworkStateSummary, NmObjectPath, ProfileActivationResult,
-    RadioPowerResult, SavedWifiConnection, ScanRequestOptions, WepKeyType, WifiBand,
-    WifiBandSelectionResult, WifiBandStatus, WifiConnectTarget, WifiPowerResult,
-    WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload, WifiStatus,
-    connect_target_for_network, connect_target_for_network_key, validate_ssid_bytes,
+    DisconnectResult, HotspotCapabilities, HotspotStartResult, HotspotStatus, HotspotStopResult,
+    InterfaceName, NetworkConnectionSummary, NetworkDeactivateResult, NetworkDeviceSummary,
+    NetworkEntry, NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource,
+    NetworkStateSummary, NmObjectPath, ProfileActivationResult, RadioPowerResult,
+    SavedWifiConnection, ScanRequestOptions, WepKeyType, WifiBand, WifiBandSelectionResult,
+    WifiBandStatus, WifiConnectTarget, WifiPowerResult, WifiProfileDetails, WifiProfileSecret,
+    WifiProfileUpdate, WifiSharePayload, WifiStatus, connect_target_for_network,
+    connect_target_for_network_key, validate_ssid_bytes,
 };
-use crate::nm::{ActiveConnectionSelector, Nm, ProfileSelector};
+use crate::nm::{ActiveConnectionSelector, HotspotRequest, Nm, ProfileSelector};
 use anyhow::Result;
 
 /// Transport-neutral operations layer; boundaries only translate requests and results.
@@ -52,6 +53,32 @@ impl<'a> Application<'a> {
 
     pub(crate) fn connectivity(&self) -> Result<ConnectivityStatus> {
         operation_result(ErrorOperation::Connectivity, self.nm.connectivity_check())
+    }
+
+    pub(crate) fn hotspot_capabilities(&self) -> Result<HotspotCapabilities> {
+        operation_result(
+            ErrorOperation::HotspotOperation,
+            self.nm.hotspot_capabilities(),
+        )
+    }
+
+    pub(crate) fn hotspot_status(&self) -> Result<HotspotStatus> {
+        operation_result(ErrorOperation::HotspotOperation, self.nm.hotspot_status())
+    }
+
+    pub(crate) fn start_hotspot(
+        &self,
+        request: &HotspotRequest,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<HotspotStartResult> {
+        operation_result(
+            ErrorOperation::HotspotOperation,
+            self.nm.start_hotspot(request, cancellation),
+        )
+    }
+
+    pub(crate) fn stop_hotspot(&self) -> Result<HotspotStopResult> {
+        operation_result(ErrorOperation::HotspotOperation, self.nm.stop_hotspot())
     }
 
     pub(crate) fn network_inventory(&self) -> Result<NetworkInventory> {

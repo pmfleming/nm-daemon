@@ -24,6 +24,10 @@ pub(crate) enum Method {
     NetworkActivateProfile,
     NetworkDeactivate,
     NetworkStatisticsWatch,
+    HotspotCapabilities,
+    HotspotStatus,
+    HotspotStart,
+    HotspotStop,
     WifiNetworks,
     WifiBandStatus,
     WifiBandSet,
@@ -44,6 +48,7 @@ pub(crate) enum ParameterKind {
     ActivateProfile,
     Deactivate,
     StatisticsWatch,
+    HotspotStart,
     Networks,
     BandStatus,
     BandSet,
@@ -66,7 +71,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static METHOD_REGISTRY: &[MethodSpec; 22] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 26] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -186,6 +191,46 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 22] = &[
         stream: Some(Stream::NetworkStatistics),
         operation: ErrorOperation::Statistics,
         description: "Starts an owner-scoped device transfer-counter watch and returns its request id.",
+    },
+    MethodSpec {
+        method: Method::HotspotCapabilities,
+        name: "hotspot.capabilities",
+        parameters: ParameterKind::Empty,
+        params_example: "{}",
+        response_key: "hotspot",
+        stream: None,
+        operation: ErrorOperation::HotspotOperation,
+        description: "Reports whether a Wi-Fi hotspot can be started, and why not when it cannot.",
+    },
+    MethodSpec {
+        method: Method::HotspotStatus,
+        name: "hotspot.status",
+        parameters: ParameterKind::Empty,
+        params_example: "{}",
+        response_key: "hotspot",
+        stream: None,
+        operation: ErrorOperation::HotspotOperation,
+        description: "Reports the running Wi-Fi hotspot, if any.",
+    },
+    MethodSpec {
+        method: Method::HotspotStart,
+        name: "hotspot.start",
+        parameters: ParameterKind::HotspotStart,
+        params_example: r#"{"ssid":null,"passphrase":null,"security":"wpa-psk","band":"auto","channel":null,"hidden":false,"device":null}"#,
+        response_key: "result",
+        stream: Some(Stream::Hotspot),
+        operation: ErrorOperation::HotspotOperation,
+        description: "Starts a volatile Wi-Fi hotspot and returns a cancellable request id.",
+    },
+    MethodSpec {
+        method: Method::HotspotStop,
+        name: "hotspot.stop",
+        parameters: ParameterKind::Empty,
+        params_example: "{}",
+        response_key: "result",
+        stream: None,
+        operation: ErrorOperation::HotspotOperation,
+        description: "Stops the running Wi-Fi hotspot and removes its volatile profile.",
     },
     MethodSpec {
         method: Method::WifiNetworks,
@@ -328,6 +373,7 @@ pub(crate) enum Stream {
     NetworkConnectivity,
     NetworkInventory,
     NetworkStatistics,
+    Hotspot,
     WifiNetworks,
     WifiScan,
     WifiConnect,
@@ -357,7 +403,7 @@ pub(crate) struct StreamSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static STREAM_REGISTRY: &[StreamSpec; 11] = &[
+pub(crate) static STREAM_REGISTRY: &[StreamSpec; 12] = &[
     StreamSpec {
         stream: Stream::WifiStatus,
         name: "wifi.status",
@@ -393,6 +439,22 @@ pub(crate) static STREAM_REGISTRY: &[StreamSpec; 11] = &[
         delivery: StreamDelivery::Operation,
         events: &["subscribed", "started", "sample", "failed", "cancelled"],
         description: "Device transfer counters and derived rates for a network.statistics.watch request id.",
+    },
+    StreamSpec {
+        stream: Stream::Hotspot,
+        name: "hotspot",
+        subscribable: true,
+        default: false,
+        delivery: StreamDelivery::Operation,
+        events: &[
+            "subscribed",
+            "started",
+            "progress",
+            "succeeded",
+            "failed",
+            "cancelled",
+        ],
+        description: "Events associated with a hotspot.start request id.",
     },
     StreamSpec {
         stream: Stream::WifiNetworks,

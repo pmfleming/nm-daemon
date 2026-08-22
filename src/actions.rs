@@ -8,12 +8,12 @@ use crate::application::{
     ProfileOperation, ProfileOperationResult, ScanRequest,
 };
 use crate::cli::{
-    ActivateOptions, ConnectOptions, ConnectTargetOptions, DeactivateOptions, ListOptions,
-    ProfileCommand, ScanOptions,
+    ActivateOptions, ConnectOptions, ConnectTargetOptions, DeactivateOptions, HotspotStartOptions,
+    ListOptions, ProfileCommand, ScanOptions,
 };
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
 use crate::model::{Ssid, WepKeyType, WifiConnectTarget};
-use crate::nm::{ActiveConnectionSelector, Nm, ProfileSelector};
+use crate::nm::{ActiveConnectionSelector, HotspotRequest, Nm, ProfileSelector};
 use crate::output::{
     print_access_points_json, print_api_data, print_api_message, print_connect_failure,
     print_connect_result, print_connectivity, print_disconnect_result,
@@ -71,7 +71,7 @@ pub(crate) fn print_connect_attempt(nm: &Nm, request: ConnectRequest) -> Result<
     }
 }
 
-fn resolve_password(password_stdin: bool) -> Result<Option<String>> {
+pub(crate) fn resolve_password(password_stdin: bool) -> Result<Option<String>> {
     if !password_stdin {
         return Ok(None);
     }
@@ -196,6 +196,40 @@ pub(crate) fn disconnect(nm: &Nm) -> Result<()> {
 
 pub(crate) fn print_connectivity_state(nm: &Nm) -> Result<()> {
     print_connectivity(&Application::new(nm).connectivity()?)
+}
+
+pub(crate) fn print_hotspot_capabilities(nm: &Nm) -> Result<()> {
+    print_method_data(
+        Method::HotspotCapabilities,
+        &Application::new(nm).hotspot_capabilities()?,
+    )
+}
+
+pub(crate) fn print_hotspot_status(nm: &Nm) -> Result<()> {
+    print_method_data(
+        Method::HotspotStatus,
+        &Application::new(nm).hotspot_status()?,
+    )
+}
+
+pub(crate) fn start_hotspot(nm: &Nm, options: &HotspotStartOptions) -> Result<()> {
+    let request = HotspotRequest {
+        ssid: options.ssid.clone(),
+        passphrase: resolve_password(options.passphrase_stdin)?,
+        security: options.security,
+        band: options.band,
+        channel: options.channel,
+        hidden: options.hidden,
+        device: options.device.clone(),
+    };
+    print_method_data(
+        Method::HotspotStart,
+        &Application::new(nm).start_hotspot(&request, None)?,
+    )
+}
+
+pub(crate) fn stop_hotspot(nm: &Nm) -> Result<()> {
+    print_method_data(Method::HotspotStop, &Application::new(nm).stop_hotspot()?)
 }
 
 pub(crate) fn print_network_state(nm: &Nm) -> Result<()> {

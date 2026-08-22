@@ -28,6 +28,9 @@ pub(super) fn dispatch(
         | Method::NetworkDevices
         | Method::NetworkConnections
         | Method::NetworkState
+        | Method::HotspotCapabilities
+        | Method::HotspotStatus
+        | Method::HotspotStop
         | Method::WifiDisconnect
         | Method::WifiSaved => dispatch_empty(method, params_json, runtime),
         Method::NetworkActivateProfile => call_network_activate_profile(
@@ -76,6 +79,9 @@ fn dispatch_empty(
         Method::NetworkDevices => call_network_devices(runtime),
         Method::NetworkConnections => call_network_connections(runtime),
         Method::NetworkState => call_network_state(runtime),
+        Method::HotspotCapabilities => crate::daemon_hotspot::call_capabilities(runtime),
+        Method::HotspotStatus => crate::daemon_hotspot::call_status(runtime),
+        Method::HotspotStop => crate::daemon_hotspot::call_stop(runtime),
         Method::WifiDisconnect => call_disconnect(runtime),
         Method::WifiSaved => call_saved(runtime),
         _ => Err(wrong_dispatch_group(method)),

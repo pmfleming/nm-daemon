@@ -77,6 +77,12 @@ fn dispatch_method(
             owner,
             emitter,
         ),
+        Method::HotspotStart => crate::daemon_hotspot::start(
+            runtime,
+            parse_params::<crate::daemon_hotspot::HotspotStartParams>(params_json)?,
+            owner,
+            emitter,
+        ),
         Method::WifiBandSet => crate::daemon_band::start_set(
             runtime,
             parse_required_params::<crate::daemon_band::BandSetParams>(params_json)?,

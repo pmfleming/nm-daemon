@@ -17,6 +17,7 @@ mod daemon_connect;
 mod daemon_dispatch;
 mod daemon_event;
 mod daemon_forward;
+mod daemon_hotspot;
 mod daemon_methods;
 mod daemon_runtime;
 mod daemon_scan;
@@ -38,6 +39,7 @@ mod nm;
 mod output;
 mod protocol;
 mod qr;
+mod random;
 mod variant;
 
 #[cfg(test)]
