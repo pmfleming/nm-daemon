@@ -82,20 +82,36 @@ impl Nm {
         check_scan_cancelled(cancellation)?;
         ensure_scan_deadline(deadline, "timed out waiting for LastScan to change")?;
         let device_path = device.path.to_string();
-        if self.scan_schedule.claim(&device_path) == ScanTurn::Join {
-            // Another caller's scan for this device is already running; its
-            // results are the ones this caller wants, so wait rather than
-            // spending the shared rate-limit budget on a duplicate request.
-            tracing::debug!(iface = %device.iface, "joining an in-flight scan for this device");
-            if self
-                .scan_schedule
-                .wait_for_in_flight(&device_path, deadline)
-            {
-                return Ok(());
+        loop {
+            match self.scan_schedule.claim(&device_path, ssids) {
+                ScanTurn::Request => break,
+                ScanTurn::Join => {
+                    // The owner requested every SSID this caller needs.
+                    tracing::debug!(iface = %device.iface, "joining a compatible in-flight scan");
+                    if self
+                        .scan_schedule
+                        .wait_for_in_flight(&device_path, deadline)
+                    {
+                        return Ok(());
+                    }
+                    return Err(scan_deadline_expired(
+                        "timed out waiting for an in-flight scan on this device",
+                    ));
+                }
+                ScanTurn::Wait => {
+                    // A wildcard scan cannot stand in for a hidden-SSID probe,
+                    // and a probe for another SSID cannot satisfy this caller.
+                    tracing::debug!(iface = %device.iface, "waiting behind an incompatible in-flight scan");
+                    if !self
+                        .scan_schedule
+                        .wait_for_in_flight(&device_path, deadline)
+                    {
+                        return Err(scan_deadline_expired(
+                            "timed out waiting to schedule a targeted scan",
+                        ));
+                    }
+                }
             }
-            return Err(scan_deadline_expired(
-                "timed out waiting for an in-flight scan on this device",
-            ));
         }
         let lease = ScanLease {
             nm: self,

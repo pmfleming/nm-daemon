@@ -22,8 +22,10 @@ use crate::generated::{SCAN_REQUEST_INTERVAL, SCAN_SCHEDULE_POLL_INTERVAL};
 pub(super) enum ScanTurn {
     /// This caller owns the scan and must issue `RequestScan`.
     Request,
-    /// Another caller's scan is already running; wait for it to finish.
+    /// Another caller's scan covers the same SSIDs; wait for its result.
     Join,
+    /// Another caller is scanning a different scope; wait, then claim again.
+    Wait,
 }
 
 #[derive(Debug, Default)]
@@ -35,19 +37,27 @@ pub(super) struct ScanScheduler {
 #[derive(Debug, Default)]
 struct DeviceScanState {
     in_flight: bool,
+    in_flight_ssids: Vec<Vec<u8>>,
     last_request: Option<Instant>,
     previous_request: Option<Instant>,
 }
 
 impl ScanScheduler {
-    /// Claims the scan for `device_path`, or reports that one is already running.
-    pub(super) fn claim(&self, device_path: &str) -> ScanTurn {
+    /// Claims the scan for `device_path`, joins a compatible request, or waits
+    /// behind an incompatible targeted request.
+    pub(super) fn claim(&self, device_path: &str, ssids: &[Vec<u8>]) -> ScanTurn {
         let mut devices = self.lock();
         let state = devices.entry(device_path.to_string()).or_default();
+        let requested = normalized_ssids(ssids);
         if state.in_flight {
-            return ScanTurn::Join;
+            return if scan_scope_covers(&state.in_flight_ssids, &requested) {
+                ScanTurn::Join
+            } else {
+                ScanTurn::Wait
+            };
         }
         state.in_flight = true;
+        state.in_flight_ssids = requested;
         state.previous_request = state.last_request;
         state.last_request = Some(Instant::now());
         ScanTurn::Request
@@ -57,6 +67,7 @@ impl ScanScheduler {
     pub(super) fn release(&self, device_path: &str) {
         if let Some(state) = self.lock().get_mut(device_path) {
             state.in_flight = false;
+            state.in_flight_ssids.clear();
         }
         self.finished.notify_all();
     }
@@ -105,6 +116,22 @@ impl ScanScheduler {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+fn normalized_ssids(ssids: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut ssids = ssids.to_vec();
+    ssids.sort();
+    ssids.dedup();
+    ssids
+}
+
+fn scan_scope_covers(in_flight: &[Vec<u8>], requested: &[Vec<u8>]) -> bool {
+    if in_flight.is_empty() || requested.is_empty() {
+        return in_flight.is_empty() && requested.is_empty();
+    }
+    requested
+        .iter()
+        .all(|ssid| in_flight.binary_search(ssid).is_ok())
 }
 
 /// How long to wait before NetworkManager will accept another `RequestScan`.
@@ -188,13 +215,34 @@ mod tests {
     #[test]
     fn one_caller_owns_the_scan_and_the_rest_join_it() {
         let scheduler = ScanScheduler::default();
-        assert_eq!(scheduler.claim("/devices/1"), ScanTurn::Request);
-        assert_eq!(scheduler.claim("/devices/1"), ScanTurn::Join);
+        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Request);
+        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Join);
         // A different device is scheduled independently.
-        assert_eq!(scheduler.claim("/devices/2"), ScanTurn::Request);
+        assert_eq!(scheduler.claim("/devices/2", &[]), ScanTurn::Request);
 
         scheduler.release("/devices/1");
-        assert_eq!(scheduler.claim("/devices/1"), ScanTurn::Request);
+        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Request);
+    }
+
+    #[test]
+    fn targeted_scans_only_join_a_scope_that_covers_their_ssids() {
+        let scheduler = ScanScheduler::default();
+        let cafe = vec![b"Cafe".to_vec()];
+        let cafe_and_office = vec![b"Office".to_vec(), b"Cafe".to_vec()];
+        assert_eq!(
+            scheduler.claim("/devices/1", &cafe_and_office),
+            ScanTurn::Request
+        );
+        assert_eq!(scheduler.claim("/devices/1", &cafe), ScanTurn::Join);
+        assert_eq!(
+            scheduler.claim("/devices/1", &[b"Other".to_vec()]),
+            ScanTurn::Wait
+        );
+        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Wait);
+
+        scheduler.release("/devices/1");
+        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Request);
+        assert_eq!(scheduler.claim("/devices/1", &cafe), ScanTurn::Wait);
     }
 
     #[test]
@@ -203,7 +251,7 @@ mod tests {
         let deadline = Deadline::from_now(Duration::from_secs(5)).unwrap();
         assert!(scheduler.wait_for_in_flight("/devices/1", deadline));
 
-        assert_eq!(scheduler.claim("/devices/1"), ScanTurn::Request);
+        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Request);
         let expired = Deadline::from_now(Duration::from_millis(1)).unwrap();
         assert!(!scheduler.wait_for_in_flight("/devices/1", expired));
 
