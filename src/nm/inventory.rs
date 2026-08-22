@@ -504,10 +504,16 @@ fn device_type_name(value: u32) -> &'static str {
         21 => "macsec",
         22 => "dummy",
         23 => "ppp",
-        29 => "wifi-p2p",
-        30 => "vrf",
-        31 => "loopback",
-        32 => "hsr",
+        24 => "ovs-interface",
+        25 => "ovs-port",
+        26 => "ovs-bridge",
+        27 => "wpan",
+        28 => "6lowpan",
+        29 => "wireguard",
+        30 => "wifi-p2p",
+        31 => "vrf",
+        32 => "loopback",
+        33 => "hsr",
         _ => "unknown",
     }
 }
@@ -619,6 +625,11 @@ mod tests {
     #[test]
     fn networkmanager_types_and_states_have_stable_names() {
         assert_eq!(device_type_name(2), "wifi");
+        assert_eq!(device_type_name(29), "wireguard");
+        assert_eq!(device_type_name(30), "wifi-p2p");
+        assert_eq!(device_type_name(31), "vrf");
+        assert_eq!(device_type_name(32), "loopback");
+        assert_eq!(device_type_name(33), "hsr");
         assert_eq!(connection_type_name("wireguard"), "wireguard");
         assert_eq!(device_state_name(100), "activated");
         assert_eq!(active_connection_state_name(1), "activating");
