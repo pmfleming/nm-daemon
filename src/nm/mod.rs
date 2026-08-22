@@ -184,6 +184,14 @@ impl Nm {
         self.events.subscribe_health(listener);
     }
 
+    pub(crate) fn latest_health_signal(
+        &self,
+        subject: HealthSubject,
+        path: &str,
+    ) -> Option<HealthSignal> {
+        self.events.latest_health(subject, path)
+    }
+
     pub(crate) fn wake_waiters(&self) {
         self.events.notify();
     }

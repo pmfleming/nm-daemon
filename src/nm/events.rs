@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ const ACTIVE_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.Connection
 const VPN_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.VPN.Connection";
 
 /// Which NetworkManager object reported a transition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum HealthSubject {
     Device,
     ActiveConnection,
@@ -50,6 +51,7 @@ pub(super) struct NetworkEvents {
     changed: Condvar,
     listeners: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
     health_listeners: Mutex<Vec<HealthListener>>,
+    latest_health: Mutex<HashMap<(HealthSubject, String), HealthSignal>>,
 }
 
 impl NetworkEvents {
@@ -95,9 +97,17 @@ impl NetworkEvents {
     }
 
     fn notify_health(&self, signal: HealthSignal) {
+        recover_lock(&self.latest_health)
+            .insert((signal.subject, signal.path.clone()), signal.clone());
         for listener in recover_lock(&self.health_listeners).iter() {
             listener(signal.clone());
         }
+    }
+
+    pub(super) fn latest_health(&self, subject: HealthSubject, path: &str) -> Option<HealthSignal> {
+        recover_lock(&self.latest_health)
+            .get(&(subject, path.to_string()))
+            .cloned()
     }
 
     pub(super) fn notify(&self) {
@@ -226,6 +236,11 @@ mod tests {
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].subject, HealthSubject::Device);
         assert_eq!(seen[0].reason, 7);
+        let latest = events
+            .latest_health(HealthSubject::Device, "/devices/1")
+            .expect("latest transition");
+        assert_eq!(latest.state, 120);
+        assert_eq!(latest.reason, 7);
     }
 
     #[test]

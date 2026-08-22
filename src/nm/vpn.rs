@@ -12,12 +12,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use zvariant::OwnedObjectPath;
 
-use super::{ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, Nm, inventory::active_connection_state_name};
+use super::{
+    ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, HealthSubject, Nm,
+    inventory::active_connection_state_name,
+};
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     NetworkConnectionSummary, TypedReason, VpnActivationResult, VpnActiveStatus,
     VpnDisconnectResult, VpnProfileSummary, VpnStatus, active_connection_state_reason,
-    device_state_reason, vpn_state_name,
+    device_state_reason, vpn_state_name, vpn_state_reason,
 };
 use crate::variant::value_string;
 
@@ -78,7 +81,7 @@ impl Nm {
             .root_proxy()
             .call("ActivateConnection", &(profile_path, root.clone(), root))
             .with_context(|| format!("ActivateConnection for VPN profile {}", profile.id))?;
-        match self.await_vpn_activation(&active_path, timeout, cancellation) {
+        match self.await_vpn_activation(&active_path, &profile.id, timeout, cancellation) {
             Ok(status) => Ok(VpnActivationResult {
                 status: "connected",
                 message: format!("{} is connected", profile.id),
@@ -151,6 +154,7 @@ impl Nm {
     fn await_vpn_activation(
         &self,
         active_path: &OwnedObjectPath,
+        profile_id: &str,
         timeout: Duration,
         cancellation: Option<&AtomicBool>,
     ) -> Result<VpnActiveStatus> {
@@ -163,7 +167,7 @@ impl Nm {
                 )
                 .into());
             }
-            let status = self.vpn_status_for_active_path(active_path)?;
+            let status = self.vpn_status_for_active_path(active_path, profile_id)?;
             if let Some(error) = vpn_failure(&status) {
                 return Err(error);
             }
@@ -185,20 +189,32 @@ impl Nm {
         }
     }
 
-    fn vpn_status_for_active_path(&self, active_path: &OwnedObjectPath) -> Result<VpnActiveStatus> {
+    fn vpn_status_for_active_path(
+        &self,
+        active_path: &OwnedObjectPath,
+        profile_id: &str,
+    ) -> Result<VpnActiveStatus> {
         let active = self
             .network_active_connections()?
             .into_iter()
-            .find(|active| active.path == active_path.as_str())
-            .ok_or_else(|| {
-                DomainError::new(
-                    crate::error::ErrorCode::ActivationFailed,
-                    ErrorOperation::VpnOperation,
-                    crate::error::ErrorSource::NetworkManager,
-                    "NetworkManager removed the VPN connection during activation",
-                )
-            })?;
-        self.vpn_active_status(&active)
+            .find(|active| active.path == active_path.as_str());
+        if let Some(active) = active {
+            return self.vpn_active_status(&active);
+        }
+        if let Some(signal) = self.latest_health_signal(HealthSubject::Vpn, active_path.as_str()) {
+            return Err(vpn_activation_error(
+                profile_id,
+                vpn_state_reason(signal.reason),
+                vpn_state_name(signal.state),
+            ));
+        }
+        Err(DomainError::new(
+            crate::error::ErrorCode::ActivationFailed,
+            ErrorOperation::VpnOperation,
+            crate::error::ErrorSource::NetworkManager,
+            "NetworkManager removed the VPN connection during activation",
+        )
+        .into())
     }
 
     fn vpn_active_status(
@@ -232,7 +248,7 @@ impl Nm {
             banner,
             vpn_state,
             vpn_state_name: vpn_state.map(vpn_state_name),
-            reason: Some(self.vpn_reason(&active.devices)),
+            reason: Some(self.vpn_reason(&active.path, &active.devices, vpn_state)),
             active_state: active.state,
             active_state_name: active.state_name,
             profile_path: active.profile_path.clone(),
@@ -258,12 +274,21 @@ impl Nm {
         (state, banner)
     }
 
-    /// NetworkManager carries the VPN reason on the `VpnStateChanged` signal
-    /// rather than a property, so a poll reads the underlying device's
-    /// `StateReason` instead of inventing one. Without a device — a plugin that
-    /// never got far enough to create one — the reason is reported as unknown
-    /// rather than guessed.
-    fn vpn_reason(&self, devices: &[String]) -> TypedReason {
+    /// VPN plugin reason numbers belong to `VpnStateChanged`, not to the
+    /// device `StateReason` enum. WireGuard has no plugin signal, so only its
+    /// type-neutral fallback uses the underlying device reason.
+    fn vpn_reason(
+        &self,
+        active_path: &str,
+        devices: &[String],
+        vpn_state: Option<u32>,
+    ) -> TypedReason {
+        if vpn_state.is_some() {
+            return self
+                .latest_health_signal(HealthSubject::Vpn, active_path)
+                .map(|signal| vpn_state_reason(signal.reason))
+                .unwrap_or_else(|| vpn_state_reason(0));
+        }
         let Some(device) = devices.first() else {
             return active_connection_state_reason(0);
         };
@@ -337,29 +362,30 @@ fn vpn_failure(status: &VpnActiveStatus) -> Option<anyhow::Error> {
     if !failed || (status.vpn_state == Some(NM_VPN_STATE_DISCONNECTED) && reason.expected()) {
         return None;
     }
+    Some(vpn_activation_error(
+        &status.id,
+        reason,
+        status.vpn_state_name.unwrap_or(status.active_state_name),
+    ))
+}
+
+fn vpn_activation_error(id: &str, reason: TypedReason, state_name: &str) -> anyhow::Error {
     let code = match reason.name {
         "no-secrets" => crate::error::ErrorCode::SecretRequired,
-        "login-failed" | "gsm-pin-check-failed" | "sim-pin-incorrect" => {
-            crate::error::ErrorCode::WrongPassword
-        }
+        "login-failed" => crate::error::ErrorCode::WrongPassword,
         _ => crate::error::ErrorCode::ActivationFailed,
     };
-    Some(
-        DomainError::new(
-            code,
-            ErrorOperation::VpnOperation,
-            crate::error::ErrorSource::NetworkManager,
-            format!("{} failed to connect", status.id),
-        )
-        .with_detail("reason", reason.name)
-        .with_detail("reason_category", serde_json::json!(reason.category))
-        .with_detail("reason_code", reason.code)
-        .with_detail(
-            "vpn_state",
-            status.vpn_state_name.unwrap_or(status.active_state_name),
-        )
-        .into(),
+    DomainError::new(
+        code,
+        ErrorOperation::VpnOperation,
+        crate::error::ErrorSource::NetworkManager,
+        format!("{id} failed to connect"),
     )
+    .with_detail("reason", reason.name)
+    .with_detail("reason_category", serde_json::json!(reason.category))
+    .with_detail("reason_code", reason.code)
+    .with_detail("vpn_state", state_name)
+    .into()
 }
 
 pub(crate) fn is_vpn_like(connection_type: &str) -> bool {
@@ -465,7 +491,7 @@ mod tests {
         vpn_is_connected, vpn_secret_names,
     };
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
-    use crate::model::device_state_reason;
+    use crate::model::vpn_state_reason;
 
     fn status(vpn_state: Option<u32>, active_state: u32, reason: u32) -> VpnActiveStatus {
         VpnActiveStatus {
@@ -478,7 +504,7 @@ mod tests {
             banner: None,
             vpn_state,
             vpn_state_name: vpn_state.map(crate::model::vpn_state_name),
-            reason: Some(device_state_reason(reason)),
+            reason: Some(vpn_state_reason(reason)),
             active_state,
             active_state_name: "activating",
             profile_path: Some("/settings/2".to_string()),
@@ -527,24 +553,23 @@ mod tests {
 
     #[test]
     fn terminal_vpn_states_map_to_typed_failure_codes() {
-        // NM_DEVICE_STATE_REASON_NO_SECRETS
-        let missing_secrets = vpn_failure(&status(Some(6), 1, 7)).expect("failure");
+        // NM_VPN_CONNECTION_STATE_REASON_NO_SECRETS
+        let missing_secrets = vpn_failure(&status(Some(6), 1, 9)).expect("failure");
         let report = ErrorReport::from_error(&missing_secrets, ErrorOperation::Unknown);
         assert_eq!(report.code, ErrorCode::SecretRequired);
         assert_eq!(report.details["reason"], "no-secrets");
         assert_eq!(report.details["reason_category"], "authentication");
 
-        // NM_DEVICE_STATE_REASON_SUPPLICANT_FAILED
-        let other = vpn_failure(&status(Some(6), 1, 10)).expect("failure");
+        let login_failed = vpn_failure(&status(Some(6), 1, 10)).expect("failure");
         assert_eq!(
-            ErrorReport::from_error(&other, ErrorOperation::Unknown).code,
-            ErrorCode::ActivationFailed
+            ErrorReport::from_error(&login_failed, ErrorOperation::Unknown).code,
+            ErrorCode::WrongPassword
         );
 
         // A user-requested disconnect is not an activation failure.
-        assert!(vpn_failure(&status(Some(7), 1, 39)).is_none());
+        assert!(vpn_failure(&status(Some(7), 1, 2)).is_none());
         // An unexpected disconnect still is.
-        assert!(vpn_failure(&status(Some(7), 1, 14)).is_some());
+        assert!(vpn_failure(&status(Some(7), 1, 3)).is_some());
 
         assert!(vpn_failure(&status(Some(3), 1, 1)).is_none());
         assert!(vpn_failure(&status(None, 1, 1)).is_none());
