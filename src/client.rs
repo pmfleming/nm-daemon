@@ -35,6 +35,7 @@ enum ClientRequest {
 #[derive(Default)]
 struct ClientState {
     active_ids: HashSet<String>,
+    subscription_ids: HashSet<String>,
     pending_events: HashMap<String, Vec<(String, Value)>>,
     pending_event_order: VecDeque<String>,
 }
@@ -144,11 +145,7 @@ fn handle_cancel(
 ) -> Result<()> {
     let result = proxy
         .call::<_, _, ()>("Cancel", &(request_id.as_str(),))
-        .inspect(|()| {
-            recover_lock(state, "frontend client state")
-                .active_ids
-                .remove(&request_id);
-        });
+        .inspect(|()| forget_cancelled_subscription(state, &request_id));
     emit_transport_response(
         output_lock,
         id,
@@ -177,11 +174,12 @@ fn emit_dbus_response(
         }
     };
     let active_id = response_active_id(&response).map(ToString::to_string);
+    let subscription_id = response_subscription_id(&response).map(ToString::to_string);
     emit(
         output_lock,
         &json!({ "kind": "response", "id": id, "ok": true, "response": response }),
     )?;
-    flush_pending_events(output_lock, state, active_id)
+    flush_pending_events(output_lock, state, active_id, subscription_id)
 }
 
 fn emit_response_error(output_lock: &Mutex<()>, id: &str, error: String) -> Result<()> {
@@ -195,6 +193,7 @@ fn flush_pending_events(
     output_lock: &Mutex<()>,
     state: &Mutex<ClientState>,
     active_id: Option<String>,
+    subscription_id: Option<String>,
 ) -> Result<()> {
     let Some(active_id) = active_id else {
         return Ok(());
@@ -202,7 +201,10 @@ fn flush_pending_events(
     let pending = {
         let mut state = recover_lock(state, "frontend client state");
         let pending = state.take_pending_events(&active_id);
-        state.active_ids.insert(active_id);
+        state.active_ids.insert(active_id.clone());
+        if subscription_id.as_deref() == Some(active_id.as_str()) {
+            state.subscription_ids.insert(active_id);
+        }
         pending
     };
     for (stream, event) in pending {
@@ -210,7 +212,7 @@ fn flush_pending_events(
             output_lock,
             &json!({ "kind": "event", "stream": stream, "event": event }),
         )?;
-        forget_terminal_id(state, &event);
+        forget_terminal_id(state, &stream, &event);
     }
     Ok(())
 }
@@ -233,6 +235,12 @@ fn response_active_id(response: &Value) -> Option<&str> {
     response
         .pointer("/data/result/request_id")
         .or_else(|| response.pointer("/data/subscription/id"))
+        .and_then(Value::as_str)
+}
+
+fn response_subscription_id(response: &Value) -> Option<&str> {
+    response
+        .pointer("/data/subscription/id")
         .and_then(Value::as_str)
 }
 
@@ -287,7 +295,7 @@ fn forward_event(
         output_lock,
         &json!({ "kind": "event", "stream": stream, "event": event }),
     )?;
-    forget_terminal_id(state, &event);
+    forget_terminal_id(state, &stream, &event);
     Ok(())
 }
 
@@ -306,12 +314,14 @@ fn needs_correlation(stream: &str) -> bool {
     })
 }
 
-fn forget_terminal_id(state: &Mutex<ClientState>, event: &Value) {
+fn forget_terminal_id(state: &Mutex<ClientState>, stream: &str, event: &Value) {
     let terminal = matches!(
         event.get("event").and_then(Value::as_str),
         Some("complete" | "succeeded" | "failed" | "cancelled")
     );
-    if !terminal {
+    let operation_stream = crate::protocol::Stream::parse(stream)
+        .is_some_and(|stream| stream.spec().delivery == crate::protocol::StreamDelivery::Operation);
+    if !terminal || !operation_stream {
         return;
     }
     if let Some(request_id) = event.get("request_id").and_then(Value::as_str) {
@@ -321,11 +331,19 @@ fn forget_terminal_id(state: &Mutex<ClientState>, event: &Value) {
     }
 }
 
+fn forget_cancelled_subscription(state: &Mutex<ClientState>, request_id: &str) {
+    let mut state = recover_lock(state, "frontend client state");
+    if state.subscription_ids.remove(request_id) {
+        state.active_ids.remove(request_id);
+    }
+}
+
 fn cancel_all(proxy: &Proxy<'_>, state: &Mutex<ClientState>) {
-    let ids = recover_lock(state, "frontend client state")
-        .active_ids
-        .drain()
-        .collect::<Vec<_>>();
+    let ids = {
+        let mut state = recover_lock(state, "frontend client state");
+        state.subscription_ids.clear();
+        state.active_ids.drain().collect::<Vec<_>>()
+    };
     for id in ids {
         let _ = proxy.call::<_, _, ()>("Cancel", &(id.as_str(),));
     }
@@ -352,7 +370,10 @@ fn emit(output_lock: &Mutex<()>, value: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientState, forget_terminal_id, response_active_id};
+    use super::{
+        ClientState, forget_cancelled_subscription, forget_terminal_id, response_active_id,
+        response_subscription_id,
+    };
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -396,24 +417,36 @@ mod tests {
     #[test]
     fn tracks_async_request_and_subscription_lifetimes() {
         let active = Mutex::new(ClientState::default());
-        for response in [
-            json!({ "data": { "result": { "request_id": "scan-1" } } }),
-            json!({ "data": { "subscription": { "id": "sub-1" } } }),
-        ] {
-            active
-                .lock()
-                .unwrap()
+        let operation = json!({ "data": { "result": { "request_id": "scan-1" } } });
+        let subscription = json!({ "data": { "subscription": { "id": "sub-1" } } });
+        {
+            let mut state = active.lock().unwrap();
+            state
                 .active_ids
-                .insert(response_active_id(&response).unwrap().to_string());
+                .insert(response_active_id(&operation).unwrap().to_string());
+            let subscription_id = response_subscription_id(&subscription).unwrap().to_string();
+            state.active_ids.insert(subscription_id.clone());
+            state.subscription_ids.insert(subscription_id);
         }
-        assert_eq!(active.lock().unwrap().active_ids.len(), 2);
 
+        // The daemon's immediate cancellation acknowledgement is internal;
+        // the operation remains correlated until its own stream terminates.
         forget_terminal_id(
             &active,
-            &json!({ "event": "complete", "request_id": "scan-1" }),
+            "daemon.request",
+            &json!({ "event": "cancelled", "request_id": "scan-1" }),
         );
+        assert!(active.lock().unwrap().active_ids.contains("scan-1"));
+        forget_terminal_id(
+            &active,
+            "wifi.scan",
+            &json!({ "event": "cancelled", "request_id": "scan-1" }),
+        );
+        assert!(!active.lock().unwrap().active_ids.contains("scan-1"));
+
+        forget_cancelled_subscription(&active, "sub-1");
         let active = active.lock().unwrap();
-        assert!(!active.active_ids.contains("scan-1"));
-        assert!(active.active_ids.contains("sub-1"));
+        assert!(!active.active_ids.contains("sub-1"));
+        assert!(!active.subscription_ids.contains("sub-1"));
     }
 }
