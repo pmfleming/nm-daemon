@@ -9,13 +9,15 @@ use crate::error::{
 use crate::generated::REQUEST_TIMEOUT_MAX;
 use crate::model::{
     AccessPoint, ConnectPhase, ConnectResult, ConnectTargetIdentity, ConnectivityStatus,
-    DisconnectResult, InterfaceName, NetworkEntry, NetworkSnapshotMetadata, NetworkSnapshotSource,
-    NmObjectPath, RadioPowerResult, SavedWifiConnection, ScanRequestOptions, WepKeyType, WifiBand,
+    DisconnectResult, InterfaceName, NetworkConnectionSummary, NetworkDeactivateResult,
+    NetworkDeviceSummary, NetworkEntry, NetworkInventory, NetworkSnapshotMetadata,
+    NetworkSnapshotSource, NetworkStateSummary, NmObjectPath, ProfileActivationResult,
+    RadioPowerResult, SavedWifiConnection, ScanRequestOptions, WepKeyType, WifiBand,
     WifiBandSelectionResult, WifiBandStatus, WifiConnectTarget, WifiPowerResult,
     WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload, WifiStatus,
     connect_target_for_network, connect_target_for_network_key, validate_ssid_bytes,
 };
-use crate::nm::Nm;
+use crate::nm::{ActiveConnectionSelector, Nm, ProfileSelector};
 use anyhow::Result;
 
 /// Transport-neutral operations layer; boundaries only translate requests and results.
@@ -50,6 +52,42 @@ impl<'a> Application<'a> {
 
     pub(crate) fn connectivity(&self) -> Result<ConnectivityStatus> {
         operation_result(ErrorOperation::Connectivity, self.nm.connectivity_check())
+    }
+
+    pub(crate) fn network_inventory(&self) -> Result<NetworkInventory> {
+        operation_result(ErrorOperation::Inventory, self.nm.network_inventory())
+    }
+
+    pub(crate) fn network_devices(&self) -> Result<Vec<NetworkDeviceSummary>> {
+        operation_result(ErrorOperation::Inventory, self.nm.network_devices())
+    }
+
+    pub(crate) fn network_connections(&self) -> Result<Vec<NetworkConnectionSummary>> {
+        operation_result(ErrorOperation::Inventory, self.nm.network_connections())
+    }
+
+    pub(crate) fn network_state(&self) -> Result<NetworkStateSummary> {
+        operation_result(ErrorOperation::Inventory, self.nm.network_state())
+    }
+
+    pub(crate) fn activate_network_profile(
+        &self,
+        selector: &ProfileSelector,
+    ) -> Result<ProfileActivationResult> {
+        operation_result(
+            ErrorOperation::Connect,
+            self.nm.activate_network_profile(selector),
+        )
+    }
+
+    pub(crate) fn deactivate_network_connection(
+        &self,
+        selector: &ActiveConnectionSelector,
+    ) -> Result<NetworkDeactivateResult> {
+        operation_result(
+            ErrorOperation::Disconnect,
+            self.nm.deactivate_network_connection(selector),
+        )
     }
 
     pub(crate) fn band_status(&self, path: &str) -> Result<WifiBandStatus> {

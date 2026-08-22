@@ -5,8 +5,10 @@ use serde_json::Value;
 
 use super::{EmptyParams, parse_params, parse_required_params, wrong_dispatch_group};
 use crate::daemon_methods::{
-    ProfileOperationParams, SetEnabledParams, call_connectivity, call_disconnect, call_networks,
-    call_profile_operation, call_saved, call_set_airplane_mode, call_set_enabled,
+    ActivateProfileParams, DeactivateParams, ProfileOperationParams, SetEnabledParams,
+    call_connectivity, call_disconnect, call_network_activate_profile, call_network_connections,
+    call_network_deactivate, call_network_devices, call_network_inventory, call_network_state,
+    call_networks, call_profile_operation, call_saved, call_set_airplane_mode, call_set_enabled,
     call_set_wwan_enabled, call_status,
 };
 use crate::daemon_runtime::DaemonRuntime;
@@ -22,8 +24,20 @@ pub(super) fn dispatch(
     match method {
         Method::WifiStatus
         | Method::NetworkConnectivity
+        | Method::NetworkInventory
+        | Method::NetworkDevices
+        | Method::NetworkConnections
+        | Method::NetworkState
         | Method::WifiDisconnect
         | Method::WifiSaved => dispatch_empty(method, params_json, runtime),
+        Method::NetworkActivateProfile => call_network_activate_profile(
+            runtime,
+            parse_required_params::<ActivateProfileParams>(params_json)?,
+        ),
+        Method::NetworkDeactivate => call_network_deactivate(
+            runtime,
+            parse_required_params::<DeactivateParams>(params_json)?,
+        ),
         Method::WifiSetEnabled | Method::RadioSetWwanEnabled | Method::RadioSetAirplaneMode => {
             dispatch_radio(method, params_json, runtime)
         }
@@ -58,6 +72,10 @@ fn dispatch_empty(
     match method {
         Method::WifiStatus => call_status(runtime),
         Method::NetworkConnectivity => call_connectivity(runtime),
+        Method::NetworkInventory => call_network_inventory(runtime),
+        Method::NetworkDevices => call_network_devices(runtime),
+        Method::NetworkConnections => call_network_connections(runtime),
+        Method::NetworkState => call_network_state(runtime),
         Method::WifiDisconnect => call_disconnect(runtime),
         Method::WifiSaved => call_saved(runtime),
         _ => Err(wrong_dispatch_group(method)),

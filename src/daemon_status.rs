@@ -17,6 +17,7 @@ pub(crate) struct SubscriptionState {
     emitter: SignalEmitter<'static>,
     last_status: Option<Value>,
     last_connectivity: Option<Value>,
+    last_inventory: Option<Value>,
     last_networks: Option<Value>,
 }
 
@@ -34,6 +35,7 @@ impl SubscriptionState {
             emitter,
             last_status: None,
             last_connectivity: None,
+            last_inventory: None,
             last_networks: None,
         }
     }
@@ -85,6 +87,18 @@ impl SubscriptionState {
                 value,
             );
         }
+        if self.watches(Stream::NetworkInventory)
+            && let Some(value) = &payloads.inventory
+        {
+            emit_on_change(
+                &self.emitter,
+                Stream::NetworkInventory,
+                &self.id,
+                Method::NetworkInventory,
+                &mut self.last_inventory,
+                value,
+            );
+        }
         if self.watches(Stream::WifiNetworks)
             && let Some(value) = &payloads.networks
         {
@@ -97,6 +111,7 @@ pub(crate) fn refresh_payloads(
     nm: &Nm,
     need_status: bool,
     need_connectivity: bool,
+    need_inventory: bool,
     need_networks: bool,
 ) -> SharedPayloads {
     let started = Instant::now();
@@ -117,6 +132,13 @@ pub(crate) fn refresh_payloads(
                     .map(|connectivity| json!(connectivity)),
             })
             .and_then(log_typed_refresh_error),
+        inventory: need_inventory
+            .then(|| {
+                application
+                    .network_inventory()
+                    .map(|inventory| json!(inventory))
+            })
+            .and_then(log_typed_refresh_error),
         networks: need_networks
             .then(|| {
                 application
@@ -134,9 +156,11 @@ pub(crate) fn refresh_payloads(
     tracing::debug!(
         need_status,
         need_connectivity,
+        need_inventory,
         need_networks,
         status_available = payloads.status.is_some(),
         connectivity_available = payloads.connectivity.is_some(),
+        inventory_available = payloads.inventory.is_some(),
         networks_available = payloads.networks.is_some(),
         connectivity_state = payloads
             .connectivity

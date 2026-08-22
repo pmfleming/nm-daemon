@@ -46,10 +46,24 @@ fn run_command(command: Command) -> Result<()> {
         Command::Daemon => crate::daemon::run_daemon(),
         Command::Client => crate::client::run(),
         Command::Wifi { command } => run_wifi_command(command),
-        Command::Network {
-            command: NetworkCommand::Connectivity,
-        } => with_nm(actions::print_connectivity_state),
+        Command::Network { command } => run_network_command(command),
         Command::Debug { command } => run_debug_command(command),
+    }
+}
+
+fn run_network_command(command: NetworkCommand) -> Result<()> {
+    match command {
+        NetworkCommand::Connectivity => with_nm(actions::print_connectivity_state),
+        NetworkCommand::Status => with_nm(actions::print_network_state),
+        NetworkCommand::Devices => with_nm(actions::print_network_devices),
+        NetworkCommand::Connections => with_nm(actions::print_network_connections),
+        NetworkCommand::Inventory => with_nm(actions::print_network_inventory),
+        NetworkCommand::Activate(options) => {
+            with_nm(|nm| actions::activate_network_profile(nm, &options))
+        }
+        NetworkCommand::Deactivate(options) => {
+            with_nm(|nm| actions::deactivate_network_connection(nm, &options))
+        }
     }
 }
 

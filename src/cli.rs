@@ -71,6 +71,41 @@ pub(crate) enum WifiCommand {
 pub(crate) enum NetworkCommand {
     /// Check NetworkManager connectivity state.
     Connectivity,
+    /// Show overall NetworkManager state, radios, connectivity, and primary connection.
+    Status,
+    /// List every NetworkManager device with type, state, and availability.
+    Devices,
+    /// List saved NetworkManager profiles of every connection type.
+    Connections,
+    /// Show devices, saved profiles, and active connections in one snapshot.
+    Inventory,
+    /// Activate a saved profile of any connection type.
+    Activate(ActivateOptions),
+    /// Deactivate an active connection.
+    Deactivate(DeactivateOptions),
+}
+
+#[derive(Clone, Args)]
+pub(crate) struct ActivateOptions {
+    /// Saved-profile UUID, from `nm-daemon network connections`.
+    #[arg(long, required_unless_present = "path")]
+    pub(crate) uuid: Option<String>,
+    /// NetworkManager settings object path, from `nm-daemon network connections`.
+    #[arg(long)]
+    pub(crate) path: Option<NmObjectPath>,
+    /// Device object path or interface name to activate the profile on.
+    #[arg(long)]
+    pub(crate) device: Option<String>,
+}
+
+#[derive(Clone, Args)]
+pub(crate) struct DeactivateOptions {
+    /// Active-connection object path, from `nm-daemon network inventory`.
+    #[arg(long, required_unless_present = "uuid")]
+    pub(crate) path: Option<NmObjectPath>,
+    /// Profile UUID of the active connection to deactivate.
+    #[arg(long)]
+    pub(crate) uuid: Option<String>,
 }
 
 #[derive(Subcommand)]

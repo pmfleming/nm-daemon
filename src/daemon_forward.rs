@@ -305,9 +305,7 @@ fn immediate_request(command: &Command) -> Option<(Method, String)> {
             })
             .to_string(),
         )),
-        Command::Network {
-            command: NetworkCommand::Connectivity,
-        } => empty(Method::NetworkConnectivity),
+        Command::Network { command } => network_request(command),
         Command::Wifi {
             command: WifiCommand::Disconnect,
         } => empty(Method::WifiDisconnect),
@@ -318,6 +316,29 @@ fn immediate_request(command: &Command) -> Option<(Method, String)> {
             command: WifiCommand::Profile { command },
         } => Some((Method::WifiProfileOperation, profile_params(command))),
         Command::Daemon | Command::Client | Command::Wifi { .. } | Command::Debug { .. } => None,
+    }
+}
+
+fn network_request(command: &NetworkCommand) -> Option<(Method, String)> {
+    match command {
+        NetworkCommand::Connectivity => empty(Method::NetworkConnectivity),
+        NetworkCommand::Status => empty(Method::NetworkState),
+        NetworkCommand::Devices => empty(Method::NetworkDevices),
+        NetworkCommand::Connections => empty(Method::NetworkConnections),
+        NetworkCommand::Inventory => empty(Method::NetworkInventory),
+        NetworkCommand::Activate(options) => Some((
+            Method::NetworkActivateProfile,
+            json!({
+                "uuid": options.uuid,
+                "path": options.path,
+                "device": options.device,
+            })
+            .to_string(),
+        )),
+        NetworkCommand::Deactivate(options) => Some((
+            Method::NetworkDeactivate,
+            json!({ "path": options.path, "uuid": options.uuid }).to_string(),
+        )),
     }
 }
 

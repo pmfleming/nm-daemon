@@ -15,11 +15,14 @@ mod band;
 mod connectivity;
 mod devices;
 mod events;
+mod inventory;
 mod ip_settings;
 mod scan;
 mod settings;
 mod status;
 mod wifi_settings;
+
+pub(crate) use inventory::{ActiveConnectionSelector, ProfileSelector};
 
 pub(crate) const NM_DEST: &str = "org.freedesktop.NetworkManager";
 pub(crate) const WIFI_IFACE: &str = "org.freedesktop.NetworkManager.Device.Wireless";

@@ -6,9 +6,11 @@ use serde_json::{Value, json};
 
 use crate::forget::{ForgetProfile, ForgetResult, ForgetStatus};
 use crate::model::{
-    AccessPoint, ConnectEnginePath, ConnectFailureReason, ConnectPhase, ConnectResult,
-    ConnectTargetIdentity, ConnectivityStatus, DhcpLeaseStatus, DisconnectResult, Ip4Status,
-    MeteredStatus, NetworkEntry, NetworkSnapshotMetadata, NetworkSnapshotSource, ProfileIpSettings,
+    AccessPoint, ActiveConnectionSummary, ConnectEnginePath, ConnectFailureReason, ConnectPhase,
+    ConnectResult, ConnectTargetIdentity, ConnectivityStatus, DhcpLeaseStatus, DisconnectResult,
+    Ip4Status, MeteredStatus, NetworkConnectionSummary, NetworkDeactivateResult,
+    NetworkDeviceSummary, NetworkEntry, NetworkInventory, NetworkSnapshotMetadata,
+    NetworkSnapshotSource, NetworkStateSummary, ProfileActivationResult, ProfileIpSettings,
     ProfilePrivacy, RadioPowerResult, RadioStatus, SavedWifiConnection, WifiBand,
     WifiBandSelectionResult, WifiBandStatus, WifiPowerResult, WifiProfileDetails,
     WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus,
@@ -73,6 +75,12 @@ fn method_contract_fixtures() -> Value {
             message: "Airplane mode enabled".to_string(),
         })),
         "network-connectivity.full": response_fixture(Method::NetworkConnectivity, json!(ConnectivityStatus::from_nm_code(4))),
+        "network-inventory.snapshot": response_fixture(Method::NetworkInventory, json!(contract_inventory())),
+        "network-devices.list": response_fixture(Method::NetworkDevices, json!(contract_devices())),
+        "network-connections.list": response_fixture(Method::NetworkConnections, json!(contract_connections())),
+        "network-status.connected": response_fixture(Method::NetworkState, json!(contract_network_state())),
+        "network-activate-profile.started": response_fixture(Method::NetworkActivateProfile, json!(contract_activation_result())),
+        "network-deactivate.success": response_fixture(Method::NetworkDeactivate, json!(contract_deactivate_result())),
         "wifi-connect.success": response_fixture(Method::WifiConnectTarget, json!(combined.connect_success)),
         "wifi-connect.secret-required": response_fixture(Method::WifiConnectTarget, json!(combined.connect_error)),
         "wifi-connect.stream": { "events": operation_stream_events(Stream::WifiConnect) },
@@ -256,6 +264,154 @@ fn network_from_production(
     network_entries_with_profile_matches(vec![access_point], &profile_matches)
         .pop()
         .expect("canonical access point produces one network")
+}
+
+fn contract_devices() -> Vec<NetworkDeviceSummary> {
+    vec![
+        NetworkDeviceSummary {
+            path: "/org/freedesktop/NetworkManager/Devices/1".to_string(),
+            interface: "wlan0".to_string(),
+            ip_interface: Some("wlan0".to_string()),
+            device_type: 2,
+            type_name: "wifi",
+            state: 100,
+            state_name: "activated",
+            state_reason: 0,
+            managed: true,
+            autoconnect: true,
+            driver: Some("iwlwifi".to_string()),
+            firmware_version: Some("77.a20a2p1".to_string()),
+            active_connection: Some(
+                "/org/freedesktop/NetworkManager/ActiveConnection/1".to_string(),
+            ),
+            available_connections: vec!["/org/freedesktop/NetworkManager/Settings/1".to_string()],
+        },
+        NetworkDeviceSummary {
+            path: "/org/freedesktop/NetworkManager/Devices/2".to_string(),
+            interface: "enp3s0".to_string(),
+            ip_interface: Some("enp3s0".to_string()),
+            device_type: 1,
+            type_name: "ethernet",
+            state: 20,
+            state_name: "unavailable",
+            state_reason: 40,
+            managed: true,
+            autoconnect: true,
+            driver: Some("r8169".to_string()),
+            firmware_version: None,
+            active_connection: None,
+            available_connections: Vec::new(),
+        },
+    ]
+}
+
+fn contract_connections() -> Vec<NetworkConnectionSummary> {
+    vec![
+        NetworkConnectionSummary {
+            path: "/org/freedesktop/NetworkManager/Settings/1".to_string(),
+            id: "Example".to_string(),
+            uuid: "6f4a1a0c-1f4b-4f2c-9a1e-0f9a4c2d5e11".to_string(),
+            connection_type: "802-11-wireless".to_string(),
+            type_name: "wifi",
+            autoconnect: true,
+            autoconnect_priority: 10,
+            timestamp_ms: Some(1_762_000_000_000),
+            interface_name: None,
+            permissions: Vec::new(),
+            available_devices: vec!["/org/freedesktop/NetworkManager/Devices/1".to_string()],
+            active_connection: Some(
+                "/org/freedesktop/NetworkManager/ActiveConnection/1".to_string(),
+            ),
+        },
+        NetworkConnectionSummary {
+            path: "/org/freedesktop/NetworkManager/Settings/2".to_string(),
+            id: "Work VPN".to_string(),
+            uuid: "0a1c9c6e-3d21-4a55-8c2b-1e5b9d6f7a22".to_string(),
+            connection_type: "vpn".to_string(),
+            type_name: "vpn",
+            autoconnect: false,
+            autoconnect_priority: 0,
+            timestamp_ms: None,
+            interface_name: None,
+            permissions: vec!["user:laufan:".to_string()],
+            available_devices: Vec::new(),
+            active_connection: None,
+        },
+    ]
+}
+
+fn contract_active_connections() -> Vec<ActiveConnectionSummary> {
+    vec![ActiveConnectionSummary {
+        path: "/org/freedesktop/NetworkManager/ActiveConnection/1".to_string(),
+        id: "Example".to_string(),
+        uuid: "6f4a1a0c-1f4b-4f2c-9a1e-0f9a4c2d5e11".to_string(),
+        connection_type: "802-11-wireless".to_string(),
+        state: 2,
+        state_name: "activated",
+        state_flags: 92,
+        vpn: false,
+        default4: true,
+        default6: false,
+        profile_path: Some("/org/freedesktop/NetworkManager/Settings/1".to_string()),
+        specific_object: Some("/org/freedesktop/NetworkManager/AccessPoint/1".to_string()),
+        devices: vec!["/org/freedesktop/NetworkManager/Devices/1".to_string()],
+    }]
+}
+
+fn contract_inventory() -> NetworkInventory {
+    NetworkInventory {
+        networking_enabled: true,
+        primary_connection: Some("/org/freedesktop/NetworkManager/ActiveConnection/1".to_string()),
+        activating_connection: None,
+        devices: contract_devices(),
+        connections: contract_connections(),
+        active_connections: contract_active_connections(),
+    }
+}
+
+fn contract_network_state() -> NetworkStateSummary {
+    let primary = contract_active_connections().pop();
+    NetworkStateSummary {
+        state: 70,
+        state_name: "connected-global",
+        networking_enabled: true,
+        radios: contract_radio_status(),
+        connectivity: ConnectivityStatus::from_nm_code(4),
+        connectivity_check_uri: Some("http://networkcheck.example/nm-check.txt".to_string()),
+        connectivity_check_enabled: true,
+        primary_connection_type: Some("802-11-wireless".to_string()),
+        primary_connection: primary,
+        activating_connection: None,
+        default4: Some("/org/freedesktop/NetworkManager/ActiveConnection/1".to_string()),
+        default6: None,
+    }
+}
+
+fn contract_activation_result() -> ProfileActivationResult {
+    ProfileActivationResult {
+        status: "activating",
+        profile_path: "/org/freedesktop/NetworkManager/Settings/2".to_string(),
+        id: "Work VPN".to_string(),
+        uuid: "0a1c9c6e-3d21-4a55-8c2b-1e5b9d6f7a22".to_string(),
+        connection_type: "vpn".to_string(),
+        type_name: "vpn",
+        active_connection: Some("/org/freedesktop/NetworkManager/ActiveConnection/2".to_string()),
+        device: Some("/org/freedesktop/NetworkManager/Devices/1".to_string()),
+        state: 1,
+        state_name: "activating",
+        message: "Activating saved profile Work VPN".to_string(),
+    }
+}
+
+fn contract_deactivate_result() -> NetworkDeactivateResult {
+    NetworkDeactivateResult {
+        status: "deactivated",
+        path: "/org/freedesktop/NetworkManager/ActiveConnection/2".to_string(),
+        id: "Work VPN".to_string(),
+        uuid: "0a1c9c6e-3d21-4a55-8c2b-1e5b9d6f7a22".to_string(),
+        connection_type: "vpn".to_string(),
+        message: "Deactivated Work VPN".to_string(),
+    }
 }
 
 fn contract_radio_status() -> RadioStatus {
@@ -487,6 +643,14 @@ fn continuous_stream_events() -> Vec<Value> {
                 "changed",
                 json!({ "connectivity": ConnectivityStatus::from_nm_code(4) }),
             ),
+        ],
+    ));
+    events.extend(stream_events(
+        Stream::NetworkInventory,
+        "inventory-contract",
+        vec![
+            subscribed_event("inventory-subscription"),
+            ("changed", json!({ "inventory": contract_inventory() })),
         ],
     ));
     events.extend(stream_events(
@@ -779,6 +943,12 @@ mod tests {
             crate::protocol::Method::RadioSetWwanEnabled,
             crate::protocol::Method::RadioSetAirplaneMode,
             crate::protocol::Method::NetworkConnectivity,
+            crate::protocol::Method::NetworkInventory,
+            crate::protocol::Method::NetworkDevices,
+            crate::protocol::Method::NetworkConnections,
+            crate::protocol::Method::NetworkState,
+            crate::protocol::Method::NetworkActivateProfile,
+            crate::protocol::Method::NetworkDeactivate,
             crate::protocol::Method::WifiNetworks,
             crate::protocol::Method::WifiBandStatus,
             crate::protocol::Method::WifiBandSet,
@@ -836,11 +1006,39 @@ mod tests {
             "full"
         );
         assert_eq!(
+            value["network-devices.list"]["devices"][0]["type_name"],
+            "wifi"
+        );
+        assert_eq!(
+            value["network-connections.list"]["connections"][1]["type_name"],
+            "vpn"
+        );
+        assert_eq!(
+            value["network-status.connected"]["network"]["state_name"],
+            "connected-global"
+        );
+        assert_eq!(
+            value["network-inventory.snapshot"]["inventory"]["active_connections"][0]["default4"],
+            true
+        );
+        assert_eq!(
+            value["network-activate-profile.started"]["result"]["status"],
+            "activating"
+        );
+        assert_eq!(
+            value["network-deactivate.success"]["result"]["status"],
+            "deactivated"
+        );
+        assert_eq!(
             value["continuous.streams"]["events"][4]["stream"],
+            "network.inventory"
+        );
+        assert_eq!(
+            value["continuous.streams"]["events"][6]["stream"],
             "wifi.networks"
         );
         assert_eq!(
-            value["continuous.streams"]["events"][5]["snapshot"]["refresh_requested"],
+            value["continuous.streams"]["events"][7]["snapshot"]["refresh_requested"],
             false
         );
         assert_eq!(

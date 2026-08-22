@@ -45,6 +45,12 @@ signal Event(s stream, s event_json)
 | `radio.setWwanEnabled` | `{"enabled":true}` (`Enabled`) | `result` | `—` | Enables or disables NetworkManager mobile-data radios. |
 | `radio.setAirplaneMode` | `{"enabled":true}` (`Enabled`) | `result` | `—` | Disables or restores NetworkManager Wi-Fi and mobile-data radios. |
 | `network.connectivity` | `{}` (`Empty`) | `connectivity` | `network.connectivity` | NetworkManager connectivity and captive-portal state. |
+| `network.inventory` | `{}` (`Empty`) | `inventory` | `network.inventory` | Devices, saved profiles, and active connections across NetworkManager connection types. |
+| `network.devices` | `{}` (`Empty`) | `devices` | `network.inventory` | All NetworkManager devices with type, state, reason, and availability details. |
+| `network.connections` | `{}` (`Empty`) | `connections` | `network.inventory` | All saved NetworkManager profiles of every connection type with availability and activation state. |
+| `network.status` | `{}` (`Empty`) | `network` | `network.inventory` | Overall NetworkManager state, radios, connectivity, and primary/activating connection identity. |
+| `network.activateProfile` | `{"uuid":"0f6c...","path":null,"device":null}` (`ActivateProfile`) | `result` | `network.inventory` | Activates one saved profile of any connection type on a compatible device. |
+| `network.deactivate` | `{"path":"/org/freedesktop/NetworkManager/ActiveConnection/1","uuid":null}` (`Deactivate`) | `result` | `network.inventory` | Deactivates one active connection by active-connection path or profile UUID. |
 | `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `wifi.networks` | Visible networks enriched with saved-profile, capability, and snapshot freshness details; optionally emits local change deltas. |
 | `wifi.band.status` | `{"path":"/org/freedesktop/NetworkManager/Settings/1"}` (`BandStatus`) | `band` | `—` | Reports the active, selected, and available bands for an active Wi-Fi profile. |
 | `wifi.band.set` | `{"path":"/org/freedesktop/NetworkManager/Settings/1","band":"5"}` (`BandSet`) | `result` | `wifi.band` | Transactionally changes an active Wi-Fi profile band and returns a request id. |
@@ -62,6 +68,7 @@ signal Event(s stream, s event_json)
 | --- | --- | --- | --- | --- | --- |
 | `wifi.status` | true | true | `Continuous` | `subscribed, changed` | Current Wi-Fi status, emitted immediately and whenever it changes. |
 | `network.connectivity` | true | true | `Continuous` | `subscribed, changed` | Connectivity and portal state, emitted immediately and on change. |
+| `network.inventory` | true | false | `Continuous` | `subscribed, changed` | Cross-type device, profile, and active-connection inventory emitted on local NetworkManager changes. |
 | `wifi.networks` | true | false | `Continuous` | `subscribed, changed` | Added, removed, and changed visible networks emitted from local NetworkManager state without requesting scans. |
 | `wifi.scan` | true | true | `Operation` | `subscribed, status, warning, snapshot, complete, cancelled, failed` | Events associated with a wifi.scan request id. |
 | `wifi.connect` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a wifi.connectTarget request id. |
@@ -152,6 +159,38 @@ Clients can explicitly subscribe to the optional `wifi.networks` stream for loca
 
 Each grouped network includes a typed `security_class`: `open`, `enhanced-open`, `legacy`, `personal`, `enterprise`, or `unknown`. This presentation-safe class is derived from NetworkManager AP flags rather than display labels. Captive portal is a live connectivity state, not an advertised AP security type; frontends should override the active network's security icon while `network.connectivity.state` is `portal`.
 
+### `network.inventory`
+
+`network.inventory` is the cross-connection-type surface. It complements — rather than replaces — the Wi-Fi-specific methods, and covers Ethernet, VPN, WireGuard, cellular, Bluetooth, and virtual connections in one snapshot:
+
+```text
+Call("network.inventory", "{}")   -> data.inventory
+Call("network.devices", "{}")     -> data.devices
+Call("network.connections", "{}") -> data.connections
+Call("network.status", "{}")      -> data.network
+```
+
+`data.inventory` carries `networking_enabled`, `primary_connection`, `activating_connection`, and the `devices`, `connections`, and `active_connections` arrays.
+
+- Device entries carry `path`, `interface`, `ip_interface`, numeric `device_type` with a stable `type_name`, numeric `state` with a stable `state_name`, `state_reason`, `managed`, `autoconnect`, `driver`, `firmware_version`, `active_connection`, and `available_connections`.
+- Connection entries carry `path`, `id`, `uuid`, NetworkManager `connection_type` with a stable `type_name`, `autoconnect`, `autoconnect_priority`, `timestamp_ms`, `interface_name`, `permissions`, `available_devices`, and `active_connection`.
+- Active-connection entries carry `path`, `id`, `uuid`, `connection_type`, numeric `state` with `state_name`, `state_flags`, `vpn`, `default4`, `default6`, `profile_path`, `specific_object`, and `devices`.
+
+`network.status` adds the NetworkManager-wide `state`/`state_name`, radio flags, `connectivity`, `connectivity_check_uri`, `connectivity_check_enabled`, the resolved `primary_connection`/`primary_connection_type`, `activating_connection`, and the `default4`/`default6` active-connection paths.
+
+Activation and deactivation are type-neutral:
+
+```text
+Call("network.activateProfile", "{\"uuid\":\"...\"}")
+Call("network.activateProfile", "{\"path\":\"/org/freedesktop/NetworkManager/Settings/2\",\"device\":\"enp3s0\"}")
+Call("network.deactivate", "{\"path\":\"/org/freedesktop/NetworkManager/ActiveConnection/2\"}")
+Call("network.deactivate", "{\"uuid\":\"...\"}")
+```
+
+`network.activateProfile` requires `uuid` or `path`; `device` accepts either a device object path or an interface name and defaults to the profile's first available device. `network.deactivate` requires `path` or `uuid`. Unknown selectors return typed `not-found` errors, and an empty selector returns `validation-error`.
+
+The optional `network.inventory` stream emits a full `changed` snapshot whenever the serialized inventory differs, using the same coalesced daemon event loop as the other continuous streams. The daemon only queries devices, profiles, and active connections while at least one subscriber watches this stream.
+
 ### Continuous local-state streams
 
 Continuous status/connectivity subscriptions emit a `changed` event immediately, then whenever the serialized status/connectivity payload changes. The optional `wifi.networks` subscription follows the delta behavior above. One daemon event loop listens to the shared NetworkManager connection, coalesces change notifications, computes each needed payload once, and fans changes out to subscribers. Cancel the subscription id returned by `Subscribe` to remove that subscription; there is no per-subscription polling worker.
@@ -220,6 +259,12 @@ nm-daemon wifi scan ...
 nm-daemon wifi connect ...
 nm-daemon wifi connect-target ...
 nm-daemon network connectivity
+nm-daemon network status
+nm-daemon network devices
+nm-daemon network connections
+nm-daemon network inventory
+nm-daemon network activate --uuid <uuid> | --path <path> [--device <iface-or-path>]
+nm-daemon network deactivate --path <active-path> | --uuid <uuid>
 nm-daemon wifi disconnect
 nm-daemon wifi profile delete|autoconnect|mac-randomization|share|send-hostname ...
 ```

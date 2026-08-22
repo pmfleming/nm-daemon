@@ -105,6 +105,7 @@ pub(crate) enum ErrorOperation {
     CreateDbusProxy,
     Status,
     Connectivity,
+    Inventory,
     Networks,
     BandOperation,
     Scan,
@@ -515,6 +516,7 @@ fn networkmanager_operation(operation: ErrorOperation) -> bool {
             | ErrorOperation::CreateDbusProxy
             | ErrorOperation::Status
             | ErrorOperation::Connectivity
+            | ErrorOperation::Inventory
             | ErrorOperation::Networks
             | ErrorOperation::Scan
             | ErrorOperation::Connect

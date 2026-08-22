@@ -7,15 +7,19 @@ use crate::application::{
     Application, BackgroundScanScheduler, ConnectOutcome, ConnectRequest, NetworksRequest,
     ProfileOperation, ProfileOperationResult, ScanRequest,
 };
-use crate::cli::{ConnectOptions, ConnectTargetOptions, ListOptions, ProfileCommand, ScanOptions};
+use crate::cli::{
+    ActivateOptions, ConnectOptions, ConnectTargetOptions, DeactivateOptions, ListOptions,
+    ProfileCommand, ScanOptions,
+};
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
 use crate::model::{Ssid, WepKeyType, WifiConnectTarget};
-use crate::nm::Nm;
+use crate::nm::{ActiveConnectionSelector, Nm, ProfileSelector};
 use crate::output::{
-    print_access_points_json, print_api_message, print_connect_failure, print_connect_result,
-    print_connectivity, print_disconnect_result, print_saved_wifi_connections_json,
-    print_wifi_share_payload, print_wifi_status,
+    print_access_points_json, print_api_data, print_api_message, print_connect_failure,
+    print_connect_result, print_connectivity, print_disconnect_result,
+    print_saved_wifi_connections_json, print_wifi_share_payload, print_wifi_status,
 };
+use crate::protocol::Method;
 use serde::Deserialize;
 
 pub(crate) fn connect_ssid(nm: &Nm, options: ConnectOptions) -> Result<()> {
@@ -192,6 +196,62 @@ pub(crate) fn disconnect(nm: &Nm) -> Result<()> {
 
 pub(crate) fn print_connectivity_state(nm: &Nm) -> Result<()> {
     print_connectivity(&Application::new(nm).connectivity()?)
+}
+
+pub(crate) fn print_network_state(nm: &Nm) -> Result<()> {
+    print_method_data(Method::NetworkState, &Application::new(nm).network_state()?)
+}
+
+pub(crate) fn print_network_devices(nm: &Nm) -> Result<()> {
+    print_method_data(
+        Method::NetworkDevices,
+        &Application::new(nm).network_devices()?,
+    )
+}
+
+pub(crate) fn print_network_connections(nm: &Nm) -> Result<()> {
+    print_method_data(
+        Method::NetworkConnections,
+        &Application::new(nm).network_connections()?,
+    )
+}
+
+pub(crate) fn print_network_inventory(nm: &Nm) -> Result<()> {
+    print_method_data(
+        Method::NetworkInventory,
+        &Application::new(nm).network_inventory()?,
+    )
+}
+
+pub(crate) fn activate_network_profile(nm: &Nm, options: &ActivateOptions) -> Result<()> {
+    let selector = ProfileSelector {
+        uuid: options.uuid.clone(),
+        path: options.path.as_ref().map(|path| path.as_str().to_string()),
+        device: options.device.clone(),
+    };
+    print_method_data(
+        Method::NetworkActivateProfile,
+        &Application::new(nm).activate_network_profile(&selector)?,
+    )
+}
+
+pub(crate) fn deactivate_network_connection(nm: &Nm, options: &DeactivateOptions) -> Result<()> {
+    let selector = ActiveConnectionSelector {
+        path: options.path.as_ref().map(|path| path.as_str().to_string()),
+        uuid: options.uuid.clone(),
+    };
+    print_method_data(
+        Method::NetworkDeactivate,
+        &Application::new(nm).deactivate_network_connection(&selector)?,
+    )
+}
+
+fn print_method_data<T: serde::Serialize + ?Sized>(method: Method, value: &T) -> Result<()> {
+    print_api_data(
+        method.spec().response_key,
+        value,
+        "serialize network API response",
+    )
 }
 
 pub(crate) fn print_networks(nm: &Nm, options: ListOptions) -> Result<()> {

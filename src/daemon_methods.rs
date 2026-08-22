@@ -11,6 +11,7 @@ use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     NmObjectPath, WifiConnectTarget, WifiProfileUpdate, connect_target_for_network_key,
 };
+use crate::nm::{ActiveConnectionSelector, ProfileSelector};
 use crate::output::api_data_value;
 use crate::protocol::Method;
 
@@ -51,6 +52,106 @@ pub(crate) fn call_connectivity(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
     call_application(runtime, Method::NetworkConnectivity, |application| {
         application.connectivity()
     })
+}
+
+pub(crate) fn call_network_inventory(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
+    call_application(runtime, Method::NetworkInventory, |application| {
+        application.network_inventory()
+    })
+}
+
+pub(crate) fn call_network_devices(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
+    call_application(runtime, Method::NetworkDevices, |application| {
+        application.network_devices()
+    })
+}
+
+pub(crate) fn call_network_connections(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
+    call_application(runtime, Method::NetworkConnections, |application| {
+        application.network_connections()
+    })
+}
+
+pub(crate) fn call_network_state(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
+    call_application(runtime, Method::NetworkState, |application| {
+        application.network_state()
+    })
+}
+
+pub(crate) fn call_network_activate_profile(
+    runtime: &Arc<DaemonRuntime>,
+    params: ActivateProfileParams,
+) -> Result<Value> {
+    let selector = params.into_selector()?;
+    call_application(
+        runtime,
+        Method::NetworkActivateProfile,
+        move |application| application.activate_network_profile(&selector),
+    )
+}
+
+pub(crate) fn call_network_deactivate(
+    runtime: &Arc<DaemonRuntime>,
+    params: DeactivateParams,
+) -> Result<Value> {
+    let selector = params.into_selector()?;
+    call_application(runtime, Method::NetworkDeactivate, move |application| {
+        application.deactivate_network_connection(&selector)
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ActivateProfileParams {
+    uuid: Option<String>,
+    path: Option<String>,
+    device: Option<String>,
+}
+
+impl ActivateProfileParams {
+    fn into_selector(self) -> Result<ProfileSelector> {
+        let selector = ProfileSelector {
+            uuid: nonempty(self.uuid),
+            path: nonempty(self.path),
+            device: nonempty(self.device),
+        };
+        if selector.uuid.is_none() && selector.path.is_none() {
+            return Err(DomainError::validation(
+                ErrorOperation::Connect,
+                "network.activateProfile requires uuid or path",
+            )
+            .into());
+        }
+        Ok(selector)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct DeactivateParams {
+    path: Option<String>,
+    uuid: Option<String>,
+}
+
+impl DeactivateParams {
+    fn into_selector(self) -> Result<ActiveConnectionSelector> {
+        let selector = ActiveConnectionSelector {
+            path: nonempty(self.path),
+            uuid: nonempty(self.uuid),
+        };
+        if selector.path.is_none() && selector.uuid.is_none() {
+            return Err(DomainError::validation(
+                ErrorOperation::Disconnect,
+                "network.deactivate requires path or uuid",
+            )
+            .into());
+        }
+        Ok(selector)
+    }
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 pub(crate) fn call_networks(runtime: &Arc<DaemonRuntime>, params: NetworksParams) -> Result<Value> {

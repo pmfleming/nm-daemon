@@ -17,6 +17,12 @@ pub(crate) enum Method {
     RadioSetWwanEnabled,
     RadioSetAirplaneMode,
     NetworkConnectivity,
+    NetworkInventory,
+    NetworkDevices,
+    NetworkConnections,
+    NetworkState,
+    NetworkActivateProfile,
+    NetworkDeactivate,
     WifiNetworks,
     WifiBandStatus,
     WifiBandSet,
@@ -34,6 +40,8 @@ pub(crate) enum Method {
 pub(crate) enum ParameterKind {
     Empty,
     Enabled,
+    ActivateProfile,
+    Deactivate,
     Networks,
     BandStatus,
     BandSet,
@@ -56,7 +64,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static METHOD_REGISTRY: &[MethodSpec; 15] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 21] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -106,6 +114,66 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 15] = &[
         stream: Some(Stream::NetworkConnectivity),
         operation: ErrorOperation::Connectivity,
         description: "NetworkManager connectivity and captive-portal state.",
+    },
+    MethodSpec {
+        method: Method::NetworkInventory,
+        name: "network.inventory",
+        parameters: ParameterKind::Empty,
+        params_example: "{}",
+        response_key: "inventory",
+        stream: Some(Stream::NetworkInventory),
+        operation: ErrorOperation::Inventory,
+        description: "Devices, saved profiles, and active connections across NetworkManager connection types.",
+    },
+    MethodSpec {
+        method: Method::NetworkDevices,
+        name: "network.devices",
+        parameters: ParameterKind::Empty,
+        params_example: "{}",
+        response_key: "devices",
+        stream: Some(Stream::NetworkInventory),
+        operation: ErrorOperation::Inventory,
+        description: "All NetworkManager devices with type, state, reason, and availability details.",
+    },
+    MethodSpec {
+        method: Method::NetworkConnections,
+        name: "network.connections",
+        parameters: ParameterKind::Empty,
+        params_example: "{}",
+        response_key: "connections",
+        stream: Some(Stream::NetworkInventory),
+        operation: ErrorOperation::Inventory,
+        description: "All saved NetworkManager profiles of every connection type with availability and activation state.",
+    },
+    MethodSpec {
+        method: Method::NetworkState,
+        name: "network.status",
+        parameters: ParameterKind::Empty,
+        params_example: "{}",
+        response_key: "network",
+        stream: Some(Stream::NetworkInventory),
+        operation: ErrorOperation::Inventory,
+        description: "Overall NetworkManager state, radios, connectivity, and primary/activating connection identity.",
+    },
+    MethodSpec {
+        method: Method::NetworkActivateProfile,
+        name: "network.activateProfile",
+        parameters: ParameterKind::ActivateProfile,
+        params_example: r#"{"uuid":"0f6c...","path":null,"device":null}"#,
+        response_key: "result",
+        stream: Some(Stream::NetworkInventory),
+        operation: ErrorOperation::Connect,
+        description: "Activates one saved profile of any connection type on a compatible device.",
+    },
+    MethodSpec {
+        method: Method::NetworkDeactivate,
+        name: "network.deactivate",
+        parameters: ParameterKind::Deactivate,
+        params_example: r#"{"path":"/org/freedesktop/NetworkManager/ActiveConnection/1","uuid":null}"#,
+        response_key: "result",
+        stream: Some(Stream::NetworkInventory),
+        operation: ErrorOperation::Disconnect,
+        description: "Deactivates one active connection by active-connection path or profile UUID.",
     },
     MethodSpec {
         method: Method::WifiNetworks,
@@ -246,6 +314,7 @@ impl Serialize for Method {
 pub(crate) enum Stream {
     WifiStatus,
     NetworkConnectivity,
+    NetworkInventory,
     WifiNetworks,
     WifiScan,
     WifiConnect,
@@ -275,7 +344,7 @@ pub(crate) struct StreamSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static STREAM_REGISTRY: &[StreamSpec; 9] = &[
+pub(crate) static STREAM_REGISTRY: &[StreamSpec; 10] = &[
     StreamSpec {
         stream: Stream::WifiStatus,
         name: "wifi.status",
@@ -293,6 +362,15 @@ pub(crate) static STREAM_REGISTRY: &[StreamSpec; 9] = &[
         delivery: StreamDelivery::Continuous,
         events: &["subscribed", "changed"],
         description: "Connectivity and portal state, emitted immediately and on change.",
+    },
+    StreamSpec {
+        stream: Stream::NetworkInventory,
+        name: "network.inventory",
+        subscribable: true,
+        default: false,
+        delivery: StreamDelivery::Continuous,
+        events: &["subscribed", "changed"],
+        description: "Cross-type device, profile, and active-connection inventory emitted on local NetworkManager changes.",
     },
     StreamSpec {
         stream: Stream::WifiNetworks,

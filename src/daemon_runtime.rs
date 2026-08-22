@@ -475,6 +475,7 @@ enum Control {
 pub(crate) struct SharedPayloads {
     pub(crate) status: Option<Value>,
     pub(crate) connectivity: Option<Value>,
+    pub(crate) inventory: Option<Value>,
     pub(crate) networks: Option<Value>,
 }
 
@@ -676,46 +677,65 @@ fn request_shared_refresh(
     if !refresh.invalidate() || subscriptions.is_empty() {
         return;
     }
-    let (need_status, need_connectivity, need_networks) = required_shared_payloads(subscriptions);
-    if !need_status && !need_connectivity && !need_networks {
+    let needs = required_shared_payloads(subscriptions);
+    if !needs.any() {
         return;
     }
-    submit_shared_refresh(
-        runtime,
-        refresh,
-        need_status,
-        need_connectivity,
-        need_networks,
-    );
+    submit_shared_refresh(runtime, refresh, needs);
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SharedPayloadDemand {
+    status: bool,
+    connectivity: bool,
+    inventory: bool,
+    networks: bool,
+}
+
+impl SharedPayloadDemand {
+    fn any(self) -> bool {
+        self.status || self.connectivity || self.inventory || self.networks
+    }
 }
 
 fn required_shared_payloads(
     subscriptions: &HashMap<String, SubscriptionState>,
-) -> (bool, bool, bool) {
+) -> SharedPayloadDemand {
     let watches = |stream| {
         subscriptions
             .values()
             .any(|subscription| subscription.watches(stream))
     };
-    (
-        watches(Stream::WifiStatus),
-        watches(Stream::NetworkConnectivity),
-        watches(Stream::WifiNetworks),
-    )
+    SharedPayloadDemand {
+        status: watches(Stream::WifiStatus),
+        connectivity: watches(Stream::NetworkConnectivity),
+        inventory: watches(Stream::NetworkInventory),
+        networks: watches(Stream::WifiNetworks),
+    }
 }
 
 fn submit_shared_refresh(
     runtime: &Arc<DaemonRuntime>,
     refresh: &mut RefreshGate,
-    need_status: bool,
-    need_connectivity: bool,
-    need_networks: bool,
+    needs: SharedPayloadDemand,
 ) {
+    let SharedPayloadDemand {
+        status: need_status,
+        connectivity: need_connectivity,
+        inventory: need_inventory,
+        networks: need_networks,
+    } = needs;
     let control = runtime.control.clone();
     match runtime.submit_fast(
         ErrorOperation::Status,
         Box::new(move |nm| {
-            let payloads = refresh_payloads(nm, need_status, need_connectivity, need_networks);
+            let payloads = refresh_payloads(
+                nm,
+                need_status,
+                need_connectivity,
+                need_inventory,
+                need_networks,
+            );
             let _ = control.send(Control::Refreshed(payloads));
         }),
     ) {

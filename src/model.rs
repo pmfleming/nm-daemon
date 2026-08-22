@@ -334,6 +334,108 @@ impl MeteredStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct NetworkInventory {
+    pub(crate) networking_enabled: bool,
+    pub(crate) primary_connection: Option<String>,
+    pub(crate) activating_connection: Option<String>,
+    pub(crate) devices: Vec<NetworkDeviceSummary>,
+    pub(crate) connections: Vec<NetworkConnectionSummary>,
+    pub(crate) active_connections: Vec<ActiveConnectionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NetworkDeviceSummary {
+    pub(crate) path: String,
+    pub(crate) interface: String,
+    pub(crate) ip_interface: Option<String>,
+    pub(crate) device_type: u32,
+    pub(crate) type_name: &'static str,
+    pub(crate) state: u32,
+    pub(crate) state_name: &'static str,
+    pub(crate) state_reason: u32,
+    pub(crate) managed: bool,
+    pub(crate) autoconnect: bool,
+    pub(crate) driver: Option<String>,
+    pub(crate) firmware_version: Option<String>,
+    pub(crate) active_connection: Option<String>,
+    pub(crate) available_connections: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NetworkConnectionSummary {
+    pub(crate) path: String,
+    pub(crate) id: String,
+    pub(crate) uuid: String,
+    pub(crate) connection_type: String,
+    pub(crate) type_name: &'static str,
+    pub(crate) autoconnect: bool,
+    pub(crate) autoconnect_priority: i32,
+    pub(crate) timestamp_ms: Option<u64>,
+    pub(crate) interface_name: Option<String>,
+    pub(crate) permissions: Vec<String>,
+    pub(crate) available_devices: Vec<String>,
+    pub(crate) active_connection: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ActiveConnectionSummary {
+    pub(crate) path: String,
+    pub(crate) id: String,
+    pub(crate) uuid: String,
+    pub(crate) connection_type: String,
+    pub(crate) state: u32,
+    pub(crate) state_name: &'static str,
+    pub(crate) state_flags: u32,
+    pub(crate) vpn: bool,
+    pub(crate) default4: bool,
+    pub(crate) default6: bool,
+    pub(crate) profile_path: Option<String>,
+    pub(crate) specific_object: Option<String>,
+    pub(crate) devices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NetworkStateSummary {
+    pub(crate) state: u32,
+    pub(crate) state_name: &'static str,
+    pub(crate) networking_enabled: bool,
+    pub(crate) radios: RadioStatus,
+    pub(crate) connectivity: ConnectivityStatus,
+    pub(crate) connectivity_check_uri: Option<String>,
+    pub(crate) connectivity_check_enabled: bool,
+    pub(crate) primary_connection: Option<ActiveConnectionSummary>,
+    pub(crate) primary_connection_type: Option<String>,
+    pub(crate) activating_connection: Option<ActiveConnectionSummary>,
+    pub(crate) default4: Option<String>,
+    pub(crate) default6: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProfileActivationResult {
+    pub(crate) status: &'static str,
+    pub(crate) profile_path: String,
+    pub(crate) id: String,
+    pub(crate) uuid: String,
+    pub(crate) connection_type: String,
+    pub(crate) type_name: &'static str,
+    pub(crate) active_connection: Option<String>,
+    pub(crate) device: Option<String>,
+    pub(crate) state: u32,
+    pub(crate) state_name: &'static str,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NetworkDeactivateResult {
+    pub(crate) status: &'static str,
+    pub(crate) path: String,
+    pub(crate) id: String,
+    pub(crate) uuid: String,
+    pub(crate) connection_type: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ConnectivityStatus {
     pub(crate) code: u32,
     pub(crate) state: &'static str,

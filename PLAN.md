@@ -76,6 +76,12 @@ nm-daemon wifi profile send-hostname <path> true|false
 nm-daemon wifi status
 nm-daemon wifi disconnect
 nm-daemon network connectivity
+nm-daemon network status
+nm-daemon network devices
+nm-daemon network connections
+nm-daemon network inventory
+nm-daemon network activate --uuid <uuid> | --path <path> [--device <iface-or-path>]
+nm-daemon network deactivate --path <active-path> | --uuid <uuid>
 ```
 
 Debug and unstable surfaces:
@@ -206,6 +212,8 @@ Implemented in this repository:
 38. Added typed connect phases and exact target identity to every operation event, including state-machine progress for active checks, saved-profile activation, profile creation, rescanning, and verification.
 39. Added snapshot freshness metadata to `wifi.networks` responses and `wifi.scan snapshot` events, preserving scan timestamps across status-only cache mutations and exposing source, age, stale/scanning state, and refresh intent.
 40. Added active-profile Wi-Fi band status and event-driven transactional band selection for automatic/2.4/5/6 GHz operation, with availability validation, NetworkManager checkpoints, reactivation verification, owner-scoped cancellation, and profile/connection rollback.
+
+41. Added a cross-type NetworkManager inventory: `network.inventory`, `network.devices`, `network.connections`, `network.status`, `network.activateProfile`, and `network.deactivate`, plus an optional `network.inventory` change stream computed only while subscribed. Devices, saved profiles of every connection type, and active connections carry stable typed names beside NetworkManager's numeric types, states, and reasons.
 
 ## Remaining open items
 
