@@ -45,7 +45,7 @@ signal Event(s stream, s event_json)
 | `radio.setWwanEnabled` | `{"enabled":true}` (`Enabled`) | `result` | `—` | Enables or disables NetworkManager mobile-data radios. |
 | `radio.setAirplaneMode` | `{"enabled":true}` (`Enabled`) | `result` | `—` | Disables or restores NetworkManager Wi-Fi and mobile-data radios. |
 | `network.connectivity` | `{}` (`Empty`) | `connectivity` | `network.connectivity` | NetworkManager connectivity and captive-portal state. |
-| `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `—` | Visible networks enriched with saved-profile, capability, and snapshot freshness details. |
+| `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `wifi.networks` | Visible networks enriched with saved-profile, capability, and snapshot freshness details; optionally emits local change deltas. |
 | `wifi.band.status` | `{"path":"/org/freedesktop/NetworkManager/Settings/1"}` (`BandStatus`) | `band` | `—` | Reports the active, selected, and available bands for an active Wi-Fi profile. |
 | `wifi.band.set` | `{"path":"/org/freedesktop/NetworkManager/Settings/1","band":"5"}` (`BandSet`) | `result` | `wifi.band` | Transactionally changes an active Wi-Fi profile band and returns a request id. |
 | `wifi.saved` | `{}` (`Empty`) | `profiles` | `—` | All saved Wi-Fi NetworkManager profiles. |
@@ -62,6 +62,7 @@ signal Event(s stream, s event_json)
 | --- | --- | --- | --- | --- | --- |
 | `wifi.status` | true | true | `Continuous` | `subscribed, changed` | Current Wi-Fi status, emitted immediately and whenever it changes. |
 | `network.connectivity` | true | true | `Continuous` | `subscribed, changed` | Connectivity and portal state, emitted immediately and on change. |
+| `wifi.networks` | true | false | `Continuous` | `subscribed, changed` | Added, removed, and changed visible networks emitted from local NetworkManager state without requesting scans. |
 | `wifi.scan` | true | true | `Operation` | `subscribed, status, warning, snapshot, complete, cancelled, failed` | Events associated with a wifi.scan request id. |
 | `wifi.connect` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a wifi.connectTarget request id. |
 | `wifi.band` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a transactional wifi.band.set request id. |
@@ -129,11 +130,31 @@ Events:
 
 Each response also includes `data.snapshot` with `source` (`cache`, `network-manager`, or `scan`), `updated_at_ms`, `age_ms`, `stale`, `scanning`, and `refresh_requested`. Scan `snapshot` events carry the same metadata beside their `networks` array, allowing clients to distinguish an immediate cached render from a fresh scan without inferring freshness from request timing.
 
+Clients can explicitly subscribe to the optional `wifi.networks` stream for local access-point changes. Subscribing reads NetworkManager's current access-point list but never requests a scan or cache refresh. Its first `changed` event sets `initial:true` and reports every visible grouped network in `added`; clients should treat that event as an authoritative replacement. Later events set `initial:false` and contain complete `NetworkEntry` objects in `added`, `removed`, and `changed`, keyed by each entry's stable `key`. Every event also carries the current `snapshot` metadata unchanged. NetworkManager notifications that only advance snapshot or derived last-seen age metadata do not emit an event.
+
+```json
+{
+  "subscription_id": "...",
+  "initial": false,
+  "added": [],
+  "removed": [],
+  "changed": [{ "key": "ssid-hex:...|security:personal|ifname:..." }],
+  "snapshot": {
+    "source": "network-manager",
+    "updated_at_ms": 1762000000000,
+    "age_ms": 0,
+    "stale": false,
+    "scanning": false,
+    "refresh_requested": false
+  }
+}
+```
+
 Each grouped network includes a typed `security_class`: `open`, `enhanced-open`, `legacy`, `personal`, `enterprise`, or `unknown`. This presentation-safe class is derived from NetworkManager AP flags rather than display labels. Captive portal is a live connectivity state, not an advertised AP security type; frontends should override the active network's security icon while `network.connectivity.state` is `portal`.
 
-### `wifi.status` and `network.connectivity`
+### Continuous local-state streams
 
-Continuous status/connectivity subscriptions emit a `changed` event immediately, then whenever the serialized status/connectivity payload changes. One daemon event loop listens to the shared NetworkManager connection, coalesces change notifications, computes each needed payload once, and fans changes out to subscribers. Cancel the subscription id returned by `Subscribe` to remove that subscription; there is no per-subscription polling worker.
+Continuous status/connectivity subscriptions emit a `changed` event immediately, then whenever the serialized status/connectivity payload changes. The optional `wifi.networks` subscription follows the delta behavior above. One daemon event loop listens to the shared NetworkManager connection, coalesces change notifications, computes each needed payload once, and fans changes out to subscribers. Cancel the subscription id returned by `Subscribe` to remove that subscription; there is no per-subscription polling worker.
 
 ### `wifi.connect`
 

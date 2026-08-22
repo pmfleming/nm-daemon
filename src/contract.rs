@@ -489,6 +489,31 @@ fn continuous_stream_events() -> Vec<Value> {
             ),
         ],
     ));
+    events.extend(stream_events(
+        Stream::WifiNetworks,
+        "networks-contract",
+        vec![
+            subscribed_event("networks-subscription"),
+            (
+                "changed",
+                json!({
+                    "subscription_id": "networks-subscription",
+                    "initial": true,
+                    "added": [canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_PSK, false, false)],
+                    "removed": [],
+                    "changed": [],
+                    "snapshot": NetworkSnapshotMetadata {
+                        source: NetworkSnapshotSource::NetworkManager,
+                        updated_at_ms: 1_762_000_000_000,
+                        age_ms: 0,
+                        stale: false,
+                        scanning: false,
+                        refresh_requested: false,
+                    },
+                }),
+            ),
+        ],
+    ));
     events
 }
 
@@ -809,6 +834,14 @@ mod tests {
         assert_eq!(
             value["network-connectivity.full"]["connectivity"]["state"],
             "full"
+        );
+        assert_eq!(
+            value["continuous.streams"]["events"][4]["stream"],
+            "wifi.networks"
+        );
+        assert_eq!(
+            value["continuous.streams"]["events"][5]["snapshot"]["refresh_requested"],
+            false
         );
         assert_eq!(
             value["wifi-disconnect.success"]["result"]["status"],

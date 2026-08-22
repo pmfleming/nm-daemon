@@ -475,6 +475,7 @@ enum Control {
 pub(crate) struct SharedPayloads {
     pub(crate) status: Option<Value>,
     pub(crate) connectivity: Option<Value>,
+    pub(crate) networks: Option<Value>,
 }
 
 fn pending_task_ids(tasks: &HashMap<String, TaskHandle>, request_ids: &[String]) -> Vec<String> {
@@ -675,14 +676,22 @@ fn request_shared_refresh(
     if !refresh.invalidate() || subscriptions.is_empty() {
         return;
     }
-    let (need_status, need_connectivity) = required_shared_payloads(subscriptions);
-    if !need_status && !need_connectivity {
+    let (need_status, need_connectivity, need_networks) = required_shared_payloads(subscriptions);
+    if !need_status && !need_connectivity && !need_networks {
         return;
     }
-    submit_shared_refresh(runtime, refresh, need_status, need_connectivity);
+    submit_shared_refresh(
+        runtime,
+        refresh,
+        need_status,
+        need_connectivity,
+        need_networks,
+    );
 }
 
-fn required_shared_payloads(subscriptions: &HashMap<String, SubscriptionState>) -> (bool, bool) {
+fn required_shared_payloads(
+    subscriptions: &HashMap<String, SubscriptionState>,
+) -> (bool, bool, bool) {
     let watches = |stream| {
         subscriptions
             .values()
@@ -691,6 +700,7 @@ fn required_shared_payloads(subscriptions: &HashMap<String, SubscriptionState>) 
     (
         watches(Stream::WifiStatus),
         watches(Stream::NetworkConnectivity),
+        watches(Stream::WifiNetworks),
     )
 }
 
@@ -699,12 +709,13 @@ fn submit_shared_refresh(
     refresh: &mut RefreshGate,
     need_status: bool,
     need_connectivity: bool,
+    need_networks: bool,
 ) {
     let control = runtime.control.clone();
     match runtime.submit_fast(
         ErrorOperation::Status,
         Box::new(move |nm| {
-            let payloads = refresh_payloads(nm, need_status, need_connectivity);
+            let payloads = refresh_payloads(nm, need_status, need_connectivity, need_networks);
             let _ = control.send(Control::Refreshed(payloads));
         }),
     ) {

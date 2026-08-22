@@ -113,9 +113,9 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 15] = &[
         parameters: ParameterKind::Networks,
         params_example: r#"{"cached":false,"refresh_cache":false,"refresh_timeout":10}"#,
         response_key: "networks",
-        stream: None,
+        stream: Some(Stream::WifiNetworks),
         operation: ErrorOperation::Networks,
-        description: "Visible networks enriched with saved-profile, capability, and snapshot freshness details.",
+        description: "Visible networks enriched with saved-profile, capability, and snapshot freshness details; optionally emits local change deltas.",
     },
     MethodSpec {
         method: Method::WifiBandStatus,
@@ -246,6 +246,7 @@ impl Serialize for Method {
 pub(crate) enum Stream {
     WifiStatus,
     NetworkConnectivity,
+    WifiNetworks,
     WifiScan,
     WifiConnect,
     WifiBand,
@@ -274,7 +275,7 @@ pub(crate) struct StreamSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static STREAM_REGISTRY: &[StreamSpec; 8] = &[
+pub(crate) static STREAM_REGISTRY: &[StreamSpec; 9] = &[
     StreamSpec {
         stream: Stream::WifiStatus,
         name: "wifi.status",
@@ -292,6 +293,15 @@ pub(crate) static STREAM_REGISTRY: &[StreamSpec; 8] = &[
         delivery: StreamDelivery::Continuous,
         events: &["subscribed", "changed"],
         description: "Connectivity and portal state, emitted immediately and on change.",
+    },
+    StreamSpec {
+        stream: Stream::WifiNetworks,
+        name: "wifi.networks",
+        subscribable: true,
+        default: false,
+        delivery: StreamDelivery::Continuous,
+        events: &["subscribed", "changed"],
+        description: "Added, removed, and changed visible networks emitted from local NetworkManager state without requesting scans.",
     },
     StreamSpec {
         stream: Stream::WifiScan,

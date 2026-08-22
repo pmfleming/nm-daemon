@@ -276,7 +276,7 @@ fn forward_event(
     let request_id = event.get("request_id").and_then(Value::as_str);
     let correlated = matches!(
         stream.as_str(),
-        "wifi.status" | "network.connectivity" | "wifi.scan" | "wifi.connect"
+        "wifi.status" | "network.connectivity" | "wifi.networks" | "wifi.scan" | "wifi.connect"
     ) || event.get("event").and_then(Value::as_str) == Some("subscribed");
     if correlated && let Some(request_id) = request_id {
         let mut state = recover_lock(state, "frontend client state");
