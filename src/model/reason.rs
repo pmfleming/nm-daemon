@@ -129,9 +129,87 @@ pub(crate) fn device_state_reason(code: u32) -> TypedReason {
     }
 }
 
+pub(crate) fn active_connection_state_reason(code: u32) -> TypedReason {
+    use ReasonCategory as C;
+    let (name, category) = match code {
+        0 => ("unknown", C::Unknown),
+        1 => ("none", C::None),
+        2 => ("user-disconnected", C::UserRequested),
+        3 => ("device-disconnected", C::Dependency),
+        4 => ("service-stopped", C::Service),
+        5 => ("ip-config-invalid", C::AddressAssignment),
+        6 => ("connect-timeout", C::Service),
+        7 => ("service-start-timeout", C::Service),
+        8 => ("service-start-failed", C::Service),
+        9 => ("no-secrets", C::Authentication),
+        10 => ("login-failed", C::Authentication),
+        11 => ("connection-removed", C::Lifecycle),
+        12 => ("dependency-failed", C::Dependency),
+        13 => ("device-realize-failed", C::Hardware),
+        14 => ("device-removed", C::Lifecycle),
+        _ => ("unknown", C::Unknown),
+    };
+    TypedReason {
+        code,
+        name,
+        category,
+    }
+}
+
+pub(crate) fn vpn_state_reason(code: u32) -> TypedReason {
+    use ReasonCategory as C;
+    let (name, category) = match code {
+        0 => ("unknown", C::Unknown),
+        1 => ("none", C::None),
+        2 => ("user-disconnected", C::UserRequested),
+        3 => ("device-disconnected", C::Dependency),
+        4 => ("service-stopped", C::Service),
+        5 => ("ip-config-invalid", C::AddressAssignment),
+        6 => ("connect-timeout", C::Service),
+        7 => ("service-start-timeout", C::Service),
+        8 => ("service-start-failed", C::Service),
+        9 => ("no-secrets", C::Authentication),
+        10 => ("login-failed", C::Authentication),
+        11 => ("connection-removed", C::Lifecycle),
+        _ => ("unknown", C::Unknown),
+    };
+    TypedReason {
+        code,
+        name,
+        category,
+    }
+}
+
+pub(crate) fn vpn_state_name(code: u32) -> &'static str {
+    match code {
+        0 => "unknown",
+        1 => "prepare",
+        2 => "need-auth",
+        3 => "connect",
+        4 => "ip-config-get",
+        5 => "activated",
+        6 => "failed",
+        7 => "disconnected",
+        _ => "unknown",
+    }
+}
+
+impl TypedReason {
+    /// True when the transition was expected rather than a failure.
+    pub(crate) fn expected(self) -> bool {
+        matches!(
+            self.category,
+            ReasonCategory::None | ReasonCategory::UserRequested
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ReasonCategory, device_state_reason};
+    use super::{
+        ReasonCategory, active_connection_state_reason, device_state_reason, vpn_state_name,
+        vpn_state_reason,
+    };
 
     #[test]
     fn known_reason_codes_carry_stable_names_and_categories() {
@@ -146,6 +224,14 @@ mod tests {
             ReasonCategory::UserRequested
         );
         assert_eq!(device_state_reason(40).name, "carrier");
+        assert!(device_state_reason(39).expected());
+        assert!(!device_state_reason(7).expected());
+        assert_eq!(
+            active_connection_state_reason(10).category,
+            ReasonCategory::Authentication
+        );
+        assert_eq!(vpn_state_reason(2).name, "user-disconnected");
+        assert_eq!(vpn_state_name(5), "activated");
     }
 
     #[test]

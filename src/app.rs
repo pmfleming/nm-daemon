@@ -2,7 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::actions;
-use crate::cli::{Cli, Command, DebugCommand, HotspotCommand, NetworkCommand, WifiCommand};
+use crate::cli::{
+    Cli, Command, DebugCommand, HotspotCommand, NetworkCommand, VpnCommand, WifiCommand,
+};
 use crate::logging;
 use crate::nm::Nm;
 
@@ -48,6 +50,7 @@ fn run_command(command: Command) -> Result<()> {
         Command::Wifi { command } => run_wifi_command(command),
         Command::Network { command } => run_network_command(command),
         Command::Hotspot { command } => run_hotspot_command(command),
+        Command::Vpn { command } => run_vpn_command(command),
         Command::Debug { command } => run_debug_command(command),
     }
 }
@@ -65,6 +68,15 @@ fn run_network_command(command: NetworkCommand) -> Result<()> {
         NetworkCommand::Deactivate(options) => {
             with_nm(|nm| actions::deactivate_network_connection(nm, &options))
         }
+    }
+}
+
+fn run_vpn_command(command: VpnCommand) -> Result<()> {
+    match command {
+        VpnCommand::List => with_nm(actions::print_vpn_profiles),
+        VpnCommand::Status => with_nm(actions::print_vpn_status),
+        VpnCommand::Connect(options) => with_nm(|nm| actions::connect_vpn(nm, &options)),
+        VpnCommand::Disconnect(options) => with_nm(|nm| actions::disconnect_vpn(nm, &options)),
     }
 }
 

@@ -56,6 +56,10 @@ signal Event(s stream, s event_json)
 | `hotspot.status` | `{}` (`Empty`) | `hotspot` | `—` | Reports the running Wi-Fi hotspot, if any. |
 | `hotspot.start` | `{"ssid":null,"passphrase":null,"security":"wpa-psk","band":"auto","channel":null,"hidden":false,"device":null}` (`HotspotStart`) | `result` | `hotspot` | Starts a volatile Wi-Fi hotspot and returns a cancellable request id. |
 | `hotspot.stop` | `{}` (`Empty`) | `result` | `—` | Stops the running Wi-Fi hotspot and removes its volatile profile. |
+| `vpn.list` | `{}` (`Empty`) | `vpns` | `—` | Saved VPN and WireGuard profiles with plugin, secret, and activation details. |
+| `vpn.status` | `{}` (`Empty`) | `vpn` | `—` | Active VPN and WireGuard connections with plugin state, banner, and duration. |
+| `vpn.connect` | `{"uuid":"0a1c...","path":null,"timeout":45}` (`VpnConnect`) | `result` | `vpn` | Activates a saved VPN or WireGuard profile and returns a cancellable request id. |
+| `vpn.disconnect` | `{"uuid":null,"path":null}` (`VpnSelect`) | `result` | `—` | Deactivates one active VPN or WireGuard connection, or the only active one. |
 | `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `wifi.networks` | Visible networks enriched with saved-profile, capability, and snapshot freshness details; optionally emits local change deltas. |
 | `wifi.band.status` | `{"path":"/org/freedesktop/NetworkManager/Settings/1"}` (`BandStatus`) | `band` | `—` | Reports the active, selected, and available bands for an active Wi-Fi profile. |
 | `wifi.band.set` | `{"path":"/org/freedesktop/NetworkManager/Settings/1","band":"5"}` (`BandSet`) | `result` | `wifi.band` | Transactionally changes an active Wi-Fi profile band and returns a request id. |
@@ -76,6 +80,7 @@ signal Event(s stream, s event_json)
 | `network.inventory` | true | false | `Continuous` | `subscribed, changed` | Cross-type device, profile, and active-connection inventory emitted on local NetworkManager changes. |
 | `network.statistics` | true | false | `Operation` | `subscribed, started, sample, failed, cancelled` | Device transfer counters and derived rates for a network.statistics.watch request id. |
 | `hotspot` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a hotspot.start request id. |
+| `vpn` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | VPN and WireGuard activation state and typed failure reasons for a vpn.connect request id. |
 | `wifi.networks` | true | false | `Continuous` | `subscribed, changed` | Added, removed, and changed visible networks emitted from local NetworkManager state without requesting scans. |
 | `wifi.scan` | true | true | `Operation` | `subscribed, status, warning, snapshot, complete, cancelled, failed` | Events associated with a wifi.scan request id. |
 | `wifi.connect` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a wifi.connectTarget request id. |
@@ -241,6 +246,27 @@ The daemon sets `Device.Statistics.RefreshRateMs` when the first watcher for a d
 
 Reason categories are `none`, `user-requested`, `authentication`, `configuration`, `hardware`, `carrier`, `address-assignment`, `service`, `dependency`, `lifecycle`, and `unknown`. Clients should branch on `category` and label with `name` instead of parsing NetworkManager's numbers directly.
 
+### `vpn`
+
+VPN and WireGuard profiles are ordinary NetworkManager connections, so `network.connections` lists them and `network.activateProfile` can start them. The `vpn.*` surface adds what a VPN UI actually needs on top of that:
+
+```text
+Call("vpn.list", "{}")     -> data.vpns
+Call("vpn.status", "{}")   -> data.vpn.active
+Call("vpn.connect", "{\"uuid\":\"...\",\"timeout\":45}") -> data.result.request_id
+Call("vpn.disconnect", "{\"uuid\":\"...\"}")              -> data.result
+```
+
+`vpn.list` covers both `vpn` and `wireguard` profiles. Each entry carries the plugin's `service_type` and a short `plugin` name derived from it — so a newly installed plugin needs no daemon change — plus `requires_secrets` and `secret_names`. Those two come from the profile's own `vpn.secrets`/`vpn.data` flags and WireGuard key flags rather than a fixed list, so a frontend can tell in advance whether activating will prompt, and label the prompt with the plugin's real secret names.
+
+`vpn.status` reports each active VPN with the plugin's `vpn_state`/`vpn_state_name`, the login `banner` when the plugin sends one, the typed `reason`, `activated_at_ms`/`duration_ms`, the `devices` it created, and `specific_object` — the underlying connection the VPN runs over. WireGuard has no VPN plugin, so `vpn_state` is null there and the active-connection state is authoritative.
+
+`vpn.connect` is event-driven and cancellable, emitting `started`, `progress`, `succeeded`, `failed`, and `cancelled` on the `vpn` stream. It waits for a terminal plugin state rather than returning as soon as activation is requested, so failures are reported with a typed error code — `secret-required` when the plugin needs secrets, `wrong-password` for a rejected login, `activation-failed` otherwise — alongside `details.reason`, `details.reason_category`, and `details.reason_code`. A disconnect the user requested is not reported as a failure. Cancelling rolls the activation back, including a VPN that connects in the race against cancellation.
+
+`vpn.disconnect` accepts `uuid` or `path`, or neither to disconnect the only active VPN, and returns `noop` when nothing matched.
+
+Importing OpenVPN and WireGuard configuration files is not implemented; create profiles with NetworkManager's own tooling for now.
+
 ### `hotspot`
 
 Hotspot lifecycle is a separate surface from Wi-Fi client connection:
@@ -349,7 +375,13 @@ When `save:true`, the provide response reports `persistence_status: "pending"`; 
 
 `wifi.secret.capabilities` reports `keyring.available`, `persistence_supported`, `default_save`, `prompt_handling: "unsupported"`, and `prompt_policy: "dismiss_and_report"`. Clients should use those fields instead of assuming that keyring availability means every operation can complete without user interaction.
 
-Secret key mapping uses NetworkManager's requested setting/hints. Supported keys include `802-11-wireless-security` keys `psk`, `wep-key0..3`, and `leap-password`; `802-1x` keys `password`, `private-key-password`, and `pin`; NetworkManager 1.60's `wifi-p2p.wps-pin`; and common `vpn`/`gsm`/`cdma` `password`/`pin` keys. The `wifi.secret requested` event includes `secret_keys` and `primary_secret_key` so Shelllist can label prompts accurately. Wi-Fi Direct discovery/activation is not otherwise exposed by nm-daemon.
+The agent registers with `RegisterWithCapabilities` and `NM_SECRET_AGENT_CAPABILITY_VPN_HINTS`, falling back to plain `Register` on NetworkManager builds that reject capabilities, so VPN plugins' own hints reach the frontend.
+
+Secret key mapping uses NetworkManager's requested setting/hints. For NetworkManager's own settings the keys are validated against the schema: `802-11-wireless-security` keys `psk`, `wep-key0..3`, and `leap-password`; `802-1x` keys `password`, `private-key-password`, and `pin`; NetworkManager 1.60's `wifi-p2p.wps-pin`; and `gsm`/`cdma` `password`/`pin`.
+
+`vpn` and `wireguard` are different: their secret names belong to the plugin, not to NetworkManager. OpenConnect alone asks for `cookie`, `gateway`, `gwcert`, `resolve`, and `xmlconfig` across a multi-stage web login, and OpenVPN can ask for an ssh-agent socket. Hints for those settings are therefore accepted as-is, with NetworkManager's `vpn.secrets.` prefix and WireGuard's `peers.<public-key>.` prefix stripped, so arbitrary plugin secrets work without a daemon change. VPN answers are written into the plugin's `vpn.secrets` string map, which is where NetworkManager reads them; WireGuard defaults to `private-key`.
+
+The `wifi.secret requested` event includes `secret_keys`, `primary_secret_key`, `plugin_defined_secret_names`, and `flag_details` — NetworkManager's `NM_SECRET_AGENT_GET_SECRETS_FLAG_*` decoded into `allow_interaction`, `request_new`, `user_requested`, `wps_pbc`, `only_system`, and `no_errors`. A frontend should use `request_new`/`user_requested` to tell a routine re-prompt from one the user asked for, and treat a secret as temporary when the profile's flags say it must not be saved. Wi-Fi Direct discovery/activation is not otherwise exposed by nm-daemon.
 
 Pending SecretAgent calls live in one registry. A registration guard removes entries on response, NetworkManager cancellation, timeout, or unwind, so a stale secondary lookup cannot outlive the request.
 
@@ -375,6 +407,10 @@ nm-daemon hotspot capabilities
 nm-daemon hotspot status
 nm-daemon hotspot start [--ssid <ssid>] [--passphrase-stdin] [--security wpa-psk|sae] [--band auto|2.4|5|6] [--channel <n>] [--hidden] [--device <iface-or-path>]
 nm-daemon hotspot stop
+nm-daemon vpn list
+nm-daemon vpn status
+nm-daemon vpn connect --uuid <uuid> | --path <path> [--timeout <seconds>]
+nm-daemon vpn disconnect [--uuid <uuid>] [--path <path>]
 nm-daemon wifi disconnect
 nm-daemon wifi profile delete|autoconnect|mac-randomization|share|send-hostname ...
 ```

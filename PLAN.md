@@ -86,6 +86,10 @@ nm-daemon hotspot capabilities
 nm-daemon hotspot status
 nm-daemon hotspot start [--ssid <ssid>] [--passphrase-stdin] [--security wpa-psk|sae] [--band auto|2.4|5|6] [--channel <n>] [--hidden] [--device <iface-or-path>]
 nm-daemon hotspot stop
+nm-daemon vpn list
+nm-daemon vpn status
+nm-daemon vpn connect --uuid <uuid> | --path <path> [--timeout <seconds>]
+nm-daemon vpn disconnect [--uuid <uuid>] [--path <path>]
 ```
 
 Debug and unstable surfaces:
@@ -228,8 +232,11 @@ Implemented in this repository:
 
 45. Added a per-device scan scheduler that coalesces explicit and background scan demand onto one in-flight scan, waits out NetworkManager's request interval measured from the more recent of `LastScan` or the daemon's own previous request, and retries transient rate-limit rejections inside the caller's deadline while preserving strict versus cached-fallback behavior.
 
+46. Added VPN and WireGuard activation before full editing: `vpn.list`, `vpn.status`, `vpn.connect`, `vpn.disconnect`, and a cancellable `vpn` stream carrying plugin state, banner, active duration, underlying connection, and typed failure reasons. SecretAgent registration now negotiates VPN-hint capabilities, accepts arbitrary plugin secret names for `vpn` and `wireguard` instead of only password/pin, strips NetworkManager's hint prefixes, writes VPN answers into the plugin's `vpn.secrets` map, handles WireGuard private/preshared keys, and reports NetworkManager's secret flags decoded for temporary-secret and re-prompt handling.
+
 ## Remaining open items
 
 1. Optionally add desktop UI integration for Secret Service prompts. The daemon now dismisses create/delete/unlock prompts and reports `prompt_unsupported` instead of claiming success.
-2. Run real Wi-Fi connect/cancel/SecretAgent/keyring integration tests on target machines.
-3. Continue reviewing complexity and test hotspots as new NetworkManager surfaces are added.
+2. Run real Wi-Fi connect/cancel/SecretAgent/keyring integration tests on target machines, including OpenConnect multi-stage login and WireGuard key prompts.
+3. Optionally import OpenVPN and WireGuard configuration files; profiles are currently created with NetworkManager's own tooling.
+4. Continue reviewing complexity and test hotspots as new NetworkManager surfaces are added.

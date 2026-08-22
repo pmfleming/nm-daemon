@@ -27,6 +27,7 @@ pub(crate) enum TaskKind {
     Band,
     Statistics,
     Hotspot,
+    Vpn,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -446,6 +447,7 @@ impl TaskKind {
             Self::Band => ErrorOperation::BandOperation,
             Self::Statistics => ErrorOperation::Statistics,
             Self::Hotspot => ErrorOperation::HotspotOperation,
+            Self::Vpn => ErrorOperation::VpnOperation,
         }
     }
 }

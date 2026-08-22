@@ -24,11 +24,13 @@ mod scan_schedule;
 mod settings;
 mod statistics;
 mod status;
+mod vpn;
 mod wifi_settings;
 
 pub(crate) use hotspot::HotspotRequest;
 pub(crate) use inventory::{ActiveConnectionSelector, ProfileSelector};
 pub(crate) use statistics::{StatisticsDevice, statistics_rates};
+pub(crate) use vpn::VpnSelector;
 
 pub(crate) const NM_DEST: &str = "org.freedesktop.NetworkManager";
 pub(crate) const WIFI_IFACE: &str = "org.freedesktop.NetworkManager.Device.Wireless";

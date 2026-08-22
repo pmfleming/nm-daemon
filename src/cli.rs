@@ -37,6 +37,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: NetworkCommand,
     },
+    /// VPN and WireGuard operations.
+    Vpn {
+        #[command(subcommand)]
+        command: VpnCommand,
+    },
     /// Wi-Fi hotspot lifecycle operations.
     Hotspot {
         #[command(subcommand)]
@@ -111,6 +116,41 @@ pub(crate) struct DeactivateOptions {
     /// Profile UUID of the active connection to deactivate.
     #[arg(long)]
     pub(crate) uuid: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum VpnCommand {
+    /// List saved VPN and WireGuard profiles.
+    List,
+    /// Show active VPN and WireGuard connections.
+    Status,
+    /// Activate a saved VPN or WireGuard profile.
+    Connect(VpnConnectOptions),
+    /// Deactivate an active VPN or WireGuard connection.
+    Disconnect(VpnSelectOptions),
+}
+
+#[derive(Clone, Args)]
+pub(crate) struct VpnConnectOptions {
+    /// Saved-profile UUID, from `nm-daemon vpn list`.
+    #[arg(long, required_unless_present = "path")]
+    pub(crate) uuid: Option<String>,
+    /// NetworkManager settings object path, from `nm-daemon vpn list`.
+    #[arg(long)]
+    pub(crate) path: Option<NmObjectPath>,
+    /// Seconds to wait for the VPN plugin to report a terminal state.
+    #[arg(long, default_value_t = 45)]
+    pub(crate) timeout: u64,
+}
+
+#[derive(Clone, Args)]
+pub(crate) struct VpnSelectOptions {
+    /// Active profile UUID. Omit to disconnect the only active VPN.
+    #[arg(long)]
+    pub(crate) uuid: Option<String>,
+    /// Active-connection or settings object path.
+    #[arg(long)]
+    pub(crate) path: Option<NmObjectPath>,
 }
 
 #[derive(Subcommand)]

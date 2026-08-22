@@ -24,6 +24,7 @@ mod daemon_scan;
 mod daemon_secret;
 mod daemon_statistics;
 mod daemon_status;
+mod daemon_vpn;
 mod deadline;
 mod diagnose;
 mod error;

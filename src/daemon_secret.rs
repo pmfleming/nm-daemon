@@ -54,15 +54,31 @@ pub(crate) fn register_secret_agent(
         AGENT_MANAGER_IFACE,
     )
     .context("create NetworkManager SecretAgent manager proxy")?;
-    manager
-        .call::<_, _, ()>("Register", &(SECRET_AGENT_ID,))
-        .context("register NetworkManager SecretAgent")?;
+    let vpn_hints = register_with_capabilities(&manager)?;
     REGISTERED.store(true, Ordering::Relaxed);
     tracing::info!(
         path = SECRET_AGENT_OBJECT_PATH,
+        vpn_hints,
         "registered NetworkManager SecretAgent"
     );
     Ok(())
+}
+
+/// Registers with `NM_SECRET_AGENT_CAPABILITY_VPN_HINTS` so NetworkManager
+/// passes the VPN plugin's own hints through, and falls back to plain
+/// registration on NetworkManager builds that do not support capabilities.
+fn register_with_capabilities(manager: &Proxy<'_>) -> Result<bool> {
+    const VPN_HINTS: u32 = 0x1;
+    match manager.call::<_, _, ()>("RegisterWithCapabilities", &(SECRET_AGENT_ID, VPN_HINTS)) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            tracing::info!(%error, "NetworkManager rejected SecretAgent VPN-hint capabilities; registering without them");
+            manager
+                .call::<_, _, ()>("Register", &(SECRET_AGENT_ID,))
+                .context("register NetworkManager SecretAgent")?;
+            Ok(false)
+        }
+    }
 }
 
 #[zbus::interface(name = "org.freedesktop.NetworkManager.SecretAgent")]
@@ -285,10 +301,26 @@ fn emit_secret_requested(runtime: &Weak<DaemonRuntime>, request: &PendingSecretR
             "secret_keys": request.secret_keys,
             "primary_secret_key": request.primary_secret_key(),
             "flags": request.flags,
+            "flag_details": secret_flag_details(request.flags),
+            "plugin_defined_secret_names": accepts_plugin_secret_names(&request.setting_name),
             "save_supported": true,
             "timeout_ms": SECRET_TIMEOUT.as_millis(),
         }),
     );
+}
+
+/// NM_SECRET_AGENT_GET_SECRETS_FLAG_* decoded for the frontend, so a form can
+/// tell a routine re-prompt from a user-requested one and honour a temporary
+/// secret that must not be offered for saving.
+fn secret_flag_details(flags: u32) -> Value {
+    json!({
+        "allow_interaction": flags & 0x1 != 0,
+        "request_new": flags & 0x2 != 0,
+        "user_requested": flags & 0x4 != 0,
+        "wps_pbc": flags & 0x8 != 0,
+        "only_system": flags & 0x80000000_u32 != 0,
+        "no_errors": flags & 0x40000000_u32 != 0,
+    })
 }
 
 fn emit_secret_cancelled(runtime: &Weak<DaemonRuntime>, request_id: &str) {
@@ -438,10 +470,32 @@ fn apply_password(
     key: &str,
     password: String,
 ) -> zbus::fdo::Result<()> {
+    if setting_name == "vpn" {
+        return apply_vpn_secret(connection, key, password);
+    }
     connection
         .entry(setting_name.to_string())
         .or_default()
         .insert(key.to_string(), owned_value(password)?);
+    Ok(())
+}
+
+/// NetworkManager reads VPN secrets from the plugin's own `vpn.secrets`
+/// string map; a value written beside it in the `vpn` section is ignored.
+fn apply_vpn_secret(
+    connection: &mut ConnectionSettings,
+    key: &str,
+    password: String,
+) -> zbus::fdo::Result<()> {
+    let vpn = connection.entry("vpn".to_string()).or_default();
+    let mut secrets = vpn
+        .get("secrets")
+        .and_then(|value| HashMap::<String, String>::try_from(value.clone()).ok())
+        .unwrap_or_default();
+    secrets.insert(key.to_string(), password);
+    let secrets = crate::variant::owned_value(secrets)
+        .map_err(|err| zbus::fdo::Error::Failed(format!("create VPN secret map: {err:#}")))?;
+    vpn.insert("secrets".to_string(), secrets);
     Ok(())
 }
 
@@ -646,6 +700,22 @@ impl PendingSecretRequest {
 }
 
 fn secret_keys_for(setting_name: &str, hints: &[String]) -> Vec<String> {
+    // VPN plugins define their own secret names — OpenConnect alone uses
+    // cookie, gateway, gwcert, resolve, and xmlconfig, and OpenVPN can ask for
+    // an ssh-agent socket. Filtering those against a fixed list would drop the
+    // request, so plugin settings accept whatever NetworkManager hints.
+    if accepts_plugin_secret_names(setting_name) {
+        let mut keys = hints
+            .iter()
+            .map(|hint| normalize_plugin_hint(setting_name, hint))
+            .filter(|hint| !hint.is_empty())
+            .collect::<Vec<_>>();
+        keys.dedup();
+        if keys.is_empty() {
+            keys.push(default_secret_key_for_setting(setting_name).to_string());
+        }
+        return keys;
+    }
     let known = known_secret_keys(setting_name);
     let mut keys = hints
         .iter()
@@ -656,6 +726,22 @@ fn secret_keys_for(setting_name: &str, hints: &[String]) -> Vec<String> {
         keys.push(default_secret_key_for_setting(setting_name).to_string());
     }
     keys
+}
+
+/// Settings whose secret names come from a plugin rather than the NetworkManager
+/// schema.
+fn accepts_plugin_secret_names(setting_name: &str) -> bool {
+    matches!(setting_name, "vpn" | "wireguard")
+}
+
+/// With VPN-hint capabilities NetworkManager may prefix hints with
+/// `vpn.secrets.`; peer keys arrive as `peers.<public-key>.preshared-key`.
+fn normalize_plugin_hint(setting_name: &str, hint: &str) -> String {
+    let hint = hint.strip_prefix("vpn.secrets.").unwrap_or(hint);
+    let hint = hint
+        .strip_prefix(&format!("{setting_name}."))
+        .unwrap_or(hint);
+    hint.to_string()
 }
 
 fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
@@ -670,7 +756,7 @@ fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
         ],
         "802-1x" => &["password", "private-key-password", "pin"],
         "wifi-p2p" => &["wps-pin"],
-        "vpn" | "gsm" | "cdma" => &["password", "pin"],
+        "gsm" | "cdma" => &["password", "pin"],
         _ => &["password"],
     }
 }
@@ -679,6 +765,7 @@ fn default_secret_key_for_setting(setting_name: &str) -> &'static str {
     match setting_name {
         "802-11-wireless-security" => "psk",
         "wifi-p2p" => "wps-pin",
+        "wireguard" => "private-key",
         _ => "password",
     }
 }

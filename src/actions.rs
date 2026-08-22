@@ -9,11 +9,11 @@ use crate::application::{
 };
 use crate::cli::{
     ActivateOptions, ConnectOptions, ConnectTargetOptions, DeactivateOptions, HotspotStartOptions,
-    ListOptions, ProfileCommand, ScanOptions,
+    ListOptions, ProfileCommand, ScanOptions, VpnConnectOptions, VpnSelectOptions,
 };
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
 use crate::model::{Ssid, WepKeyType, WifiConnectTarget};
-use crate::nm::{ActiveConnectionSelector, HotspotRequest, Nm, ProfileSelector};
+use crate::nm::{ActiveConnectionSelector, HotspotRequest, Nm, ProfileSelector, VpnSelector};
 use crate::output::{
     print_access_points_json, print_api_data, print_api_message, print_connect_failure,
     print_connect_result, print_connectivity, print_disconnect_result,
@@ -196,6 +196,36 @@ pub(crate) fn disconnect(nm: &Nm) -> Result<()> {
 
 pub(crate) fn print_connectivity_state(nm: &Nm) -> Result<()> {
     print_connectivity(&Application::new(nm).connectivity()?)
+}
+
+pub(crate) fn print_vpn_profiles(nm: &Nm) -> Result<()> {
+    print_method_data(Method::VpnList, &Application::new(nm).vpn_profiles()?)
+}
+
+pub(crate) fn print_vpn_status(nm: &Nm) -> Result<()> {
+    print_method_data(Method::VpnStatus, &Application::new(nm).vpn_status()?)
+}
+
+pub(crate) fn connect_vpn(nm: &Nm, options: &VpnConnectOptions) -> Result<()> {
+    let selector = VpnSelector {
+        uuid: options.uuid.clone(),
+        path: options.path.as_ref().map(|path| path.as_str().to_string()),
+    };
+    print_method_data(
+        Method::VpnConnect,
+        &Application::new(nm).connect_vpn(&selector, Duration::from_secs(options.timeout), None)?,
+    )
+}
+
+pub(crate) fn disconnect_vpn(nm: &Nm, options: &VpnSelectOptions) -> Result<()> {
+    let selector = VpnSelector {
+        uuid: options.uuid.clone(),
+        path: options.path.as_ref().map(|path| path.as_str().to_string()),
+    };
+    print_method_data(
+        Method::VpnDisconnect,
+        &Application::new(nm).disconnect_vpn(&selector)?,
+    )
 }
 
 pub(crate) fn print_hotspot_capabilities(nm: &Nm) -> Result<()> {

@@ -13,7 +13,10 @@ mod reason;
 mod wire_v1;
 
 pub(crate) use identity::{Bssid, InterfaceName, NmObjectPath, Ssid};
-pub(crate) use reason::{TypedReason, device_state_reason};
+pub(crate) use reason::{
+    TypedReason, active_connection_state_reason, device_state_reason, vpn_state_name,
+    vpn_state_reason,
+};
 
 pub(crate) const NM_AP_FLAGS_PRIVACY: u32 = 0x1;
 pub(crate) const NM_AP_SEC_PAIR_WEP40: u32 = 0x0000_0001;
@@ -465,6 +468,76 @@ pub(crate) struct ActiveConnectionSummary {
     pub(crate) profile_path: Option<String>,
     pub(crate) specific_object: Option<String>,
     pub(crate) devices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct VpnProfileSummary {
+    pub(crate) path: String,
+    pub(crate) id: String,
+    pub(crate) uuid: String,
+    pub(crate) connection_type: String,
+    pub(crate) type_name: &'static str,
+    /// NetworkManager VPN plugin service, e.g. `org.freedesktop.NetworkManager.openvpn`.
+    pub(crate) service_type: Option<String>,
+    /// Short plugin name derived from `service_type`, or `wireguard`.
+    pub(crate) plugin: Option<String>,
+    pub(crate) autoconnect: bool,
+    pub(crate) timestamp_ms: Option<u64>,
+    pub(crate) permissions: Vec<String>,
+    /// True when activating this profile will need a SecretAgent prompt.
+    pub(crate) requires_secrets: bool,
+    /// Plugin secret names this profile references, for prompt labelling.
+    pub(crate) secret_names: Vec<String>,
+    pub(crate) active_connection: Option<String>,
+    pub(crate) state: Option<u32>,
+    pub(crate) state_name: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct VpnActiveStatus {
+    pub(crate) path: String,
+    pub(crate) id: String,
+    pub(crate) uuid: String,
+    pub(crate) connection_type: String,
+    pub(crate) service_type: Option<String>,
+    pub(crate) plugin: Option<String>,
+    /// Login banner returned by the VPN plugin, when it sends one.
+    pub(crate) banner: Option<String>,
+    /// VPN-specific state; absent for WireGuard, which has no VPN plugin.
+    pub(crate) vpn_state: Option<u32>,
+    pub(crate) vpn_state_name: Option<&'static str>,
+    pub(crate) reason: Option<TypedReason>,
+    pub(crate) active_state: u32,
+    pub(crate) active_state_name: &'static str,
+    pub(crate) profile_path: Option<String>,
+    /// The connection this VPN runs over.
+    pub(crate) specific_object: Option<String>,
+    pub(crate) devices: Vec<String>,
+    pub(crate) activated_at_ms: Option<u64>,
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) default4: bool,
+    pub(crate) default6: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct VpnStatus {
+    pub(crate) active: Vec<VpnActiveStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct VpnActivationResult {
+    pub(crate) status: &'static str,
+    pub(crate) message: String,
+    pub(crate) vpn: VpnActiveStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct VpnDisconnectResult {
+    pub(crate) status: &'static str,
+    pub(crate) message: String,
+    pub(crate) id: Option<String>,
+    pub(crate) uuid: Option<String>,
+    pub(crate) path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

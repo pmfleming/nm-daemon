@@ -83,6 +83,12 @@ fn dispatch_method(
             owner,
             emitter,
         ),
+        Method::VpnConnect => crate::daemon_vpn::start_connect(
+            runtime,
+            parse_required_params::<crate::daemon_vpn::VpnConnectParams>(params_json)?,
+            owner,
+            emitter,
+        ),
         Method::WifiBandSet => crate::daemon_band::start_set(
             runtime,
             parse_required_params::<crate::daemon_band::BandSetParams>(params_json)?,

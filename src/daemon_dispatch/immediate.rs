@@ -31,11 +31,17 @@ pub(super) fn dispatch(
         | Method::HotspotCapabilities
         | Method::HotspotStatus
         | Method::HotspotStop
+        | Method::VpnList
+        | Method::VpnStatus
         | Method::WifiDisconnect
         | Method::WifiSaved => dispatch_empty(method, params_json, runtime),
         Method::NetworkActivateProfile => call_network_activate_profile(
             runtime,
             parse_required_params::<ActivateProfileParams>(params_json)?,
+        ),
+        Method::VpnDisconnect => crate::daemon_vpn::call_disconnect(
+            runtime,
+            parse_params::<crate::daemon_vpn::VpnSelectParams>(params_json)?,
         ),
         Method::NetworkDeactivate => call_network_deactivate(
             runtime,
@@ -82,6 +88,8 @@ fn dispatch_empty(
         Method::HotspotCapabilities => crate::daemon_hotspot::call_capabilities(runtime),
         Method::HotspotStatus => crate::daemon_hotspot::call_status(runtime),
         Method::HotspotStop => crate::daemon_hotspot::call_stop(runtime),
+        Method::VpnList => crate::daemon_vpn::call_list(runtime),
+        Method::VpnStatus => crate::daemon_vpn::call_status(runtime),
         Method::WifiDisconnect => call_disconnect(runtime),
         Method::WifiSaved => call_saved(runtime),
         _ => Err(wrong_dispatch_group(method)),

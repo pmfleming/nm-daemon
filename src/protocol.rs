@@ -28,6 +28,10 @@ pub(crate) enum Method {
     HotspotStatus,
     HotspotStart,
     HotspotStop,
+    VpnList,
+    VpnStatus,
+    VpnConnect,
+    VpnDisconnect,
     WifiNetworks,
     WifiBandStatus,
     WifiBandSet,
@@ -49,6 +53,8 @@ pub(crate) enum ParameterKind {
     Deactivate,
     StatisticsWatch,
     HotspotStart,
+    VpnSelect,
+    VpnConnect,
     Networks,
     BandStatus,
     BandSet,
@@ -71,7 +77,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static METHOD_REGISTRY: &[MethodSpec; 26] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 30] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -233,6 +239,46 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 26] = &[
         description: "Stops the running Wi-Fi hotspot and removes its volatile profile.",
     },
     MethodSpec {
+        method: Method::VpnList,
+        name: "vpn.list",
+        parameters: ParameterKind::Empty,
+        params_example: "{}",
+        response_key: "vpns",
+        stream: None,
+        operation: ErrorOperation::VpnOperation,
+        description: "Saved VPN and WireGuard profiles with plugin, secret, and activation details.",
+    },
+    MethodSpec {
+        method: Method::VpnStatus,
+        name: "vpn.status",
+        parameters: ParameterKind::Empty,
+        params_example: "{}",
+        response_key: "vpn",
+        stream: None,
+        operation: ErrorOperation::VpnOperation,
+        description: "Active VPN and WireGuard connections with plugin state, banner, and duration.",
+    },
+    MethodSpec {
+        method: Method::VpnConnect,
+        name: "vpn.connect",
+        parameters: ParameterKind::VpnConnect,
+        params_example: r#"{"uuid":"0a1c...","path":null,"timeout":45}"#,
+        response_key: "result",
+        stream: Some(Stream::Vpn),
+        operation: ErrorOperation::VpnOperation,
+        description: "Activates a saved VPN or WireGuard profile and returns a cancellable request id.",
+    },
+    MethodSpec {
+        method: Method::VpnDisconnect,
+        name: "vpn.disconnect",
+        parameters: ParameterKind::VpnSelect,
+        params_example: r#"{"uuid":null,"path":null}"#,
+        response_key: "result",
+        stream: None,
+        operation: ErrorOperation::VpnOperation,
+        description: "Deactivates one active VPN or WireGuard connection, or the only active one.",
+    },
+    MethodSpec {
         method: Method::WifiNetworks,
         name: "wifi.networks",
         parameters: ParameterKind::Networks,
@@ -374,6 +420,7 @@ pub(crate) enum Stream {
     NetworkInventory,
     NetworkStatistics,
     Hotspot,
+    Vpn,
     WifiNetworks,
     WifiScan,
     WifiConnect,
@@ -403,7 +450,7 @@ pub(crate) struct StreamSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static STREAM_REGISTRY: &[StreamSpec; 12] = &[
+pub(crate) static STREAM_REGISTRY: &[StreamSpec; 13] = &[
     StreamSpec {
         stream: Stream::WifiStatus,
         name: "wifi.status",
@@ -455,6 +502,22 @@ pub(crate) static STREAM_REGISTRY: &[StreamSpec; 12] = &[
             "cancelled",
         ],
         description: "Events associated with a hotspot.start request id.",
+    },
+    StreamSpec {
+        stream: Stream::Vpn,
+        name: "vpn",
+        subscribable: true,
+        default: false,
+        delivery: StreamDelivery::Operation,
+        events: &[
+            "subscribed",
+            "started",
+            "progress",
+            "succeeded",
+            "failed",
+            "cancelled",
+        ],
+        description: "VPN and WireGuard activation state and typed failure reasons for a vpn.connect request id.",
     },
     StreamSpec {
         stream: Stream::WifiNetworks,

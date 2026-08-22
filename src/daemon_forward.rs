@@ -8,7 +8,7 @@ use zbus::blocking::proxy::SignalIterator;
 use crate::application::ConnectRequest;
 use crate::cli::{
     Command, HotspotCommand, HotspotStartOptions, NetworkCommand, ProfileCommand, ScanOptions,
-    WifiCommand,
+    VpnCommand, VpnConnectOptions, WifiCommand,
 };
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Method, Stream};
 
@@ -55,6 +55,9 @@ fn dispatch_forward(proxy: &Proxy<'_>, command: &Command) -> Result<ForwardOutco
         Command::Hotspot {
             command: HotspotCommand::Start(options),
         } => forward_hotspot_start(proxy, options),
+        Command::Vpn {
+            command: VpnCommand::Connect(options),
+        } => forward_vpn_connect(proxy, options),
         _ => forward_immediate(proxy, command),
     }
 }
@@ -66,6 +69,8 @@ fn is_forwardable(command: &Command) -> bool {
             command: WifiCommand::Scan(_) | WifiCommand::Connect(_) | WifiCommand::ConnectTarget(_),
         } | Command::Hotspot {
             command: HotspotCommand::Start(_),
+        } | Command::Vpn {
+            command: VpnCommand::Connect(_),
         }
     ) || immediate_request(command).is_some()
 }
@@ -141,18 +146,37 @@ fn forward_hotspot_start(
         params,
         Stream::Hotspot,
         || ForwardOutcome::Unavailable,
-        finish_hotspot_start,
+        finish_operation_result,
     )
 }
 
-fn finish_hotspot_start(mut events: CorrelatedEvents<'_>) -> Result<ForwardOutcome> {
+fn forward_vpn_connect(proxy: &Proxy<'_>, options: &VpnConnectOptions) -> Result<ForwardOutcome> {
+    let params = json!({
+        "uuid": options.uuid,
+        "path": options.path,
+        "timeout": options.timeout,
+    })
+    .to_string();
+    run_operation(
+        proxy,
+        Method::VpnConnect,
+        params,
+        Stream::Vpn,
+        || ForwardOutcome::Unavailable,
+        finish_operation_result,
+    )
+}
+
+/// Renders the terminal event of a simple start/succeed/fail operation as the
+/// same CLI envelope the direct implementation would have printed.
+fn finish_operation_result(mut events: CorrelatedEvents<'_>) -> Result<ForwardOutcome> {
     while let Some(event) = events.next()? {
         match event.get("event").and_then(Value::as_str) {
             Some("succeeded") => print_response(
                 &crate::output::api_data_value(
                     "result",
                     event.get("result").unwrap_or(&Value::Null),
-                    "serialize forwarded hotspot response JSON",
+                    "serialize forwarded operation response JSON",
                 )?
                 .to_string(),
             )?,
@@ -161,7 +185,7 @@ fn finish_hotspot_start(mut events: CorrelatedEvents<'_>) -> Result<ForwardOutco
         }
         return Ok(ForwardOutcome::Handled);
     }
-    anyhow::bail!("nm-daemon hotspot event stream ended before completion")
+    anyhow::bail!("nm-daemon operation event stream ended before completion")
 }
 
 fn run_operation<'a>(
@@ -358,6 +382,7 @@ fn immediate_request(command: &Command) -> Option<(Method, String)> {
         )),
         Command::Network { command } => network_request(command),
         Command::Hotspot { command } => hotspot_request(command),
+        Command::Vpn { command } => vpn_request(command),
         Command::Wifi {
             command: WifiCommand::Disconnect,
         } => empty(Method::WifiDisconnect),
@@ -391,6 +416,19 @@ fn network_request(command: &NetworkCommand) -> Option<(Method, String)> {
             Method::NetworkDeactivate,
             json!({ "path": options.path, "uuid": options.uuid }).to_string(),
         )),
+    }
+}
+
+fn vpn_request(command: &VpnCommand) -> Option<(Method, String)> {
+    match command {
+        VpnCommand::List => empty(Method::VpnList),
+        VpnCommand::Status => empty(Method::VpnStatus),
+        VpnCommand::Disconnect(options) => Some((
+            Method::VpnDisconnect,
+            json!({ "uuid": options.uuid, "path": options.path }).to_string(),
+        )),
+        // Connect is an event-driven operation handled by forward_vpn_connect.
+        VpnCommand::Connect(_) => None,
     }
 }
 

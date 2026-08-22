@@ -13,12 +13,13 @@ use crate::model::{
     InterfaceName, NetworkConnectionSummary, NetworkDeactivateResult, NetworkDeviceSummary,
     NetworkEntry, NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource,
     NetworkStateSummary, NmObjectPath, ProfileActivationResult, RadioPowerResult,
-    SavedWifiConnection, ScanRequestOptions, WepKeyType, WifiBand, WifiBandSelectionResult,
-    WifiBandStatus, WifiConnectTarget, WifiPowerResult, WifiProfileDetails, WifiProfileSecret,
-    WifiProfileUpdate, WifiSharePayload, WifiStatus, connect_target_for_network,
-    connect_target_for_network_key, validate_ssid_bytes,
+    SavedWifiConnection, ScanRequestOptions, VpnActivationResult, VpnDisconnectResult,
+    VpnProfileSummary, VpnStatus, WepKeyType, WifiBand, WifiBandSelectionResult, WifiBandStatus,
+    WifiConnectTarget, WifiPowerResult, WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate,
+    WifiSharePayload, WifiStatus, connect_target_for_network, connect_target_for_network_key,
+    validate_ssid_bytes,
 };
-use crate::nm::{ActiveConnectionSelector, HotspotRequest, Nm, ProfileSelector};
+use crate::nm::{ActiveConnectionSelector, HotspotRequest, Nm, ProfileSelector, VpnSelector};
 use anyhow::Result;
 
 /// Transport-neutral operations layer; boundaries only translate requests and results.
@@ -79,6 +80,33 @@ impl<'a> Application<'a> {
 
     pub(crate) fn stop_hotspot(&self) -> Result<HotspotStopResult> {
         operation_result(ErrorOperation::HotspotOperation, self.nm.stop_hotspot())
+    }
+
+    pub(crate) fn vpn_profiles(&self) -> Result<Vec<VpnProfileSummary>> {
+        operation_result(ErrorOperation::VpnOperation, self.nm.vpn_profiles())
+    }
+
+    pub(crate) fn vpn_status(&self) -> Result<VpnStatus> {
+        operation_result(ErrorOperation::VpnOperation, self.nm.vpn_status())
+    }
+
+    pub(crate) fn connect_vpn(
+        &self,
+        selector: &VpnSelector,
+        timeout: Duration,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<VpnActivationResult> {
+        operation_result(
+            ErrorOperation::VpnOperation,
+            self.nm.activate_vpn(selector, timeout, cancellation),
+        )
+    }
+
+    pub(crate) fn disconnect_vpn(&self, selector: &VpnSelector) -> Result<VpnDisconnectResult> {
+        operation_result(
+            ErrorOperation::VpnOperation,
+            self.nm.deactivate_vpn(selector),
+        )
     }
 
     pub(crate) fn network_inventory(&self) -> Result<NetworkInventory> {

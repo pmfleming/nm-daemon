@@ -14,7 +14,8 @@ use crate::model::{
     NetworkConnectionSummary, NetworkDeactivateResult, NetworkDeviceSummary, NetworkEntry,
     NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource, NetworkStateSummary,
     ProfileActivationResult, ProfileEnterpriseSettings, ProfileIpSettings, ProfilePrivacy,
-    RadioPowerResult, RadioStatus, SavedWifiConnection, SecretFlags, WifiBand,
+    RadioPowerResult, RadioStatus, SavedWifiConnection, SecretFlags, VpnActivationResult,
+    VpnActiveStatus, VpnDisconnectResult, VpnProfileSummary, VpnStatus, WifiBand,
     WifiBandSelectionResult, WifiBandStatus, WifiPowerResult, WifiProfileDetails,
     WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus, device_state_reason,
     network_entries_with_profile_matches, security_flags_label, security_label,
@@ -48,6 +49,7 @@ fn method_contract_fixtures() -> Value {
         wifi_method_fixtures(),
         network_method_fixtures(),
         hotspot_method_fixtures(),
+        vpn_method_fixtures(),
     ] {
         if let Value::Object(group) = group {
             fixtures.extend(group);
@@ -171,6 +173,158 @@ fn network_method_fixtures() -> Value {
         })),
         "network-statistics.stream": { "events": statistics_stream_events() },
     })
+}
+
+fn vpn_method_fixtures() -> Value {
+    json!({
+        "vpn.list": response_fixture(Method::VpnList, json!([contract_vpn_profile(), contract_wireguard_profile()])),
+        "vpn.status-connected": response_fixture(Method::VpnStatus, json!(VpnStatus {
+            active: vec![contract_vpn_active()],
+        })),
+        "vpn.status-idle": response_fixture(Method::VpnStatus, json!(VpnStatus { active: Vec::new() })),
+        "vpn.connect": response_fixture(Method::VpnConnect, json!({
+            "status": "started",
+            "request_id": "vpn-contract",
+            "stream": Stream::Vpn,
+            "message": "VPN activation started; listen for Event('vpn', event_json) signals",
+        })),
+        "vpn.disconnect": response_fixture(Method::VpnDisconnect, json!(VpnDisconnectResult {
+            status: "disconnected",
+            message: "Work VPN disconnected".to_string(),
+            id: Some("Work VPN".to_string()),
+            uuid: Some("0a1c9c6e-3d21-4a55-8c2b-1e5b9d6f7a22".to_string()),
+            path: Some("/org/freedesktop/NetworkManager/ActiveConnection/2".to_string()),
+        })),
+        "vpn.stream": { "events": vpn_stream_events() },
+    })
+}
+
+fn contract_vpn_profile() -> VpnProfileSummary {
+    VpnProfileSummary {
+        path: "/org/freedesktop/NetworkManager/Settings/2".to_string(),
+        id: "Work VPN".to_string(),
+        uuid: "0a1c9c6e-3d21-4a55-8c2b-1e5b9d6f7a22".to_string(),
+        connection_type: "vpn".to_string(),
+        type_name: "vpn",
+        service_type: Some("org.freedesktop.NetworkManager.openconnect".to_string()),
+        plugin: Some("openconnect".to_string()),
+        autoconnect: false,
+        timestamp_ms: Some(1_762_000_000_000),
+        permissions: vec!["user:laufan:".to_string()],
+        requires_secrets: true,
+        secret_names: vec![
+            "cookie".to_string(),
+            "gateway".to_string(),
+            "gwcert".to_string(),
+        ],
+        active_connection: None,
+        state: None,
+        state_name: None,
+    }
+}
+
+fn contract_wireguard_profile() -> VpnProfileSummary {
+    VpnProfileSummary {
+        path: "/org/freedesktop/NetworkManager/Settings/4".to_string(),
+        id: "wg0".to_string(),
+        uuid: "3b2f8a51-6c74-4d19-9f0a-2c8e5b7d1a33".to_string(),
+        connection_type: "wireguard".to_string(),
+        type_name: "wireguard",
+        service_type: None,
+        plugin: Some("wireguard".to_string()),
+        autoconnect: true,
+        timestamp_ms: None,
+        permissions: Vec::new(),
+        requires_secrets: true,
+        secret_names: vec!["private-key".to_string(), "preshared-key".to_string()],
+        active_connection: None,
+        state: None,
+        state_name: None,
+    }
+}
+
+fn contract_vpn_active() -> VpnActiveStatus {
+    VpnActiveStatus {
+        path: "/org/freedesktop/NetworkManager/ActiveConnection/2".to_string(),
+        id: "Work VPN".to_string(),
+        uuid: "0a1c9c6e-3d21-4a55-8c2b-1e5b9d6f7a22".to_string(),
+        connection_type: "vpn".to_string(),
+        service_type: Some("org.freedesktop.NetworkManager.openconnect".to_string()),
+        plugin: Some("openconnect".to_string()),
+        banner: Some("Welcome to the example gateway".to_string()),
+        vpn_state: Some(5),
+        vpn_state_name: Some("activated"),
+        reason: Some(crate::model::vpn_state_reason(1)),
+        active_state: 2,
+        active_state_name: "activated",
+        profile_path: Some("/org/freedesktop/NetworkManager/Settings/2".to_string()),
+        specific_object: Some("/org/freedesktop/NetworkManager/ActiveConnection/1".to_string()),
+        devices: vec!["/org/freedesktop/NetworkManager/Devices/3".to_string()],
+        activated_at_ms: Some(1_762_000_000_000),
+        duration_ms: Some(125_000),
+        default4: false,
+        default6: false,
+    }
+}
+
+fn vpn_stream_events() -> Vec<Value> {
+    stream_events(
+        Stream::Vpn,
+        "vpn-contract",
+        vec![
+            subscribed_event("vpn-subscription"),
+            (
+                "started",
+                json!({
+                    "request_id": "vpn-contract",
+                    "phase": "preparing",
+                    "uuid": "0a1c9c6e-3d21-4a55-8c2b-1e5b9d6f7a22",
+                    "path": Value::Null,
+                }),
+            ),
+            (
+                "progress",
+                json!({ "request_id": "vpn-contract", "phase": "activating" }),
+            ),
+            (
+                "succeeded",
+                json!({
+                    "request_id": "vpn-contract",
+                    "phase": "complete",
+                    "result": VpnActivationResult {
+                        status: "connected",
+                        message: "Work VPN is connected".to_string(),
+                        vpn: contract_vpn_active(),
+                    },
+                }),
+            ),
+            (
+                "failed",
+                json!({
+                    "request_id": "vpn-contract",
+                    "phase": "failed",
+                    "code": crate::error::ErrorCode::SecretRequired,
+                    "message": "Work VPN failed to connect",
+                    "details": {
+                        "operation": "vpn-operation",
+                        "source": "network-manager",
+                        "reason": "no-secrets",
+                        "reason_category": "authentication",
+                        "reason_code": 7,
+                        "vpn_state": "failed",
+                    },
+                }),
+            ),
+            (
+                "cancelled",
+                json!({
+                    "request_id": "vpn-contract",
+                    "phase": "cancelled",
+                    "message": "VPN activation was cancelled",
+                }),
+            ),
+        ],
+    )
 }
 
 fn hotspot_method_fixtures() -> Value {
@@ -1311,6 +1465,10 @@ mod tests {
             crate::protocol::Method::HotspotStatus,
             crate::protocol::Method::HotspotStart,
             crate::protocol::Method::HotspotStop,
+            crate::protocol::Method::VpnList,
+            crate::protocol::Method::VpnStatus,
+            crate::protocol::Method::VpnConnect,
+            crate::protocol::Method::VpnDisconnect,
             crate::protocol::Method::WifiNetworks,
             crate::protocol::Method::WifiBandStatus,
             crate::protocol::Method::WifiBandSet,
@@ -1454,6 +1612,25 @@ mod tests {
             value["network-statistics.watch"]["result"]["interval_ms"],
             1_000
         );
+        assert_eq!(value["vpn.list"]["vpns"][0]["plugin"], "openconnect");
+        assert_eq!(value["vpn.list"]["vpns"][1]["plugin"], "wireguard");
+        assert_eq!(
+            value["vpn.list"]["vpns"][1]["secret_names"][0],
+            "private-key"
+        );
+        assert_eq!(
+            value["vpn.status-connected"]["vpn"]["active"][0]["vpn_state_name"],
+            "activated"
+        );
+        assert!(
+            value["vpn.status-idle"]["vpn"]["active"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        );
+        assert_eq!(
+            value["vpn.stream"]["events"][4]["details"]["reason"],
+            "no-secrets"
+        );
         assert_eq!(value["hotspot.capabilities"]["hotspot"]["supported"], true);
         assert_eq!(
             value["hotspot.capabilities-unsupported"]["hotspot"]["unsupported_reason"],
@@ -1478,6 +1655,7 @@ mod tests {
             "wifi-secret.stream",
             "network-statistics.stream",
             "hotspot.stream",
+            "vpn.stream",
         ] {
             let stream = match fixture {
                 "wifi-connect.stream" => crate::protocol::Stream::WifiConnect,
@@ -1485,6 +1663,7 @@ mod tests {
                 "wifi-scan.stream" => crate::protocol::Stream::WifiScan,
                 "network-statistics.stream" => crate::protocol::Stream::NetworkStatistics,
                 "hotspot.stream" => crate::protocol::Stream::Hotspot,
+                "vpn.stream" => crate::protocol::Stream::Vpn,
                 _ => crate::protocol::Stream::WifiSecret,
             };
             let actual = value[fixture]["events"]
