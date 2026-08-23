@@ -63,47 +63,52 @@ impl SubscriptionState {
     }
 
     pub(crate) fn emit_changes(&mut self, payloads: &SharedPayloads) {
-        if self.watches(Stream::WifiStatus)
-            && let Some(value) = &payloads.status
-        {
-            emit_on_change(
-                &self.emitter,
-                Stream::WifiStatus,
-                &self.id,
-                Method::WifiStatus,
-                &mut self.last_status,
-                value,
-            );
-        }
-        if self.watches(Stream::NetworkConnectivity)
-            && let Some(value) = &payloads.connectivity
-        {
-            emit_on_change(
-                &self.emitter,
-                Stream::NetworkConnectivity,
-                &self.id,
-                Method::NetworkConnectivity,
-                &mut self.last_connectivity,
-                value,
-            );
-        }
-        if self.watches(Stream::NetworkInventory)
-            && let Some(value) = &payloads.inventory
-        {
-            emit_on_change(
-                &self.emitter,
-                Stream::NetworkInventory,
-                &self.id,
-                Method::NetworkInventory,
-                &mut self.last_inventory,
-                value,
-            );
-        }
+        emit_payload_change(
+            &self.emitter,
+            &self.id,
+            self.watches(Stream::WifiStatus),
+            Stream::WifiStatus,
+            Method::WifiStatus,
+            &mut self.last_status,
+            payloads.status.as_ref(),
+        );
+        emit_payload_change(
+            &self.emitter,
+            &self.id,
+            self.watches(Stream::NetworkConnectivity),
+            Stream::NetworkConnectivity,
+            Method::NetworkConnectivity,
+            &mut self.last_connectivity,
+            payloads.connectivity.as_ref(),
+        );
+        emit_payload_change(
+            &self.emitter,
+            &self.id,
+            self.watches(Stream::NetworkInventory),
+            Stream::NetworkInventory,
+            Method::NetworkInventory,
+            &mut self.last_inventory,
+            payloads.inventory.as_ref(),
+        );
         if self.watches(Stream::WifiNetworks)
             && let Some(value) = &payloads.networks
         {
             emit_network_changes(&self.emitter, &self.id, &mut self.last_networks, value);
         }
+    }
+}
+
+fn emit_payload_change(
+    emitter: &SignalEmitter<'static>,
+    id: &str,
+    watched: bool,
+    stream: Stream,
+    method: Method,
+    previous: &mut Option<Value>,
+    value: Option<&Value>,
+) {
+    if watched && let Some(value) = value {
+        emit_on_change(emitter, stream, id, method, previous, value);
     }
 }
 

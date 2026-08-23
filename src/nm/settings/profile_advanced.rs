@@ -153,50 +153,69 @@ fn apply_wireless_fields(
     settings: &mut ConnectionSettings,
     update: &WifiProfileAdvancedUpdate,
 ) -> Result<()> {
-    if let Some(mode) = &update.mode {
-        validate_mode(mode)?;
-    }
-    if let Some(band) = update.band
-        && band != WifiBand::Auto
-        && update.channel.is_some_and(|channel| channel > 0)
-        && !crate::model::channel_is_in_band(update.channel.unwrap_or(0), band)
-    {
-        return Err(DomainError::validation(
-            ErrorOperation::ProfileOperation,
-            "channel does not belong to the selected band",
-        )
-        .with_detail("field", "advanced.channel")
-        .into());
-    }
+    validate_wireless_update(update)?;
     let wireless = settings.entry(WIRELESS.to_string()).or_default();
     set_clearable_text(wireless, "bssid", update.bssid.as_deref())?;
     set_clearable_text(wireless, "mac-address", update.mac_address.as_deref())?;
     set_clearable_text(wireless, "mode", update.mode.as_deref())?;
-    // A literal cloned MAC and the keyword policy occupy the same property, so
-    // an exact address written here has to win over the policy applied earlier.
-    if let Some(cloned) = update.cloned_mac_address.as_deref() {
-        wireless.remove("cloned-mac-address");
-        wireless.remove("mac-address-randomization");
-        set_clearable_text(wireless, "assigned-mac-address", Some(cloned))?;
-    }
+    apply_cloned_address(wireless, update.cloned_mac_address.as_deref())?;
     insert_optional_value(wireless, "mtu", update.mtu)?;
-    if let Some(band) = update.band {
-        match band.nm_value() {
-            Some(value) => {
-                wireless.insert("band".to_string(), owned_value(value.to_string())?);
-            }
-            None => {
-                wireless.remove("band");
-                wireless.remove("channel");
-            }
-        }
+    apply_band(wireless, update.band)?;
+    apply_channel(wireless, update.channel)
+}
+
+fn validate_wireless_update(update: &WifiProfileAdvancedUpdate) -> Result<()> {
+    if let Some(mode) = &update.mode {
+        validate_mode(mode)?;
     }
-    if let Some(channel) = update.channel {
-        if channel == 0 {
-            wireless.remove("channel");
-        } else {
-            wireless.insert("channel".to_string(), owned_value(channel)?);
-        }
+    let Some((band, channel)) = update.band.zip(update.channel) else {
+        return Ok(());
+    };
+    if band == WifiBand::Auto || channel == 0 || crate::model::channel_is_in_band(channel, band) {
+        return Ok(());
+    }
+    Err(DomainError::validation(
+        ErrorOperation::ProfileOperation,
+        "channel does not belong to the selected band",
+    )
+    .with_detail("field", "advanced.channel")
+    .into())
+}
+
+fn apply_cloned_address(
+    wireless: &mut HashMap<String, OwnedValue>,
+    cloned: Option<&str>,
+) -> Result<()> {
+    let Some(cloned) = cloned else {
+        return Ok(());
+    };
+    // A literal cloned MAC and its keyword policy occupy the same property.
+    wireless.remove("cloned-mac-address");
+    wireless.remove("mac-address-randomization");
+    set_clearable_text(wireless, "assigned-mac-address", Some(cloned))
+}
+
+fn apply_band(wireless: &mut HashMap<String, OwnedValue>, band: Option<WifiBand>) -> Result<()> {
+    let Some(band) = band else {
+        return Ok(());
+    };
+    if let Some(value) = band.nm_value() {
+        wireless.insert("band".to_string(), owned_value(value.to_string())?);
+    } else {
+        wireless.remove("band");
+        wireless.remove("channel");
+    }
+    Ok(())
+}
+
+fn apply_channel(wireless: &mut HashMap<String, OwnedValue>, channel: Option<u32>) -> Result<()> {
+    let Some(channel) = channel else {
+        return Ok(());
+    };
+    if channel == 0 {
+        wireless.remove("channel");
+    } else {
+        wireless.insert("channel".to_string(), owned_value(channel)?);
     }
     Ok(())
 }
