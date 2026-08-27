@@ -17,7 +17,10 @@
             src = ./.;
             cargoLock = {
               lockFile = ./Cargo.lock;
-              outputHashes."shelllist-daemon-core-0.1.0" = "sha256-V2ytfB6faOsv4zf8jDyJs1jKRLmCWbyb/EHUT/0OfGs=";
+              outputHashes = {
+                "shelllist-daemon-core-0.1.0" = "sha256-bRtKUzbzvggMukjezdGBUgSnj/ndf19P7m7Xyqy5cY8=";
+                "shelllist-daemon-tokio-0.1.0" = "sha256-bRtKUzbzvggMukjezdGBUgSnj/ndf19P7m7Xyqy5cY8=";
+              };
             };
             checkFlags = [ "--test-threads=1" ];
             nativeBuildInputs = with pkgs; [ pkg-config ];

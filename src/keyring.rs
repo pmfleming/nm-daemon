@@ -545,6 +545,11 @@ mod tests {
 
     #[test]
     fn fake_secret_service_prompts_are_dismissed_and_never_counted_as_success() {
+        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = tokio_runtime.enter();
         let peer = TestPeer::new(":1.0", ":1.1");
         let dismissals = Arc::new(AtomicUsize::new(0));
         peer.server

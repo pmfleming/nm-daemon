@@ -307,6 +307,11 @@ mod tests {
     }
 
     fn run_dbus_lifecycle_test() {
+        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = tokio_runtime.enter();
         let networkmanager = TestPeer::new(":1.0", ":1.1");
         networkmanager
             .server
@@ -328,10 +333,6 @@ mod tests {
             Arc::new(UnavailableWirelessTelemetry),
         )
         .unwrap();
-        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
         let runtime = DaemonRuntime::start(nm, tokio_runtime.handle().clone()).unwrap();
 
         let daemon = TestPeer::new(":1.2", ":1.3");

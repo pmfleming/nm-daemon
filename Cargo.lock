@@ -666,6 +666,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shelllist-daemon-core",
+ "shelllist-daemon-tokio",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -876,10 +877,24 @@ dependencies = [
 [[package]]
 name = "shelllist-daemon-core"
 version = "0.1.0"
-source = "git+https://github.com/pmfleming/daemon-framework.git?rev=a1b2695d179cca3665645db0c8e9f1a413e53ac6#a1b2695d179cca3665645db0c8e9f1a413e53ac6"
+source = "git+https://github.com/pmfleming/daemon-framework.git?rev=2dab166956d2cdebc63953a6a5437c0d621dabef#2dab166956d2cdebc63953a6a5437c0d621dabef"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "shelllist-daemon-tokio"
+version = "0.1.0"
+source = "git+https://github.com/pmfleming/daemon-framework.git?rev=2dab166956d2cdebc63953a6a5437c0d621dabef#2dab166956d2cdebc63953a6a5437c0d621dabef"
+dependencies = [
+ "anyhow",
+ "futures",
+ "serde_json",
+ "shelllist-daemon-core",
+ "tokio",
+ "tracing",
+ "zbus",
 ]
 
 [[package]]
@@ -903,6 +918,16 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
 
 [[package]]
 name = "strsim"
@@ -976,7 +1001,9 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "signal-hook-registry",
+ "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys",
 ]
 
@@ -1223,6 +1250,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",
