@@ -6,6 +6,12 @@ Move `nm-daemon` onto the same Tokio-based transport and process model as the ot
 
 The first target is a **hybrid Tokio architecture**: Tokio owns the process lifecycle, session D-Bus service, JSONL frontend client, owner monitoring, event actor, and bounded scheduling, while the existing blocking `Nm` and `Application` operations execute on explicitly bounded blocking lanes. A fully asynchronous NetworkManager backend is a later, optional project.
 
+## Implementation status
+
+Phases 0–6 are implemented. The process boundary, JSONL client, frontend D-Bus service, control actor, bounded blocking lanes, and shutdown lifecycle now run on Tokio. Protocol fixtures and the blocking NetworkManager domain layer remain unchanged.
+
+Phase 7 remains intentionally dependent on establishing and versioning the separate common daemon crate; committing a non-portable sibling path dependency would break independent Cargo and Nix builds. Phase 8 remains optional and is not required for the hybrid Tokio architecture.
+
 ## Invariants
 
 The migration must preserve these existing guarantees:

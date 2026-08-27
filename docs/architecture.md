@@ -10,7 +10,7 @@ D-Bus handlers ──┘           │               Secret Service D-Bus
                              │               kernel nl80211 telemetry
                              └──────────────> cache repositories
 
-D-Bus daemon ─> shared runtime ─> bounded tasks, cancellation, subscriptions
+Tokio D-Bus/JSONL transports ─> shared runtime ─> bounded blocking lanes, cancellation, subscriptions
 ```
 
 ## Application boundary
@@ -113,17 +113,24 @@ Directional transmit and receive link rates bypass the command gateway. `src/nl8
 
 ## Daemon runtime
 
-The daemon creates one shared `Nm` instance and therefore one NetworkManager system-bus connection. `DaemonRuntime` owns:
+The process uses Tokio for command dispatch, the frontend session D-Bus service, JSONL sessions, owner monitoring, subscription control, and shutdown. The daemon creates one shared blocking `Nm` instance and therefore one NetworkManager system-bus connection. Keeping this domain boundary blocking is deliberate: NetworkManager workflows already provide cancellation and rollback semantics, while Tokio prevents them from blocking frontend transport work.
 
-- a bounded long-running work queue for cancellable scan/connect/band-selection jobs, with panic containment and owner-scoped cleanup;
-- a separate bounded fast lane for synchronous calls, status refreshes, and target-guarded activation aborts so they do not queue behind multi-second jobs;
+`DaemonRuntime` owns:
+
+- a bounded Tokio long-work queue for cancellable scan/connect/band-selection jobs;
+- a separate bounded Tokio fast queue for immediate calls, status refreshes, and target-guarded activation aborts;
+- fixed concurrency semaphores for both lanes, with admitted jobs executed by `spawn_blocking` and panic containment around every job;
 - cancellable scan/connect task registrations;
-- one control/event loop for all subscriptions;
-- NetworkManager change notifications;
+- one Tokio control actor that exclusively owns subscriptions and refresh coalescing;
+- NetworkManager change notifications bridged into the actor with bounded `try_send` calls;
 - coalesced status/connectivity refreshes shared by all subscribers;
 - coalesced background cache refreshes.
 
-Operation and subscription signals are directed to their originating session-bus owner rather than broadcast. Cancellation verifies that owner, and D-Bus disconnect cleanup cancels owned tasks as well as subscriptions. Continuous streams are signal-driven, not one polling thread per subscription. Each refresh is computed once for the set of interested subscribers, and duplicate invalidations are coalesced without losing the final change. `Cancel` marks a task, wakes activation waits, and queues a best-effort activation abort for connect cancellation. The task registration retains the requested SSID bytes; the abort resolves the current active-connection object and its profile, deactivates that captured object path only when the profile still matches those bytes, and otherwise returns a no-op. This closes the race where a failed target hands control back to NetworkManager and a late cancel could otherwise disconnect the healthy profile NetworkManager restored.
+The JSONL client has one ordered-output actor. Concurrent D-Bus calls and signal forwarding send typed output commands to that actor, which buffers operation events until it has written the response that reveals their request ID. This preserves response-before-event ordering without cross-thread stdout locks. A daemon owner replacement emits `transport-error`, allowing Shelllist to restart and resubscribe.
+
+Operation and subscription signals are directed to their originating session-bus owner rather than broadcast. Cancellation verifies that owner, and the async D-Bus owner watcher cancels disconnected owners' work and subscriptions. Continuous streams are signal-driven, not one polling task per subscription. Each refresh is computed once for the set of interested subscribers, and duplicate invalidations are coalesced without losing the final change. `Cancel` marks a task, wakes activation waits, and queues a best-effort activation abort for connect cancellation. The task registration retains the requested SSID bytes; the abort resolves the current active-connection object and its profile, deactivates that captured object path only when the profile still matches those bytes, and otherwise returns a no-op. This closes the race where a failed target hands control back to NetworkManager and a late cancel could otherwise disconnect the healthy profile NetworkManager restored.
+
+SIGINT and SIGTERM follow a bounded shutdown path: frontend ownership is released, task cancellation flags are set, NetworkManager waiters are woken, subscriptions are dropped, queue dispatchers stop, and admitted blocking jobs receive a fixed interval to finish. Queued work is rejected or discarded rather than extending shutdown indefinitely.
 
 ## SecretAgent and Secret Service
 

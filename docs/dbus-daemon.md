@@ -4,7 +4,7 @@ This document describes the current `nm-daemon` user D-Bus API for Shelllist and
 
 ## Current status
 
-`nm-daemon daemon` is packaged as a `Type=dbus` systemd user service and as a session D-Bus activatable service. It may start eagerly at login or on the first frontend call. Shelllist consumes this API through the long-lived `nm-daemon client` JSONL session. CLI and D-Bus transports call the same typed application services; the daemon adds a shared event runtime rather than a second orchestration path.
+`nm-daemon daemon` is packaged as a `Type=dbus` systemd user service and as a session D-Bus activatable service. It may start eagerly at login or on the first frontend call. Shelllist consumes this API through the long-lived `nm-daemon client` JSONL session. The frontend D-Bus service, JSONL client, owner watcher, control actor, and shutdown lifecycle run on Tokio. Existing NetworkManager application operations remain blocking and execute only through bounded long-work and fast-work lanes. CLI and D-Bus transports call the same typed application services; the daemon adds a shared event runtime rather than a second orchestration path.
 
 ## Service identity
 
@@ -508,11 +508,11 @@ Implemented here:
 10. CLI forwarding for compatible methods with direct-mode recovery escape hatches.
 11. A transport-neutral application layer shared by CLI and D-Bus adapters, with typed requests, results, events, identifiers, and errors.
 12. An explicit connect state machine with centralized fallback eligibility, verification, and failed-profile cleanup.
-13. One daemon-owned NetworkManager connection and event runtime, with shared/coalesced subscription refreshes, cancellable requests, a bounded worker queue, and bounded cache-refresh work.
+13. One daemon-owned NetworkManager connection and Tokio event runtime, with shared/coalesced subscription refreshes, cancellable requests, bounded blocking lanes, and bounded cache-refresh work.
 14. Locked, atomic cache repositories with explicit unavailable states and rotated history.
 15. In-process D-Bus lifecycle tests against fake NetworkManager/Secret Service peers, scripted command fallback tests, and concurrent cache tests.
 16. Packaged systemd user service metadata.
-17. A long-lived JSONL frontend client with correlated operation events and cleanup on EOF.
+17. A Tokio JSONL frontend client with concurrent calls, a single ordered-output actor for correlated operation events, daemon-owner restart reporting, bounded shutdown, and cleanup on EOF.
 18. Caller-owned subscriptions that are removed automatically when the D-Bus client disconnects.
 19. Session D-Bus activation through the packaged systemd user unit.
 
