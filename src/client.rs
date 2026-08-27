@@ -60,6 +60,18 @@ impl ClientState {
             .or_default()
             .push((stream, event));
     }
+
+    fn activate_response(&mut self, response: &Value) -> Vec<(String, Value)> {
+        let Some(active_id) = response_active_id(response).map(ToString::to_string) else {
+            return Vec::new();
+        };
+        let pending = self.take_pending_events(&active_id);
+        self.active_ids.insert(active_id.clone());
+        if response_subscription_id(response) == Some(active_id.as_str()) {
+            self.subscription_ids.insert(active_id);
+        }
+        pending
+    }
 }
 
 /// Runs one frontend D-Bus session over atomic newline-delimited JSON messages.
@@ -173,13 +185,11 @@ fn emit_dbus_response(
             );
         }
     };
-    let active_id = response_active_id(&response).map(ToString::to_string);
-    let subscription_id = response_subscription_id(&response).map(ToString::to_string);
     emit(
         output_lock,
         &json!({ "kind": "response", "id": id, "ok": true, "response": response }),
     )?;
-    flush_pending_events(output_lock, state, active_id, subscription_id)
+    flush_pending_events(output_lock, state, &response)
 }
 
 fn emit_response_error(output_lock: &Mutex<()>, id: &str, error: String) -> Result<()> {
@@ -192,21 +202,9 @@ fn emit_response_error(output_lock: &Mutex<()>, id: &str, error: String) -> Resu
 fn flush_pending_events(
     output_lock: &Mutex<()>,
     state: &Mutex<ClientState>,
-    active_id: Option<String>,
-    subscription_id: Option<String>,
+    response: &Value,
 ) -> Result<()> {
-    let Some(active_id) = active_id else {
-        return Ok(());
-    };
-    let pending = {
-        let mut state = recover_lock(state, "frontend client state");
-        let pending = state.take_pending_events(&active_id);
-        state.active_ids.insert(active_id.clone());
-        if subscription_id.as_deref() == Some(active_id.as_str()) {
-            state.subscription_ids.insert(active_id);
-        }
-        pending
-    };
+    let pending = recover_lock(state, "frontend client state").activate_response(response);
     for (stream, event) in pending {
         emit(
             output_lock,
@@ -371,11 +369,67 @@ fn emit(output_lock: &Mutex<()>, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientState, forget_cancelled_subscription, forget_terminal_id, response_active_id,
-        response_subscription_id,
+        ClientRequest, ClientState, forget_cancelled_subscription, forget_terminal_id,
+        response_active_id, response_subscription_id,
     };
     use serde_json::json;
     use std::sync::Mutex;
+
+    #[test]
+    fn every_jsonl_request_variant_decodes() {
+        let call = serde_json::from_str::<ClientRequest>(
+            r#"{"op":"call","id":"call-1","method":"wifi.status"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            call,
+            ClientRequest::Call { id, method, params }
+                if id == "call-1" && method == "wifi.status" && params.is_null()
+        ));
+        let subscribe = serde_json::from_str::<ClientRequest>(
+            r#"{"op":"subscribe","id":"sub-1","streams":["wifi.status"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            subscribe,
+            ClientRequest::Subscribe { id, streams }
+                if id == "sub-1" && streams == ["wifi.status"]
+        ));
+        let cancel = serde_json::from_str::<ClientRequest>(
+            r#"{"op":"cancel","id":"cancel-1","request_id":"scan-1"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            cancel,
+            ClientRequest::Cancel { id, request_id }
+                if id == "cancel-1" && request_id == "scan-1"
+        ));
+        let shutdown =
+            serde_json::from_str::<ClientRequest>(r#"{"op":"shutdown","id":"shutdown-1"}"#)
+                .unwrap();
+        assert!(matches!(
+            shutdown,
+            ClientRequest::Shutdown { id } if id == "shutdown-1"
+        ));
+        assert!(serde_json::from_str::<ClientRequest>("not-json").is_err());
+    }
+
+    #[test]
+    fn response_activation_releases_correlated_events_after_the_response() {
+        let mut state = ClientState::default();
+        state.buffer_event(
+            "scan-1".into(),
+            "wifi.scan".into(),
+            json!({ "request_id": "scan-1", "event": "status" }),
+        );
+        let response = json!({ "data": { "result": { "request_id": "scan-1" } } });
+        let pending = state.activate_response(&response);
+        assert!(state.active_ids.contains("scan-1"));
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "wifi.scan");
+        assert_eq!(pending[0].1["event"], "status");
+        assert!(!state.pending_events.contains_key("scan-1"));
+    }
 
     #[test]
     fn buffered_events_evict_the_oldest_request() {
