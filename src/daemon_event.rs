@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use anyhow::Result;
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
@@ -7,11 +5,10 @@ use zbus::object_server::SignalEmitter;
 use crate::error::{DomainError, ErrorOperation, best_effort};
 use crate::protocol::Stream;
 
-static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+static REQUEST_IDS: shelllist_daemon_core::IdSequence = shelllist_daemon_core::IdSequence::new(1);
 
 pub(crate) fn next_request_id(prefix: &str) -> String {
-    let value = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-    format!("{prefix}-{value}")
+    REQUEST_IDS.next(prefix)
 }
 
 pub(crate) fn event_value(

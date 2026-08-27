@@ -3,6 +3,8 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::fmt;
 
+use shelllist_daemon_core::{ApiError as EnvelopeError, ApiIdentity};
+
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport, ErrorSource};
 use crate::model::{
     AccessPoint, ConnectFailureReason, ConnectResult, ConnectivityStatus, DisconnectResult,
@@ -11,6 +13,7 @@ use crate::model::{
 
 pub(crate) const API_PROTOCOL: &str = "nm-api";
 pub(crate) const API_VERSION: u32 = 1;
+const API: ApiIdentity = ApiIdentity::new(API_PROTOCOL, API_VERSION);
 
 #[derive(Debug)]
 struct ApiErrorAlreadyReported;
@@ -117,17 +120,16 @@ pub(crate) fn print_error_report(report: &ErrorReport) -> Result<()> {
 }
 
 pub(crate) fn api_error_value_for(report: &ErrorReport) -> Value {
-    json!({
-        "protocol": API_PROTOCOL,
-        "version": API_VERSION,
-        "ok": false,
-        "error": {
-            "code": report.code,
-            "message": report.message,
-            "details": report.api_details(),
-        },
-        "data": {},
-    })
+    let code = serde_json::to_value(report.code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "internal-error".to_string());
+    let mut envelope = shelllist_daemon_core::error(
+        API,
+        EnvelopeError::new(code, report.message.clone()).with_details(report.api_details()),
+    );
+    envelope["data"] = json!({});
+    envelope
 }
 
 pub(crate) fn print_api_message(message: &str) -> Result<()> {
@@ -151,12 +153,10 @@ pub(crate) fn api_data_value<T: Serialize + ?Sized>(
     value: &T,
     context: &'static str,
 ) -> Result<Value> {
-    Ok(json!({
-        "protocol": API_PROTOCOL,
-        "version": API_VERSION,
-        "ok": true,
-        "data": api_data_map(key, value, context)?,
-    }))
+    Ok(shelllist_daemon_core::success(
+        API,
+        Value::Object(api_data_map(key, value, context)?),
+    ))
 }
 
 fn print_api_error_with_data<T: Serialize + ?Sized>(
@@ -165,13 +165,15 @@ fn print_api_error_with_data<T: Serialize + ?Sized>(
     value: &T,
     context: &'static str,
 ) -> Result<()> {
-    let envelope = json!({
-        "protocol": API_PROTOCOL,
-        "version": API_VERSION,
-        "ok": false,
-        "error": error,
-        "data": api_data_map(key, value, context)?,
-    });
+    let code = error["code"].as_str().unwrap_or("internal-error");
+    let message = error["message"].as_str().unwrap_or("operation failed");
+    let details = error.get("details").cloned();
+    let api_error = details.map_or_else(
+        || EnvelopeError::new(code, message),
+        |details| EnvelopeError::new(code, message).with_details(details),
+    );
+    let mut envelope = shelllist_daemon_core::error(API, api_error);
+    envelope["data"] = Value::Object(api_data_map(key, value, context)?);
     print_pretty_json(&envelope, context)
 }
 

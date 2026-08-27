@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use serde::Deserialize;
 use serde_json::{Value, json};
+use shelllist_daemon_core::ClientRequest;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
@@ -13,29 +13,6 @@ use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH};
 
 const OUTPUT_QUEUE_CAPACITY: usize = 64;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "kebab-case")]
-enum ClientRequest {
-    Call {
-        id: String,
-        method: String,
-        #[serde(default)]
-        params: Value,
-    },
-    Subscribe {
-        id: String,
-        #[serde(default)]
-        streams: Vec<String>,
-    },
-    Cancel {
-        id: String,
-        request_id: String,
-    },
-    Shutdown {
-        id: String,
-    },
-}
 
 #[derive(Default)]
 struct ClientState {
