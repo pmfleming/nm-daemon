@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 use crate::actions;
@@ -8,11 +8,11 @@ use crate::cli::{
 use crate::logging;
 use crate::nm::Nm;
 
-pub fn run() -> Result<()> {
-    crate::error::operation_result(crate::error::ErrorOperation::Initialize, run_inner())
+pub async fn run() -> Result<()> {
+    crate::error::operation_result(crate::error::ErrorOperation::Initialize, run_inner().await)
 }
 
-fn run_inner() -> Result<()> {
+async fn run_inner() -> Result<()> {
     let Cli {
         verbose,
         log_file,
@@ -22,10 +22,22 @@ fn run_inner() -> Result<()> {
     let log_path = logging::init(verbose, log_file)?;
     tracing::debug!(path = %log_path.display(), "using log file");
 
-    if try_forward(&command, direct)? {
-        return Ok(());
-    }
-    run_command(command)
+    run_blocking(move || {
+        if try_forward(&command, direct)? {
+            return Ok(());
+        }
+        run_command(command)
+    })
+    .await
+}
+
+async fn run_blocking<T>(task: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .context("join blocking command task")?
 }
 
 fn try_forward(command: &Command, direct: bool) -> Result<bool> {
