@@ -22,6 +22,10 @@ async fn run_inner() -> Result<()> {
     let log_path = logging::init(verbose, log_file)?;
     tracing::debug!(path = %log_path.display(), "using log file");
 
+    if matches!(command, Command::Client) {
+        return crate::client::run().await;
+    }
+
     run_blocking(move || {
         if try_forward(&command, direct)? {
             return Ok(());
@@ -58,7 +62,7 @@ fn try_forward(command: &Command, direct: bool) -> Result<bool> {
 fn run_command(command: Command) -> Result<()> {
     match command {
         Command::Daemon => crate::daemon::run_daemon(),
-        Command::Client => crate::client::run(),
+        Command::Client => unreachable!("client command is dispatched asynchronously"),
         Command::Wifi { command } => run_wifi_command(command),
         Command::Network { command } => run_network_command(command),
         Command::Hotspot { command } => run_hotspot_command(command),
