@@ -13,9 +13,11 @@ use crate::error::{ErrorOperation, ensure_domain};
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Stream};
 
 pub(crate) async fn run_daemon() -> Result<()> {
-    let runtime = tokio::task::spawn_blocking(|| DaemonRuntime::start(crate::nm::Nm::new()?))
-        .await
-        .context("join NetworkManager runtime initialization")??;
+    let tokio = tokio::runtime::Handle::current();
+    let runtime =
+        tokio::task::spawn_blocking(move || DaemonRuntime::start(crate::nm::Nm::new()?, tokio))
+            .await
+            .context("join NetworkManager runtime initialization")??;
     let connection = zbus::connection::Builder::session()
         .context("connect to session D-Bus")?
         .name(DBUS_BUS_NAME)
@@ -324,11 +326,11 @@ mod tests {
             Arc::new(UnavailableWirelessTelemetry),
         )
         .unwrap();
-        let runtime = DaemonRuntime::start(nm).unwrap();
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
+        let runtime = DaemonRuntime::start(nm, tokio_runtime.handle().clone()).unwrap();
 
         let daemon = TestPeer::new(":1.2", ":1.3");
         daemon

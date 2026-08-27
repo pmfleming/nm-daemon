@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, BackgroundScanScheduler, ScanRequest};
@@ -76,18 +77,18 @@ pub(crate) struct DaemonRuntime {
     nm: Arc<Nm>,
     work: SyncSender<Job>,
     fast_work: SyncSender<Job>,
-    control: SyncSender<Control>,
+    control: tokio_mpsc::Sender<Control>,
     tasks: Mutex<HashMap<String, TaskHandle>>,
     tasks_changed: Condvar,
     cache_refresh_pending: AtomicBool,
 }
 
 impl DaemonRuntime {
-    pub(crate) fn start(nm: Nm) -> Result<Arc<Self>> {
+    pub(crate) fn start(nm: Nm, tokio: tokio::runtime::Handle) -> Result<Arc<Self>> {
         let nm = Arc::new(nm);
         let (work_tx, work_rx) = mpsc::sync_channel(WORK_QUEUE_CAPACITY);
         let (fast_work_tx, fast_work_rx) = mpsc::sync_channel(WORK_QUEUE_CAPACITY);
-        let (control_tx, control_rx) = mpsc::sync_channel(CONTROL_QUEUE_CAPACITY);
+        let (control_tx, control_rx) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
         start_workers(Arc::clone(&nm), work_rx, "nm-worker", WORKER_COUNT)?;
         start_workers(
             Arc::clone(&nm),
@@ -105,7 +106,7 @@ impl DaemonRuntime {
             tasks_changed: Condvar::new(),
             cache_refresh_pending: AtomicBool::new(false),
         });
-        start_event_loop(Arc::downgrade(&runtime), control_rx)?;
+        start_event_loop(&tokio, Arc::downgrade(&runtime), control_rx);
         let control = runtime.control.clone();
         runtime.nm.subscribe_events(Arc::new(move || {
             let _ = control.try_send(Control::NetworkChanged);
@@ -238,15 +239,15 @@ impl DaemonRuntime {
         streams: Vec<Stream>,
         emitter: SignalEmitter<'static>,
     ) -> Result<()> {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let (reply_tx, reply_rx) = oneshot::channel();
         self.control
             .try_send(Control::Subscribe {
                 subscription: SubscriptionState::new(subscription_id, owner, streams, emitter),
                 reply: reply_tx,
             })
-            .map_err(|error| queue_error(ErrorOperation::Subscribe, "control", error))?;
+            .map_err(|error| control_queue_error(ErrorOperation::Subscribe, error))?;
         reply_rx
-            .recv()
+            .blocking_recv()
             .map_err(|_| runtime_stopped(ErrorOperation::Subscribe))
     }
 
@@ -300,7 +301,7 @@ impl DaemonRuntime {
         owner: Option<&str>,
         task_found: bool,
     ) -> CancelOutcome {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .control
             .try_send(Control::CancelSubscription {
@@ -316,7 +317,7 @@ impl DaemonRuntime {
                 subscription: false,
             };
         }
-        reply_rx.recv().unwrap_or(CancelOutcome {
+        reply_rx.blocking_recv().unwrap_or(CancelOutcome {
             task: task_found,
             subscription: false,
         })
@@ -353,7 +354,7 @@ impl DaemonRuntime {
     }
 
     pub(crate) fn subscriber_owners(&self, stream: Stream) -> Vec<String> {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .control
             .try_send(Control::SubscriberOwners {
@@ -364,7 +365,7 @@ impl DaemonRuntime {
         {
             return Vec::new();
         }
-        reply_rx.recv().unwrap_or_default()
+        reply_rx.blocking_recv().unwrap_or_default()
     }
 
     pub(crate) fn emit_external(
@@ -459,17 +460,17 @@ impl TaskKind {
 enum Control {
     Subscribe {
         subscription: SubscriptionState,
-        reply: SyncSender<()>,
+        reply: oneshot::Sender<()>,
     },
     CancelSubscription {
         id: String,
         owner: Option<String>,
         task_found: bool,
-        reply: SyncSender<CancelOutcome>,
+        reply: oneshot::Sender<CancelOutcome>,
     },
     SubscriberOwners {
         stream: Stream,
-        reply: SyncSender<Vec<String>>,
+        reply: oneshot::Sender<Vec<String>>,
     },
     ExternalEvent {
         stream: Stream,
@@ -542,28 +543,23 @@ fn start_workers(
     Ok(())
 }
 
-fn start_event_loop(runtime: Weak<DaemonRuntime>, receiver: Receiver<Control>) -> Result<()> {
-    std::thread::Builder::new()
-        .name("nm-runtime".to_string())
-        .spawn(move || run_event_loop(runtime, receiver))
-        .context("spawn daemon event runtime")?;
-    Ok(())
+fn start_event_loop(
+    tokio: &tokio::runtime::Handle,
+    runtime: Weak<DaemonRuntime>,
+    receiver: tokio_mpsc::Receiver<Control>,
+) {
+    tokio.spawn(run_event_loop(runtime, receiver));
 }
 
-fn run_event_loop(runtime: Weak<DaemonRuntime>, receiver: Receiver<Control>) {
+async fn run_event_loop(runtime: Weak<DaemonRuntime>, mut receiver: tokio_mpsc::Receiver<Control>) {
     let mut subscriptions = HashMap::<String, SubscriptionState>::new();
     let mut refresh = RefreshGate::default();
-    while let Some((runtime, control)) = next_control(&runtime, &receiver) {
+    while let Some(control) = receiver.recv().await {
+        let Some(runtime) = runtime.upgrade() else {
+            return;
+        };
         handle_control(control, &runtime, &mut subscriptions, &mut refresh);
     }
-}
-
-fn next_control(
-    runtime: &Weak<DaemonRuntime>,
-    receiver: &Receiver<Control>,
-) -> Option<(Arc<DaemonRuntime>, Control)> {
-    let control = receiver.recv().ok()?;
-    Some((runtime.upgrade()?, control))
 }
 
 fn handle_control(
@@ -610,7 +606,7 @@ fn handle_control(
 
 fn add_subscription(
     subscription: SubscriptionState,
-    reply: SyncSender<()>,
+    reply: oneshot::Sender<()>,
     runtime: &Arc<DaemonRuntime>,
     subscriptions: &mut HashMap<String, SubscriptionState>,
     refresh: &mut RefreshGate,
@@ -624,7 +620,7 @@ fn remove_subscription(
     id: String,
     owner: Option<&str>,
     task_found: bool,
-    reply: SyncSender<CancelOutcome>,
+    reply: oneshot::Sender<CancelOutcome>,
     subscriptions: &mut HashMap<String, SubscriptionState>,
 ) {
     let subscription = subscriptions
@@ -667,7 +663,7 @@ fn publish_health_signal(
             let request_id = crate::daemon_event::next_request_id("health");
             match nm.network_health_event(&signal) {
                 Ok(health) => {
-                    let _ = control.send(Control::ExternalEvent {
+                    let _ = control.blocking_send(Control::ExternalEvent {
                         stream: Stream::NetworkHealth,
                         request_id: request_id.clone(),
                         event,
@@ -788,7 +784,7 @@ fn submit_shared_refresh(
                 need_inventory,
                 need_networks,
             );
-            let _ = control.send(Control::Refreshed(payloads));
+            let _ = control.blocking_send(Control::Refreshed(payloads));
         }),
     ) {
         Ok(()) => refresh.started(),
@@ -836,6 +832,19 @@ impl RefreshGate {
         self.in_flight = false;
         std::mem::take(&mut self.dirty)
     }
+}
+
+fn control_queue_error<T>(
+    operation: ErrorOperation,
+    error: tokio_mpsc::error::TrySendError<T>,
+) -> anyhow::Error {
+    let message = match error {
+        tokio_mpsc::error::TrySendError::Full(_) => "daemon work queue is full",
+        tokio_mpsc::error::TrySendError::Closed(_) => "daemon runtime has stopped",
+    };
+    DomainError::internal(operation, message)
+        .with_detail("queue", "control")
+        .into()
 }
 
 fn queue_error<T>(
