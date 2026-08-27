@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
-use tokio::sync::{mpsc as tokio_mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc as tokio_mpsc, oneshot};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, BackgroundScanScheduler, ScanRequest};
@@ -20,6 +20,59 @@ use crate::protocol::Stream;
 type Job = Box<dyn FnOnce(&Nm) + Send + 'static>;
 
 const FAST_WORKER_COUNT: usize = 1;
+
+#[derive(Clone)]
+struct BlockingLane {
+    sender: tokio_mpsc::Sender<Job>,
+    name: &'static str,
+}
+
+impl BlockingLane {
+    fn start(
+        tokio: &tokio::runtime::Handle,
+        nm: Arc<Nm>,
+        name: &'static str,
+        capacity: usize,
+        concurrency: usize,
+    ) -> Self {
+        let (sender, receiver) = tokio_mpsc::channel(capacity);
+        tokio.spawn(run_blocking_lane(nm, name, concurrency, receiver));
+        Self { sender, name }
+    }
+
+    fn try_submit(&self, operation: ErrorOperation, job: Job) -> Result<()> {
+        self.sender
+            .try_send(job)
+            .map_err(|error| tokio_queue_error(operation, self.name, error))
+    }
+}
+
+async fn run_blocking_lane(
+    nm: Arc<Nm>,
+    name: &'static str,
+    concurrency: usize,
+    mut receiver: tokio_mpsc::Receiver<Job>,
+) {
+    let permits = Arc::new(Semaphore::new(concurrency));
+    loop {
+        let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+            return;
+        };
+        let Some(job) = receiver.recv().await else {
+            return;
+        };
+        let nm = Arc::clone(&nm);
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            if catch_unwind(AssertUnwindSafe(|| job(&nm))).is_err() {
+                tracing::error!(
+                    lane = name,
+                    "daemon blocking job panicked; lane remains available"
+                );
+            }
+        });
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskKind {
@@ -75,8 +128,8 @@ struct CancelledTask {
 
 pub(crate) struct DaemonRuntime {
     nm: Arc<Nm>,
-    work: SyncSender<Job>,
-    fast_work: SyncSender<Job>,
+    work: BlockingLane,
+    fast_work: BlockingLane,
     control: tokio_mpsc::Sender<Control>,
     tasks: Mutex<HashMap<String, TaskHandle>>,
     tasks_changed: Condvar,
@@ -86,21 +139,26 @@ pub(crate) struct DaemonRuntime {
 impl DaemonRuntime {
     pub(crate) fn start(nm: Nm, tokio: tokio::runtime::Handle) -> Result<Arc<Self>> {
         let nm = Arc::new(nm);
-        let (work_tx, work_rx) = mpsc::sync_channel(WORK_QUEUE_CAPACITY);
-        let (fast_work_tx, fast_work_rx) = mpsc::sync_channel(WORK_QUEUE_CAPACITY);
-        let (control_tx, control_rx) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
-        start_workers(Arc::clone(&nm), work_rx, "nm-worker", WORKER_COUNT)?;
-        start_workers(
+        let work = BlockingLane::start(
+            &tokio,
             Arc::clone(&nm),
-            fast_work_rx,
-            "nm-fast-worker",
+            "work",
+            WORK_QUEUE_CAPACITY,
+            WORKER_COUNT,
+        );
+        let fast_work = BlockingLane::start(
+            &tokio,
+            Arc::clone(&nm),
+            "fast-work",
+            WORK_QUEUE_CAPACITY,
             FAST_WORKER_COUNT,
-        )?;
+        );
+        let (control_tx, control_rx) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
 
         let runtime = Arc::new(Self {
             nm,
-            work: work_tx,
-            fast_work: fast_work_tx,
+            work,
+            fast_work,
             control: control_tx,
             tasks: Mutex::new(HashMap::new()),
             tasks_changed: Condvar::new(),
@@ -245,7 +303,7 @@ impl DaemonRuntime {
                 subscription: SubscriptionState::new(subscription_id, owner, streams, emitter),
                 reply: reply_tx,
             })
-            .map_err(|error| control_queue_error(ErrorOperation::Subscribe, error))?;
+            .map_err(|error| tokio_queue_error(ErrorOperation::Subscribe, "control", error))?;
         reply_rx
             .blocking_recv()
             .map_err(|_| runtime_stopped(ErrorOperation::Subscribe))
@@ -426,15 +484,11 @@ impl DaemonRuntime {
     }
 
     fn submit(&self, operation: ErrorOperation, job: Job) -> Result<()> {
-        self.work
-            .try_send(job)
-            .map_err(|error| queue_error(operation, "work", error))
+        self.work.try_submit(operation, job)
     }
 
     fn submit_fast(&self, operation: ErrorOperation, job: Job) -> Result<()> {
-        self.fast_work
-            .try_send(job)
-            .map_err(|error| queue_error(operation, "fast-work", error))
+        self.fast_work.try_submit(operation, job)
     }
 }
 
@@ -509,38 +563,6 @@ fn recover_lock<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> {
             poisoned.into_inner()
         }
     }
-}
-
-fn start_workers(
-    nm: Arc<Nm>,
-    receiver: Receiver<Job>,
-    thread_name: &'static str,
-    worker_count: usize,
-) -> Result<()> {
-    let receiver = Arc::new(Mutex::new(receiver));
-    for index in 0..worker_count {
-        let nm = Arc::clone(&nm);
-        let receiver = Arc::clone(&receiver);
-        std::thread::Builder::new()
-            .name(format!("{thread_name}-{index}"))
-            .spawn(move || {
-                loop {
-                    let job = recover_lock(&receiver, "daemon work receiver").recv();
-                    let Ok(job) = job else {
-                        break;
-                    };
-                    if catch_unwind(AssertUnwindSafe(|| job(&nm))).is_err() {
-                        tracing::error!(
-                            worker = thread_name,
-                            index,
-                            "daemon worker job panicked; worker remains available"
-                        );
-                    }
-                }
-            })
-            .with_context(|| format!("spawn {thread_name}-{index}"))?;
-    }
-    Ok(())
 }
 
 fn start_event_loop(
@@ -834,27 +856,14 @@ impl RefreshGate {
     }
 }
 
-fn control_queue_error<T>(
+fn tokio_queue_error<T>(
     operation: ErrorOperation,
+    queue: &'static str,
     error: tokio_mpsc::error::TrySendError<T>,
 ) -> anyhow::Error {
     let message = match error {
         tokio_mpsc::error::TrySendError::Full(_) => "daemon work queue is full",
         tokio_mpsc::error::TrySendError::Closed(_) => "daemon runtime has stopped",
-    };
-    DomainError::internal(operation, message)
-        .with_detail("queue", "control")
-        .into()
-}
-
-fn queue_error<T>(
-    operation: ErrorOperation,
-    queue: &'static str,
-    error: TrySendError<T>,
-) -> anyhow::Error {
-    let message = match error {
-        TrySendError::Full(_) => "daemon work queue is full",
-        TrySendError::Disconnected(_) => "daemon runtime has stopped",
     };
     DomainError::internal(operation, message)
         .with_detail("queue", queue)
