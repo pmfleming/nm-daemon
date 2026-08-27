@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use serde_json::json;
-use zbus::MatchRule;
-use zbus::blocking::MessageIterator;
-use zbus::message::{Header, Type};
+use zbus::message::Header;
 use zbus::object_server::SignalEmitter;
 
 use crate::daemon_dispatch::{dispatch_call, json_response, subscribe_streams};
@@ -13,35 +12,43 @@ use crate::daemon_runtime::DaemonRuntime;
 use crate::error::{ErrorOperation, ensure_domain};
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Stream};
 
-pub(crate) fn run_daemon() -> Result<()> {
-    let connection = zbus::blocking::Connection::session().context("connect to session D-Bus")?;
-    let runtime = DaemonRuntime::start(crate::nm::Nm::new()?)?;
-    export_daemon_interface(&connection, &runtime)?;
-    watch_client_disconnects(connection.clone(), Arc::clone(&runtime))?;
-    register_secret_agent(&runtime);
-    log_daemon_started();
-    loop {
-        std::thread::park();
-    }
-}
-
-fn export_daemon_interface(
-    connection: &zbus::blocking::Connection,
-    runtime: &Arc<DaemonRuntime>,
-) -> Result<()> {
-    connection
-        .object_server()
-        .at(
+pub(crate) async fn run_daemon() -> Result<()> {
+    let runtime = tokio::task::spawn_blocking(|| DaemonRuntime::start(crate::nm::Nm::new()?))
+        .await
+        .context("join NetworkManager runtime initialization")??;
+    let connection = zbus::connection::Builder::session()
+        .context("connect to session D-Bus")?
+        .name(DBUS_BUS_NAME)
+        .with_context(|| format!("own D-Bus name {DBUS_BUS_NAME}"))?
+        .serve_at(
             DBUS_OBJECT_PATH,
             NmDaemonInterface {
-                runtime: Arc::clone(runtime),
+                runtime: Arc::clone(&runtime),
+                tokio: tokio::runtime::Handle::current(),
             },
         )
-        .context("export nm-daemon D-Bus object")?;
-    connection
-        .request_name(DBUS_BUS_NAME)
-        .with_context(|| format!("own D-Bus name {DBUS_BUS_NAME}"))?;
-    Ok(())
+        .context("export nm-daemon D-Bus object")?
+        .build()
+        .await
+        .context("start nm-daemon D-Bus service")?;
+    let owner_watch = tokio::spawn(watch_client_disconnects(
+        connection.clone(),
+        Arc::clone(&runtime),
+    ));
+    register_secret_agent(&runtime);
+    log_daemon_started();
+    let result = wait_for_shutdown().await;
+    owner_watch.abort();
+    result
+}
+
+async fn wait_for_shutdown() -> Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("listen for SIGTERM")?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result.context("wait for Ctrl-C"),
+        _ = terminate.recv() => Ok(()),
+    }
 }
 
 fn register_secret_agent(runtime: &Arc<DaemonRuntime>) {
@@ -63,31 +70,46 @@ fn log_daemon_started() {
 
 struct NmDaemonInterface {
     runtime: Arc<DaemonRuntime>,
+    tokio: tokio::runtime::Handle,
 }
 
 #[zbus::interface(name = "org.laufan.NmDaemon1")]
 impl NmDaemonInterface {
     /// Dispatches an nm-api v1 method and returns its JSON envelope.
-    fn call(
+    async fn call(
         &self,
         method: &str,
         params_json: &str,
         #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> String {
+        let method = method.to_string();
+        let params_json = params_json.to_string();
         let owner = header.sender().map(ToString::to_string);
         let emitter = directed_emitter(&emitter, &header);
-        json_response(dispatch_call(
-            method,
-            params_json,
-            owner,
-            emitter,
-            &self.runtime,
-        ))
+        let runtime = Arc::clone(&self.runtime);
+        self.tokio
+            .spawn_blocking(move || {
+                json_response(dispatch_call(
+                    &method,
+                    &params_json,
+                    owner,
+                    emitter,
+                    &runtime,
+                ))
+            })
+            .await
+            .unwrap_or_else(|error| {
+                json_response(Err(crate::error::DomainError::internal(
+                    ErrorOperation::Unknown,
+                    format!("D-Bus call task failed: {error}"),
+                )
+                .into()))
+            })
     }
 
     /// Subscribe to daemon event streams. Event signals are directed to the subscribing owner.
-    fn subscribe(
+    async fn subscribe(
         &self,
         streams: Vec<String>,
         #[zbus(header)] header: Header<'_>,
@@ -95,36 +117,58 @@ impl NmDaemonInterface {
     ) -> String {
         let owner = header.sender().map(ToString::to_string);
         let emitter = directed_emitter(&emitter, &header);
-        json_response(subscribe_streams(streams, owner, emitter, &self.runtime))
+        let runtime = Arc::clone(&self.runtime);
+        self.tokio
+            .spawn_blocking(move || {
+                json_response(subscribe_streams(streams, owner, emitter, &runtime))
+            })
+            .await
+            .unwrap_or_else(|error| {
+                json_response(Err(crate::error::DomainError::internal(
+                    ErrorOperation::Subscribe,
+                    format!("D-Bus subscription task failed: {error}"),
+                )
+                .into()))
+            })
     }
 
     /// Cancel a daemon request or subscription. In-flight NetworkManager calls may finish later.
-    fn cancel(
+    async fn cancel(
         &self,
         request_id: &str,
         #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) {
+        let request_id = request_id.to_string();
         let owner = header.sender().map(ToString::to_string);
         let emitter = directed_emitter(&emitter, &header);
-        let outcome = self.runtime.cancel(request_id, owner.as_deref());
-        if outcome.subscription {
-            emit_json_event_nonfatal(
-                &emitter,
-                Stream::DaemonSubscription,
-                Some(request_id),
-                "cancelled",
-                json!({ "subscription_id": request_id, "found": true }),
-            );
-        }
-        if outcome.task || !outcome.found() {
-            emit_json_event_nonfatal(
-                &emitter,
-                Stream::DaemonRequest,
-                Some(request_id),
-                "cancelled",
-                json!({ "request_id": request_id, "found": outcome.task }),
-            );
+        let runtime = Arc::clone(&self.runtime);
+        if let Err(error) = self
+            .tokio
+            .spawn_blocking(move || {
+                let outcome = runtime.cancel(&request_id, owner.as_deref());
+                if outcome.subscription {
+                    emit_json_event_nonfatal(
+                        &emitter,
+                        Stream::DaemonSubscription,
+                        Some(&request_id),
+                        "cancelled",
+                        json!({ "subscription_id": request_id, "found": true }),
+                    );
+                }
+                if outcome.task || !outcome.found() {
+                    emit_json_event_nonfatal(
+                        &emitter,
+                        Stream::DaemonRequest,
+                        Some(&request_id),
+                        "cancelled",
+                        json!({ "request_id": request_id, "found": outcome.task }),
+                    );
+                }
+            })
+            .await
+        {
+            tracing::warn!(%error, "D-Bus cancellation task failed");
         }
     }
 
@@ -146,49 +190,35 @@ fn directed_emitter(emitter: &SignalEmitter<'_>, header: &Header<'_>) -> SignalE
     }
 }
 
-fn watch_client_disconnects(
-    connection: zbus::blocking::Connection,
-    runtime: Arc<DaemonRuntime>,
-) -> Result<()> {
-    std::thread::Builder::new()
-        .name("nm-dbus-owners".to_string())
-        .spawn(move || {
-            log_owner_watch_result(run_owner_watch(&connection, &runtime));
-        })
-        .context("spawn D-Bus owner watcher")?;
-    Ok(())
-}
-
-fn run_owner_watch(connection: &zbus::blocking::Connection, runtime: &DaemonRuntime) -> Result<()> {
-    let rule = owner_change_rule()?;
-    let mut changes = MessageIterator::for_match_rule(rule, connection, Some(64))?;
-    for message in &mut changes {
-        handle_owner_change(message?, runtime)?;
-    }
-    Ok(())
-}
-
-fn owner_change_rule() -> Result<MatchRule<'static>> {
-    Ok(MatchRule::builder()
-        .msg_type(Type::Signal)
-        .sender("org.freedesktop.DBus")?
-        .interface("org.freedesktop.DBus")?
-        .member("NameOwnerChanged")?
-        .build())
-}
-
-fn handle_owner_change(message: zbus::Message, runtime: &DaemonRuntime) -> Result<()> {
-    let (name, _old_owner, new_owner): (String, String, String) = message.body().deserialize()?;
-    if name.starts_with(':') && new_owner.is_empty() {
-        runtime.drop_owner(name);
-    }
-    Ok(())
-}
-
-fn log_owner_watch_result(result: Result<()>) {
-    if let Err(error) = result {
+async fn watch_client_disconnects(connection: zbus::Connection, runtime: Arc<DaemonRuntime>) {
+    if let Err(error) = run_owner_watch(&connection, &runtime).await {
         tracing::warn!(error = %crate::error::err_chain(&error), "D-Bus owner watcher stopped");
     }
+}
+
+async fn run_owner_watch(connection: &zbus::Connection, runtime: &DaemonRuntime) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        connection,
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+    )
+    .await
+    .context("create D-Bus owner proxy")?;
+    let mut changes = proxy
+        .receive_signal("NameOwnerChanged")
+        .await
+        .context("receive D-Bus owner changes")?;
+    while let Some(message) = changes.next().await {
+        let (name, _old_owner, new_owner): (String, String, String) = message
+            .body()
+            .deserialize()
+            .context("decode D-Bus owner change")?;
+        if name.starts_with(':') && new_owner.is_empty() {
+            runtime.drop_owner(name);
+        }
+    }
+    anyhow::bail!("D-Bus owner-change stream ended")
 }
 
 pub(crate) fn emit_event_signal(
@@ -295,6 +325,10 @@ mod tests {
         )
         .unwrap();
         let runtime = DaemonRuntime::start(nm).unwrap();
+        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
 
         let daemon = TestPeer::new(":1.2", ":1.3");
         daemon
@@ -304,6 +338,7 @@ mod tests {
                 DBUS_OBJECT_PATH,
                 NmDaemonInterface {
                     runtime: Arc::clone(&runtime),
+                    tokio: tokio_runtime.handle().clone(),
                 },
             )
             .unwrap();
