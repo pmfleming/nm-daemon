@@ -11,6 +11,7 @@ use crate::daemon_event::emit_json_event_nonfatal;
 use crate::daemon_runtime::DaemonRuntime;
 use crate::error::{ErrorOperation, ensure_domain};
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Stream};
+use shelllist_daemon_tokio::directed_emitter;
 
 pub(crate) async fn run_daemon() -> Result<()> {
     let tokio = tokio::runtime::Handle::current();
@@ -39,20 +40,11 @@ pub(crate) async fn run_daemon() -> Result<()> {
     ));
     register_secret_agent(&runtime);
     log_daemon_started();
-    let result = wait_for_shutdown().await;
+    let result = shelllist_daemon_tokio::wait_for_shutdown().await;
     owner_watch.abort();
     drop(connection);
     runtime.shutdown().await;
     result
-}
-
-async fn wait_for_shutdown() -> Result<()> {
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("listen for SIGTERM")?;
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => result.context("wait for Ctrl-C"),
-        _ = terminate.recv() => Ok(()),
-    }
 }
 
 fn register_secret_agent(runtime: &Arc<DaemonRuntime>) {
@@ -187,13 +179,6 @@ impl NmDaemonInterface {
 /// short-lived credentials (for example a newly generated hotspot passphrase),
 /// so callers must never receive a broadcast emitter when D-Bus supplied a
 /// unique sender name.
-fn directed_emitter(emitter: &SignalEmitter<'_>, header: &Header<'_>) -> SignalEmitter<'static> {
-    match header.sender() {
-        Some(sender) => emitter.to_owned().set_destination(sender.to_owned().into()),
-        None => emitter.to_owned(),
-    }
-}
-
 async fn watch_client_disconnects(connection: zbus::Connection, runtime: Arc<DaemonRuntime>) {
     if let Err(error) = run_owner_watch(&connection, &runtime).await {
         tracing::warn!(error = %crate::error::err_chain(&error), "D-Bus owner watcher stopped");
