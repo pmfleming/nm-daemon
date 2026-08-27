@@ -41,6 +41,8 @@ pub(crate) async fn run_daemon() -> Result<()> {
     log_daemon_started();
     let result = wait_for_shutdown().await;
     owner_watch.abort();
+    drop(connection);
+    runtime.shutdown().await;
     result
 }
 
@@ -400,6 +402,8 @@ mod tests {
         let excessive_scan: Value = serde_json::from_str(&excessive_scan_json).unwrap();
         assert_eq!(excessive_scan["ok"], false);
         assert_eq!(excessive_scan["error"]["code"], "validation-error");
+
+        tokio_runtime.block_on(runtime.shutdown());
     }
 
     fn next_event(events: &mut zbus::blocking::proxy::SignalIterator<'_>) -> (String, Value) {

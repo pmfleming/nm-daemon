@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::Value;
-use tokio::sync::{Semaphore, mpsc as tokio_mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc as tokio_mpsc, oneshot, watch};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, BackgroundScanScheduler, ScanRequest};
@@ -20,11 +20,15 @@ use crate::protocol::Stream;
 type Job = Box<dyn FnOnce(&Nm) + Send + 'static>;
 
 const FAST_WORKER_COUNT: usize = 1;
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone)]
 struct BlockingLane {
     sender: tokio_mpsc::Sender<Job>,
     name: &'static str,
+    shutdown: watch::Sender<bool>,
+    dispatcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    active: Arc<AtomicUsize>,
+    idle: Arc<Notify>,
 }
 
 impl BlockingLane {
@@ -36,14 +40,67 @@ impl BlockingLane {
         concurrency: usize,
     ) -> Self {
         let (sender, receiver) = tokio_mpsc::channel(capacity);
-        tokio.spawn(run_blocking_lane(nm, name, concurrency, receiver));
-        Self { sender, name }
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let active = Arc::new(AtomicUsize::new(0));
+        let idle = Arc::new(Notify::new());
+        let dispatcher = tokio.spawn(run_blocking_lane(
+            nm,
+            name,
+            concurrency,
+            receiver,
+            shutdown_rx,
+            Arc::clone(&active),
+            Arc::clone(&idle),
+        ));
+        Self {
+            sender,
+            name,
+            shutdown,
+            dispatcher: Mutex::new(Some(dispatcher)),
+            active,
+            idle,
+        }
     }
 
     fn try_submit(&self, operation: ErrorOperation, job: Job) -> Result<()> {
         self.sender
             .try_send(job)
             .map_err(|error| tokio_queue_error(operation, self.name, error))
+    }
+
+    async fn shutdown(&self) {
+        let _ = self.shutdown.send(true);
+        let dispatcher = recover_lock(&self.dispatcher, "blocking lane dispatcher").take();
+        if let Some(dispatcher) = dispatcher
+            && tokio::time::timeout(RUNTIME_SHUTDOWN_TIMEOUT, dispatcher)
+                .await
+                .is_err()
+        {
+            tracing::warn!(
+                lane = self.name,
+                "blocking lane dispatcher did not stop in time"
+            );
+        }
+        if tokio::time::timeout(RUNTIME_SHUTDOWN_TIMEOUT, self.wait_until_idle())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                lane = self.name,
+                active = self.active.load(Ordering::Acquire),
+                "blocking lane jobs did not stop in time"
+            );
+        }
+    }
+
+    async fn wait_until_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            if self.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -52,16 +109,30 @@ async fn run_blocking_lane(
     name: &'static str,
     concurrency: usize,
     mut receiver: tokio_mpsc::Receiver<Job>,
+    mut shutdown: watch::Receiver<bool>,
+    active: Arc<AtomicUsize>,
+    idle: Arc<Notify>,
 ) {
     let permits = Arc::new(Semaphore::new(concurrency));
     loop {
-        let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
-            return;
+        let permit = tokio::select! {
+            _ = shutdown.changed() => return,
+            permit = Arc::clone(&permits).acquire_owned() => {
+                let Ok(permit) = permit else { return; };
+                permit
+            }
         };
-        let Some(job) = receiver.recv().await else {
-            return;
+        let job = tokio::select! {
+            _ = shutdown.changed() => return,
+            job = receiver.recv() => {
+                let Some(job) = job else { return; };
+                job
+            }
         };
         let nm = Arc::clone(&nm);
+        let active = Arc::clone(&active);
+        let idle = Arc::clone(&idle);
+        active.fetch_add(1, Ordering::AcqRel);
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             if catch_unwind(AssertUnwindSafe(|| job(&nm))).is_err() {
@@ -70,6 +141,8 @@ async fn run_blocking_lane(
                     "daemon blocking job panicked; lane remains available"
                 );
             }
+            active.fetch_sub(1, Ordering::AcqRel);
+            idle.notify_waiters();
         });
     }
 }
@@ -178,6 +251,22 @@ impl DaemonRuntime {
 
     pub(crate) fn network_manager_connection(&self) -> zbus::blocking::Connection {
         self.nm.connection()
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        {
+            let tasks = recover_lock(&self.tasks, "daemon task map");
+            tasks
+                .values()
+                .for_each(|task| task.cancellation.store(true, Ordering::Release));
+        }
+        self.nm.wake_waiters();
+
+        let (reply, stopped) = oneshot::channel();
+        if self.control.send(Control::Shutdown(reply)).await.is_ok() {
+            let _ = tokio::time::timeout(RUNTIME_SHUTDOWN_TIMEOUT, stopped).await;
+        }
+        tokio::join!(self.work.shutdown(), self.fast_work.shutdown());
     }
 
     pub(crate) fn call<T>(
@@ -536,6 +625,7 @@ enum Control {
     HealthSignal(crate::nm::HealthSignal),
     NetworkChanged,
     Refreshed(SharedPayloads),
+    Shutdown(oneshot::Sender<()>),
 }
 
 pub(crate) struct SharedPayloads {
@@ -577,6 +667,11 @@ async fn run_event_loop(runtime: Weak<DaemonRuntime>, mut receiver: tokio_mpsc::
     let mut subscriptions = HashMap::<String, SubscriptionState>::new();
     let mut refresh = RefreshGate::default();
     while let Some(control) = receiver.recv().await {
+        if let Control::Shutdown(reply) = control {
+            subscriptions.clear();
+            let _ = reply.send(());
+            return;
+        }
         let Some(runtime) = runtime.upgrade() else {
             return;
         };
@@ -623,6 +718,7 @@ fn handle_control(
         Control::Refreshed(payloads) => {
             complete_shared_refresh(payloads, runtime, subscriptions, refresh)
         }
+        Control::Shutdown(_) => unreachable!("shutdown is handled by the control actor"),
     }
 }
 
