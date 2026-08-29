@@ -229,7 +229,7 @@ pub(crate) fn emit_event_signal(
     stream: Stream,
     event_json: String,
 ) -> Result<()> {
-    zbus::block_on(NmDaemonInterface::event(
+    futures::executor::block_on(NmDaemonInterface::event(
         emitter,
         stream.as_str(),
         &event_json,
