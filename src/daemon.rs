@@ -45,8 +45,19 @@ pub(crate) async fn run_daemon() -> Result<()> {
     log_daemon_started();
     let result = shelllist_daemon_tokio::wait_for_shutdown().await;
     owner_watch.abort();
-    drop(connection);
+    connection
+        .object_server()
+        .remove::<NmDaemonInterface, _>(DBUS_OBJECT_PATH)
+        .await
+        .context("remove nm-daemon D-Bus object")?;
+    connection
+        .close()
+        .await
+        .context("close nm-daemon session D-Bus connection")?;
     runtime.shutdown().await;
+    tokio::task::spawn_blocking(move || drop(runtime))
+        .await
+        .context("join NetworkManager runtime disposal")?;
     result
 }
 
