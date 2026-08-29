@@ -38,7 +38,10 @@ pub(crate) async fn run_daemon() -> Result<()> {
         connection.clone(),
         Arc::clone(&runtime),
     ));
-    register_secret_agent(&runtime);
+    let secret_runtime = Arc::clone(&runtime);
+    tokio::task::spawn_blocking(move || register_secret_agent(&secret_runtime))
+        .await
+        .context("join NetworkManager SecretAgent registration")?;
     log_daemon_started();
     let result = shelllist_daemon_tokio::wait_for_shutdown().await;
     owner_watch.abort();
