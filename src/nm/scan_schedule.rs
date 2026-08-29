@@ -14,18 +14,24 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::deadline::Deadline;
-use crate::error::{DomainError, ErrorOperation};
+use crate::error::{DomainError, ErrorOperation, ErrorReport};
 use crate::generated::{SCAN_REQUEST_INTERVAL, SCAN_SCHEDULE_POLL_INTERVAL};
 
 /// What a caller must do after joining the scheduler for a device.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ScanTurn {
     /// This caller owns the scan and must issue `RequestScan`.
-    Request,
+    Request { generation: u64 },
     /// Another caller's scan covers the same SSIDs; wait for its result.
-    Join,
+    Join { generation: u64 },
     /// Another caller is scanning a different scope; wait, then claim again.
-    Wait,
+    Wait { generation: u64 },
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum SharedScanOutcome {
+    Succeeded,
+    Failed(ErrorReport),
 }
 
 #[derive(Debug, Default)]
@@ -38,6 +44,9 @@ pub(super) struct ScanScheduler {
 struct DeviceScanState {
     in_flight: bool,
     in_flight_ssids: Vec<Vec<u8>>,
+    generation: u64,
+    waiters: HashMap<u64, usize>,
+    completions: HashMap<u64, SharedScanOutcome>,
     last_request: Option<Instant>,
     previous_request: Option<Instant>,
 }
@@ -50,42 +59,63 @@ impl ScanScheduler {
         let state = devices.entry(device_path.to_string()).or_default();
         let requested = normalized_ssids(ssids);
         if state.in_flight {
+            *state.waiters.entry(state.generation).or_default() += 1;
             return if scan_scope_covers(&state.in_flight_ssids, &requested) {
-                ScanTurn::Join
+                ScanTurn::Join {
+                    generation: state.generation,
+                }
             } else {
-                ScanTurn::Wait
+                ScanTurn::Wait {
+                    generation: state.generation,
+                }
             };
         }
         state.in_flight = true;
         state.in_flight_ssids = requested;
+        state.generation = state.generation.wrapping_add(1);
         state.previous_request = state.last_request;
         state.last_request = Some(Instant::now());
-        ScanTurn::Request
+        ScanTurn::Request {
+            generation: state.generation,
+        }
     }
 
-    /// Releases the claim and wakes callers waiting on this device.
-    pub(super) fn release(&self, device_path: &str) {
-        if let Some(state) = self.lock().get_mut(device_path) {
+    /// Completes one owned scan and wakes callers waiting for its exact result.
+    pub(super) fn complete(&self, device_path: &str, generation: u64, outcome: SharedScanOutcome) {
+        if let Some(state) = self.lock().get_mut(device_path)
+            && state.in_flight
+            && state.generation == generation
+        {
             state.in_flight = false;
             state.in_flight_ssids.clear();
+            if state.waiters.contains_key(&generation) {
+                state.completions.insert(generation, outcome);
+            }
         }
         self.finished.notify_all();
     }
 
-    /// Waits for the in-flight scan on this device to finish, or the deadline.
-    /// Returns false when the deadline passed while a scan was still running.
-    pub(super) fn wait_for_in_flight(&self, device_path: &str, deadline: Deadline) -> bool {
+    /// Waits for one specific in-flight scan to finish, or the deadline.
+    pub(super) fn wait_for_completion(
+        &self,
+        device_path: &str,
+        generation: u64,
+        deadline: Deadline,
+    ) -> Option<SharedScanOutcome> {
         let mut devices = self.lock();
         loop {
-            if !devices
+            if let Some(outcome) = devices
                 .get(device_path)
-                .is_some_and(|state| state.in_flight)
+                .and_then(|state| state.completions.get(&generation))
+                .cloned()
             {
-                return true;
+                consume_waiter(&mut devices, device_path, generation);
+                return Some(outcome);
             }
             let wait = deadline.wait(SCAN_SCHEDULE_POLL_INTERVAL);
             if wait.is_zero() {
-                return false;
+                consume_waiter(&mut devices, device_path, generation);
+                return None;
             }
             devices = self
                 .finished
@@ -115,6 +145,24 @@ impl ScanScheduler {
         self.devices
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+fn consume_waiter(
+    devices: &mut HashMap<String, DeviceScanState>,
+    device_path: &str,
+    generation: u64,
+) {
+    let Some(state) = devices.get_mut(device_path) else {
+        return;
+    };
+    let Some(waiters) = state.waiters.get_mut(&generation) else {
+        return;
+    };
+    *waiters = waiters.saturating_sub(1);
+    if *waiters == 0 {
+        state.waiters.remove(&generation);
+        state.completions.remove(&generation);
     }
 }
 
@@ -207,21 +255,35 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ScanScheduler, ScanTurn, boottime_ms, is_transient_scan_rejection, rate_limit_wait,
+        ScanScheduler, ScanTurn, SharedScanOutcome, boottime_ms, is_transient_scan_rejection,
+        rate_limit_wait,
     };
     use crate::deadline::Deadline;
+    use crate::error::{ErrorCode, ErrorOperation, ErrorReport, ErrorSource};
     use crate::generated::SCAN_REQUEST_INTERVAL;
 
     #[test]
     fn one_caller_owns_the_scan_and_the_rest_join_it() {
         let scheduler = ScanScheduler::default();
-        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Request);
-        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Join);
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Request { generation: 1 }
+        );
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Join { generation: 1 }
+        );
         // A different device is scheduled independently.
-        assert_eq!(scheduler.claim("/devices/2", &[]), ScanTurn::Request);
+        assert_eq!(
+            scheduler.claim("/devices/2", &[]),
+            ScanTurn::Request { generation: 1 }
+        );
 
-        scheduler.release("/devices/1");
-        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Request);
+        scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Request { generation: 2 }
+        );
     }
 
     #[test]
@@ -231,32 +293,97 @@ mod tests {
         let cafe_and_office = vec![b"Office".to_vec(), b"Cafe".to_vec()];
         assert_eq!(
             scheduler.claim("/devices/1", &cafe_and_office),
-            ScanTurn::Request
+            ScanTurn::Request { generation: 1 }
         );
-        assert_eq!(scheduler.claim("/devices/1", &cafe), ScanTurn::Join);
+        assert_eq!(
+            scheduler.claim("/devices/1", &cafe),
+            ScanTurn::Join { generation: 1 }
+        );
         assert_eq!(
             scheduler.claim("/devices/1", &[b"Other".to_vec()]),
-            ScanTurn::Wait
+            ScanTurn::Wait { generation: 1 }
         );
-        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Wait);
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Wait { generation: 1 }
+        );
 
-        scheduler.release("/devices/1");
-        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Request);
-        assert_eq!(scheduler.claim("/devices/1", &cafe), ScanTurn::Wait);
+        scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Request { generation: 2 }
+        );
+        assert_eq!(
+            scheduler.claim("/devices/1", &cafe),
+            ScanTurn::Wait { generation: 2 }
+        );
     }
 
     #[test]
     fn waiting_returns_immediately_once_the_in_flight_scan_is_released() {
         let scheduler = ScanScheduler::default();
         let deadline = Deadline::from_now(Duration::from_secs(5)).unwrap();
-        assert!(scheduler.wait_for_in_flight("/devices/1", deadline));
-
-        assert_eq!(scheduler.claim("/devices/1", &[]), ScanTurn::Request);
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Request { generation: 1 }
+        );
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Join { generation: 1 }
+        );
         let expired = Deadline::from_now(Duration::from_millis(1)).unwrap();
-        assert!(!scheduler.wait_for_in_flight("/devices/1", expired));
+        assert!(
+            scheduler
+                .wait_for_completion("/devices/1", 1, expired)
+                .is_none()
+        );
 
-        scheduler.release("/devices/1");
-        assert!(scheduler.wait_for_in_flight("/devices/1", deadline));
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Join { generation: 1 }
+        );
+        scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
+        assert!(matches!(
+            scheduler.wait_for_completion("/devices/1", 1, deadline),
+            Some(SharedScanOutcome::Succeeded)
+        ));
+    }
+
+    #[test]
+    fn joining_caller_receives_the_owned_scan_failure() {
+        let scheduler = ScanScheduler::default();
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Request { generation: 1 }
+        );
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Join { generation: 1 }
+        );
+        scheduler.complete(
+            "/devices/1",
+            1,
+            SharedScanOutcome::Failed(ErrorReport {
+                code: ErrorCode::AuthorizationRequired,
+                operation: ErrorOperation::Scan,
+                source: ErrorSource::NetworkManager,
+                message: "scan permission denied".to_string(),
+                details: Default::default(),
+            }),
+        );
+
+        let outcome = scheduler
+            .wait_for_completion(
+                "/devices/1",
+                1,
+                Deadline::from_now(Duration::from_secs(1)).unwrap(),
+            )
+            .expect("owned scan outcome");
+        let SharedScanOutcome::Failed(report) = outcome else {
+            panic!("joined scan unexpectedly succeeded");
+        };
+        assert_eq!(report.code, ErrorCode::AuthorizationRequired);
+        assert_eq!(report.message, "scan permission denied");
     }
 
     #[test]

@@ -6,12 +6,12 @@ use anyhow::{Context, Result};
 use zvariant::Value;
 
 use super::scan_schedule::{
-    ScanTurn, boottime_ms, is_transient_scan_rejection, rate_limit_wait, scan_deadline_expired,
-    sleep_within_deadline,
+    ScanTurn, SharedScanOutcome, boottime_ms, is_transient_scan_rejection, rate_limit_wait,
+    scan_deadline_expired, sleep_within_deadline,
 };
 use super::{Nm, WIFI_IFACE};
 use crate::deadline::Deadline;
-use crate::error::{DomainError, ErrorOperation};
+use crate::error::{DomainError, ErrorOperation, ErrorReport};
 use crate::generated::SCAN_RETRY_DELAY;
 use crate::model::{InterfaceName, ScanRequestOptions, WifiDevice};
 
@@ -82,29 +82,30 @@ impl Nm {
         check_scan_cancelled(cancellation)?;
         ensure_scan_deadline(deadline, "timed out waiting for LastScan to change")?;
         let device_path = device.path.to_string();
-        loop {
+        let generation = loop {
             match self.scan_schedule.claim(&device_path, ssids) {
-                ScanTurn::Request => break,
-                ScanTurn::Join => {
+                ScanTurn::Request { generation } => break generation,
+                ScanTurn::Join { generation } => {
                     // The owner requested every SSID this caller needs.
                     tracing::debug!(iface = %device.iface, "joining a compatible in-flight scan");
-                    if self
-                        .scan_schedule
-                        .wait_for_in_flight(&device_path, deadline)
-                    {
-                        return Ok(());
-                    }
-                    return Err(scan_deadline_expired(
-                        "timed out waiting for an in-flight scan on this device",
-                    ));
+                    let Some(outcome) =
+                        self.scan_schedule
+                            .wait_for_completion(&device_path, generation, deadline)
+                    else {
+                        return Err(scan_deadline_expired(
+                            "timed out waiting for an in-flight scan on this device",
+                        ));
+                    };
+                    return joined_scan_result(outcome);
                 }
-                ScanTurn::Wait => {
+                ScanTurn::Wait { generation } => {
                     // A wildcard scan cannot stand in for a hidden-SSID probe,
                     // and a probe for another SSID cannot satisfy this caller.
                     tracing::debug!(iface = %device.iface, "waiting behind an incompatible in-flight scan");
-                    if !self
+                    if self
                         .scan_schedule
-                        .wait_for_in_flight(&device_path, deadline)
+                        .wait_for_completion(&device_path, generation, deadline)
+                        .is_none()
                     {
                         return Err(scan_deadline_expired(
                             "timed out waiting to schedule a targeted scan",
@@ -112,13 +113,10 @@ impl Nm {
                     }
                 }
             }
-        }
-        let lease = ScanLease {
-            nm: self,
-            device_path,
         };
+        let lease = ScanLease::new(self, device_path, generation);
         let result = self.run_owned_scan(device, deadline, ssids, cancellation);
-        drop(lease);
+        lease.complete(shared_scan_outcome(&result));
         result
     }
 
@@ -250,15 +248,63 @@ impl Nm {
     }
 }
 
-/// Releases the device's scan claim even when the scan fails or unwinds.
+/// Publishes the device scan's outcome even when the owner unwinds.
 struct ScanLease<'a> {
     nm: &'a Nm,
     device_path: String,
+    generation: u64,
+    outcome: Option<SharedScanOutcome>,
+}
+
+impl<'a> ScanLease<'a> {
+    fn new(nm: &'a Nm, device_path: String, generation: u64) -> Self {
+        Self {
+            nm,
+            device_path,
+            generation,
+            outcome: None,
+        }
+    }
+
+    fn complete(mut self, outcome: SharedScanOutcome) {
+        self.outcome = Some(outcome);
+    }
 }
 
 impl Drop for ScanLease<'_> {
     fn drop(&mut self) {
-        self.nm.scan_schedule.release(&self.device_path);
+        let outcome = self.outcome.take().unwrap_or_else(|| {
+            SharedScanOutcome::Failed(ErrorReport::from_error(
+                &anyhow::anyhow!("owned Wi-Fi scan stopped before publishing an outcome"),
+                ErrorOperation::Scan,
+            ))
+        });
+        self.nm
+            .scan_schedule
+            .complete(&self.device_path, self.generation, outcome);
+    }
+}
+
+fn shared_scan_outcome(result: &Result<()>) -> SharedScanOutcome {
+    match result {
+        Ok(()) => SharedScanOutcome::Succeeded,
+        Err(error) => {
+            SharedScanOutcome::Failed(ErrorReport::from_error(error, ErrorOperation::Scan))
+        }
+    }
+}
+
+fn joined_scan_result(outcome: SharedScanOutcome) -> Result<()> {
+    match outcome {
+        SharedScanOutcome::Succeeded => Ok(()),
+        SharedScanOutcome::Failed(report) => {
+            let mut error =
+                DomainError::new(report.code, report.operation, report.source, report.message);
+            for (key, value) in report.details {
+                error = error.with_detail(key, value);
+            }
+            Err(error.into())
+        }
     }
 }
 
