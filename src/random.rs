@@ -27,21 +27,22 @@ pub(crate) fn random_passphrase(len: usize) -> Result<String> {
     if len == 0 {
         bail!("passphrase length must be positive");
     }
-    let alphabet_len = PASSPHRASE_ALPHABET.len() as u8;
-    let limit = u8::MAX - (u8::MAX % alphabet_len);
     let mut passphrase = String::with_capacity(len);
     while passphrase.len() < len {
-        for byte in random_bytes(len * 2)? {
-            if byte >= limit {
-                continue;
-            }
-            passphrase.push(PASSPHRASE_ALPHABET[usize::from(byte % alphabet_len)] as char);
-            if passphrase.len() == len {
-                break;
-            }
-        }
+        passphrase.extend(
+            random_bytes(len * 2)?
+                .into_iter()
+                .filter_map(passphrase_character)
+                .take(len - passphrase.len()),
+        );
     }
     Ok(passphrase)
+}
+
+fn passphrase_character(byte: u8) -> Option<char> {
+    let alphabet_len = PASSPHRASE_ALPHABET.len() as u8;
+    let limit = u8::MAX - (u8::MAX % alphabet_len);
+    (byte < limit).then(|| PASSPHRASE_ALPHABET[usize::from(byte % alphabet_len)] as char)
 }
 
 pub(crate) fn random_uuid_v4() -> Result<String> {

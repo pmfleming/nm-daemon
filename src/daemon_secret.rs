@@ -677,7 +677,7 @@ impl PendingSecretRequest {
         let connection_path = connection_path.to_string();
         let secret_keys = secret_keys_for(setting_name, &hints);
         Self {
-            id: crate::daemon_event::next_request_id("secret"),
+            id: crate::daemon_runtime::next_request_id("secret"),
             key: Self::key_for(&connection_path, setting_name),
             connection_path,
             setting_name: setting_name.to_string(),

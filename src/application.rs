@@ -1,10 +1,11 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::cache;
 use crate::connect;
 use crate::error::{
-    DomainError, ErrorOperation, ErrorReport, best_effort, ensure_domain, operation_result,
+    DomainError, ErrorOperation, ErrorReport, best_effort, cancellation_requested, ensure_domain,
+    operation_result,
 };
 use crate::generated::REQUEST_TIMEOUT_MAX;
 use crate::model::{
@@ -263,7 +264,7 @@ impl<'a> Application<'a> {
     ) -> Result<Option<ErrorReport>> {
         let warning = match self.nm.scan_with_options(options, cancellation) {
             Ok(()) => None,
-            Err(err) if is_cancelled(cancellation) => return Err(err),
+            Err(err) if cancellation_requested(cancellation) => return Err(err),
             Err(err) => {
                 let err = ensure_domain(ErrorOperation::Scan, err);
                 let error = ErrorReport::from_error(&err, ErrorOperation::Scan);
@@ -858,7 +859,7 @@ fn connect_error(target: &WifiConnectTarget, error: &ErrorReport) -> ConnectResu
 }
 
 fn check_scan_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
-    if is_cancelled(cancellation) {
+    if cancellation_requested(cancellation) {
         return Err(scan_cancelled_error());
     }
     Ok(())
@@ -896,7 +897,7 @@ fn start_connect(
         target: target.clone(),
         message: "starting Wi-Fi connection".to_string(),
     })?;
-    if is_cancelled(cancellation) {
+    if cancellation_requested(cancellation) {
         return cancelled_connect(request, emit, "cancelled before connection attempt started")
             .map(Some);
     }
@@ -922,7 +923,7 @@ fn finish_connect_cancellation(
     cancellation: Option<&AtomicBool>,
     emit: &mut impl FnMut(&ConnectEvent) -> Result<()>,
 ) -> Result<Option<ConnectOutcome>> {
-    if is_cancelled(cancellation) {
+    if cancellation_requested(cancellation) {
         return cancelled_connect(request, emit, "connection attempt was cancelled").map(Some);
     }
     Ok(None)
@@ -972,10 +973,6 @@ fn resolve_connect_target(
         .with_detail("network_key", key)
         .into()),
     }
-}
-
-fn is_cancelled(cancellation: Option<&AtomicBool>) -> bool {
-    cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
 fn scan_cancelled_error() -> anyhow::Error {

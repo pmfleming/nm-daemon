@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, ConnectEvent, ConnectOutcome, ConnectRequest};
-use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, next_request_id};
+use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, started_response};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{DomainError, ErrorOperation, ErrorReport};
 use crate::model::{
@@ -15,7 +15,6 @@ use crate::model::{
     connect_target_for_network_key, ssid_for_network_key,
 };
 use crate::nm::Nm;
-use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
 
 const STREAM: Stream = Stream::WifiConnect;
@@ -127,37 +126,32 @@ pub(crate) fn start_connect_target(
     let requested_identity = params
         .requested_identity()
         .map_err(connect_validation_error)?;
-    let request_id = next_request_id("connect");
-    tracing::info!(
-        request_id = %request_id,
-        network_key = ?params.key,
-        ssid = %crate::model::display_ssid(&target_ssid),
-        "accepted correlated Wi-Fi connection request"
-    );
-    let worker_request_id = request_id.clone();
-    runtime.start_cancellable(
-        request_id.clone(),
+    let target_display = crate::model::display_ssid(&target_ssid);
+    let network_key = params.key.clone();
+    let request_id = runtime.start_cancellable(
+        "connect",
         TaskKind::Connect,
         owner,
         Some(target_ssid),
-        move |nm, cancel_flag| {
-            if let Err(err) =
-                run_connect_worker(nm, &worker_request_id, params, cancel_flag, &emitter)
-            {
-                let report = ErrorReport::from_error(&err, ErrorOperation::Connect);
-                emit_connect_failure(&emitter, &worker_request_id, &requested_identity, &report);
+        move |nm, cancel_flag, request_id| {
+            if let Err(error) = run_connect_worker(nm, request_id, params, cancel_flag, &emitter) {
+                let report = ErrorReport::from_error(&error, ErrorOperation::Connect);
+                emit_connect_failure(&emitter, request_id, &requested_identity, &report);
             }
         },
     )?;
-    api_data_value(
-        Method::WifiConnectTarget.spec().response_key,
-        &json!({
-            "status": "started",
-            "request_id": request_id,
-            "stream": STREAM,
-            "message": "Wi-Fi connection started; listen for Event('wifi.connect', event_json) signals",
-        }),
-        "serialize connect start response JSON",
+    tracing::info!(
+        %request_id,
+        ?network_key,
+        ssid = %target_display,
+        "accepted correlated Wi-Fi connection request"
+    );
+    started_response(
+        Method::WifiConnectTarget,
+        STREAM,
+        &request_id,
+        "Wi-Fi connection started; listen for Event('wifi.connect', event_json) signals",
+        json!({}),
     )
 }
 

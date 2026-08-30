@@ -4,7 +4,7 @@ use serde::Serialize;
 use super::{CommandRequest, CommandRunner};
 use crate::error::ErrorOperation;
 use crate::generated::NMCLI_QUERY_TIMEOUT;
-use crate::model::Ip4Status;
+use crate::model::{Ip4Status, frequency_band};
 
 pub(crate) struct Nmcli<'a> {
     runner: &'a dyn CommandRunner,
@@ -33,7 +33,7 @@ impl<'a> Nmcli<'a> {
         let request = CommandRequest::new("nmcli", operation, NMCLI_QUERY_TIMEOUT).args([
             "-t",
             "-f",
-            "IN-USE,SSID,BSSID,SIGNAL,SECURITY,FREQ,BAND",
+            "IN-USE,SSID,BSSID,SIGNAL,SECURITY,FREQ",
             "dev",
             "wifi",
             "list",
@@ -96,20 +96,23 @@ fn apply_device_ip4_field(ip4: &mut Ip4Status, key: &str, value: String) {
 }
 
 fn parse_active_wifi_row(line: &str) -> Option<NmcliWifiRow> {
-    let fields = split_fields(line);
-    if fields.first().map(String::as_str) != Some("*") || fields.len() < 7 {
-        return None;
-    }
+    let [active, ssid, bssid, signal, security, frequency] =
+        <[String; 6]>::try_from(split_fields(line)).ok()?;
+    (active == "*").then_some(())?;
+    let frequency_mhz = frequency
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse().ok());
     Some(NmcliWifiRow {
-        ssid: fields[1].clone(),
-        bssid: fields[2].clone(),
-        signal: fields[3].parse().ok(),
-        security: fields[4].clone(),
-        frequency_mhz: fields[5]
-            .split_whitespace()
-            .next()
-            .and_then(|value| value.parse().ok()),
-        band: fields[6].clone(),
+        ssid,
+        bssid,
+        signal: signal.parse().ok(),
+        security,
+        frequency_mhz,
+        band: frequency_mhz
+            .map(frequency_band)
+            .unwrap_or("unknown")
+            .to_string(),
     })
 }
 
@@ -152,9 +155,8 @@ mod tests {
 
     #[test]
     fn parses_escaped_active_wifi_rows() {
-        let row =
-            parse_active_wifi_row("*:Cafe:A0\\:55\\:1F\\:D0\\:42\\:8F:84:WPA2:5220 MHz:5 GHz")
-                .expect("active row");
+        let row = parse_active_wifi_row("*:Cafe:A0\\:55\\:1F\\:D0\\:42\\:8F:84:WPA2:5220 MHz")
+            .expect("active row");
         assert_eq!(row.ssid, "Cafe");
         assert_eq!(row.bssid, "A0:55:1F:D0:42:8F");
         assert_eq!(row.frequency_mhz, Some(5220));

@@ -7,11 +7,9 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::Application;
-use crate::daemon_event::{
-    emit_cancelled_operation, emit_json_event, emit_json_event_nonfatal, next_request_id,
-};
+use crate::daemon_event::{OperationEvents, started_response};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
-use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
+use crate::error::ErrorOperation;
 use crate::model::{HotspotSecurity, WifiBand};
 use crate::nm::HotspotRequest;
 use crate::output::api_data_value;
@@ -72,26 +70,21 @@ pub(crate) fn start(
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
     let request = HotspotRequest::from(params);
-    let request_id = next_request_id("hotspot");
-    let worker_request_id = request_id.clone();
-    runtime.start_cancellable(
-        request_id.clone(),
+    let request_id = runtime.start_cancellable(
+        "hotspot",
         TaskKind::Hotspot,
         owner,
         None,
-        move |nm, cancellation| {
-            run_hotspot_worker(nm, &worker_request_id, &request, cancellation, &emitter);
+        move |nm, cancellation, request_id| {
+            run_hotspot_worker(nm, request_id, &request, cancellation, &emitter);
         },
     )?;
-    api_data_value(
-        Method::HotspotStart.spec().response_key,
-        &json!({
-            "status": "started",
-            "request_id": request_id,
-            "stream": STREAM,
-            "message": "Hotspot start requested; listen for Event('hotspot', event_json) signals",
-        }),
-        "serialize hotspot start response JSON",
+    started_response(
+        Method::HotspotStart,
+        STREAM,
+        &request_id,
+        "Hotspot start requested; listen for Event('hotspot', event_json) signals",
+        json!({}),
     )
 }
 
@@ -119,25 +112,13 @@ fn run_hotspot_worker(
     cancellation: &AtomicBool,
     emitter: &SignalEmitter<'static>,
 ) {
-    emit_json_event_nonfatal(
-        emitter,
-        STREAM,
-        Some(request_id),
-        "started",
-        json!({ "request_id": request_id, "phase": "preparing" }),
-    );
-    emit_json_event_nonfatal(
-        emitter,
-        STREAM,
-        Some(request_id),
-        "progress",
-        json!({ "request_id": request_id, "phase": "activating" }),
-    );
+    let events = OperationEvents::new(emitter, STREAM, request_id);
+    events.phase("started", "preparing");
+    events.phase("progress", "activating");
 
     match Application::new(nm).start_hotspot(request, Some(cancellation)) {
         Ok(result) if cancellation.load(Ordering::Relaxed) => {
-            // The hotspot came up after cancellation was requested; take it back
-            // down so a cancelled request never leaves a radio broadcasting.
+            // A late success must not leave a cancelled hotspot broadcasting.
             let stopped = Application::new(nm).stop_hotspot();
             tracing::info!(
                 %request_id,
@@ -145,39 +126,15 @@ fn run_hotspot_worker(
                 stopped = stopped.is_ok(),
                 "stopped hotspot that activated after cancellation"
             );
-            emit_cancelled(emitter, request_id);
+            events.cancelled("Hotspot start was cancelled");
         }
-        Ok(result) => emit_json_event_nonfatal(
-            emitter,
-            STREAM,
-            Some(request_id),
-            "succeeded",
-            json!({ "request_id": request_id, "phase": "complete", "result": result }),
+        Ok(result) => events.succeeded(&result),
+        Err(error) => events.error(
+            &error,
+            ErrorOperation::HotspotOperation,
+            "Hotspot start was cancelled",
         ),
-        Err(error) => {
-            let report = ErrorReport::from_error(&error, ErrorOperation::HotspotOperation);
-            if report.code == ErrorCode::Cancelled {
-                emit_cancelled(emitter, request_id);
-                return;
-            }
-            let data = json!({
-                "request_id": request_id,
-                "phase": "failed",
-                "code": report.code,
-                "message": report.message,
-                "details": report.api_details(),
-            });
-            if let Err(emit_error) =
-                emit_json_event(emitter, STREAM, Some(request_id), "failed", data)
-            {
-                tracing::warn!(error = %crate::error::err_chain(&emit_error), "failed to emit hotspot failure");
-            }
-        }
     }
-}
-
-fn emit_cancelled(emitter: &SignalEmitter<'_>, request_id: &str) {
-    emit_cancelled_operation(emitter, STREAM, request_id, "Hotspot start was cancelled");
 }
 
 #[cfg(test)]

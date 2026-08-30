@@ -8,11 +8,9 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::Application;
-use crate::daemon_event::{
-    emit_cancelled_operation, emit_json_event, emit_json_event_nonfatal, next_request_id,
-};
+use crate::daemon_event::{OperationEvents, started_response};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
-use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport};
+use crate::error::{DomainError, ErrorOperation};
 use crate::nm::VpnSelector;
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
@@ -116,33 +114,21 @@ pub(crate) fn start_connect(
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
     let (selector, timeout) = params.split()?;
-    let request_id = next_request_id("vpn");
-    let worker_request_id = request_id.clone();
-    runtime.start_cancellable(
-        request_id.clone(),
+    let request_id = runtime.start_cancellable(
+        "vpn",
         TaskKind::Vpn,
         owner,
         None,
-        move |nm, cancellation| {
-            run_vpn_worker(
-                nm,
-                &worker_request_id,
-                &selector,
-                timeout,
-                cancellation,
-                &emitter,
-            );
+        move |nm, cancellation, request_id| {
+            run_vpn_worker(nm, request_id, &selector, timeout, cancellation, &emitter);
         },
     )?;
-    api_data_value(
-        Method::VpnConnect.spec().response_key,
-        &json!({
-            "status": "started",
-            "request_id": request_id,
-            "stream": STREAM,
-            "message": "VPN activation started; listen for Event('vpn', event_json) signals",
-        }),
-        "serialize VPN connect start response JSON",
+    started_response(
+        Method::VpnConnect,
+        STREAM,
+        &request_id,
+        "VPN activation started; listen for Event('vpn', event_json) signals",
+        json!({}),
     )
 }
 
@@ -154,10 +140,8 @@ fn run_vpn_worker(
     cancellation: &AtomicBool,
     emitter: &SignalEmitter<'static>,
 ) {
-    emit_json_event_nonfatal(
-        emitter,
-        STREAM,
-        Some(request_id),
+    let events = OperationEvents::new(emitter, STREAM, request_id);
+    events.event(
         "started",
         json!({
             "request_id": request_id,
@@ -166,51 +150,21 @@ fn run_vpn_worker(
             "path": selector.path,
         }),
     );
-    emit_json_event_nonfatal(
-        emitter,
-        STREAM,
-        Some(request_id),
-        "progress",
-        json!({ "request_id": request_id, "phase": "activating" }),
-    );
+    events.phase("progress", "activating");
 
     match Application::new(nm).connect_vpn(selector, timeout, Some(cancellation)) {
         Ok(result) if cancellation.load(Ordering::Relaxed) => {
             let _ = Application::new(nm).disconnect_vpn(selector);
             tracing::info!(%request_id, id = %result.vpn.id, "disconnected VPN that connected after cancellation");
-            emit_cancelled(emitter, request_id);
+            events.cancelled("VPN activation was cancelled");
         }
-        Ok(result) => emit_json_event_nonfatal(
-            emitter,
-            STREAM,
-            Some(request_id),
-            "succeeded",
-            json!({ "request_id": request_id, "phase": "complete", "result": result }),
+        Ok(result) => events.succeeded(&result),
+        Err(error) => events.error(
+            &error,
+            ErrorOperation::VpnOperation,
+            "VPN activation was cancelled",
         ),
-        Err(error) => {
-            let report = ErrorReport::from_error(&error, ErrorOperation::VpnOperation);
-            if report.code == ErrorCode::Cancelled {
-                emit_cancelled(emitter, request_id);
-                return;
-            }
-            let data = json!({
-                "request_id": request_id,
-                "phase": "failed",
-                "code": report.code,
-                "message": report.message,
-                "details": report.api_details(),
-            });
-            if let Err(emit_error) =
-                emit_json_event(emitter, STREAM, Some(request_id), "failed", data)
-            {
-                tracing::warn!(error = %crate::error::err_chain(&emit_error), "failed to emit VPN activation failure");
-            }
-        }
     }
-}
-
-fn emit_cancelled(emitter: &SignalEmitter<'_>, request_id: &str) {
-    emit_cancelled_operation(emitter, STREAM, request_id, "VPN activation was cancelled");
 }
 
 #[cfg(test)]

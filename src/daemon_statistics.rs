@@ -7,12 +7,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
-use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, next_request_id};
+use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, started_response};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{DomainError, ErrorOperation, ErrorReport};
 use crate::model::DeviceStatisticsSample;
 use crate::nm::{Nm, StatisticsDevice, statistics_rates};
-use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
 
 const STREAM: Stream = Stream::NetworkStatistics;
@@ -56,18 +55,16 @@ pub(crate) fn start_watch(
     let device = runtime.call(ErrorOperation::Statistics, move |nm| {
         nm.statistics_device(requested.as_deref())
     })?;
-    let request_id = next_request_id("stats");
-    let worker_request_id = request_id.clone();
     let worker_device = device.clone();
-    runtime.start_cancellable(
-        request_id.clone(),
+    let request_id = runtime.start_cancellable(
+        "stats",
         TaskKind::Statistics,
         owner,
         None,
-        move |nm, cancellation| {
+        move |nm, cancellation, request_id| {
             run_statistics_worker(
                 nm,
-                &worker_request_id,
+                request_id,
                 &worker_device,
                 interval_ms,
                 cancellation,
@@ -75,18 +72,16 @@ pub(crate) fn start_watch(
             );
         },
     )?;
-    api_data_value(
-        Method::NetworkStatisticsWatch.spec().response_key,
-        &json!({
-            "status": "started",
-            "request_id": request_id,
-            "stream": STREAM,
+    started_response(
+        Method::NetworkStatisticsWatch,
+        STREAM,
+        &request_id,
+        "Device statistics watch started; listen for Event('network.statistics', event_json) signals",
+        json!({
             "device_path": device.path,
             "device_iface": device.interface,
             "interval_ms": interval_ms,
-            "message": "Device statistics watch started; listen for Event('network.statistics', event_json) signals",
         }),
-        "serialize statistics watch start response JSON",
     )
 }
 
@@ -115,41 +110,18 @@ fn run_statistics_worker(
         }),
     );
 
-    let interval = Duration::from_millis(u64::from(interval_ms));
-    let mut previous: Option<DeviceStatisticsSample> = None;
-    let mut stop_reason = "cancelled";
-    while !cancellation.load(Ordering::Relaxed) {
-        match nm.device_statistics(&device.path) {
-            Ok(mut sample) => {
-                if let Some(previous) = &previous {
-                    statistics_rates(previous, &mut sample);
-                }
-                emit_json_event_nonfatal(
-                    emitter,
-                    STREAM,
-                    Some(request_id),
-                    "sample",
-                    json!({
-                        "request_id": request_id,
-                        "device_path": device.path,
-                        "device_iface": device.interface,
-                        "statistics": &sample,
-                    }),
-                );
-                previous = Some(sample);
-            }
-            Err(error) => {
-                emit_failure(emitter, request_id, device, &error);
-                stop_reason = "failed";
-                break;
-            }
-        }
-        if !sleep_until_cancelled(interval, cancellation) {
-            break;
-        }
-    }
+    let result = watch_statistics(
+        nm,
+        request_id,
+        device,
+        Duration::from_millis(u64::from(interval_ms)),
+        cancellation,
+        emitter,
+    );
     nm.release_statistics_refresh(&device.path);
-    if stop_reason == "cancelled" {
+    if let Err(error) = result {
+        emit_failure(emitter, request_id, device, &error);
+    } else {
         emit_json_event_nonfatal(
             emitter,
             STREAM,
@@ -163,6 +135,40 @@ fn run_statistics_worker(
             }),
         );
     }
+}
+
+fn watch_statistics(
+    nm: &Nm,
+    request_id: &str,
+    device: &StatisticsDevice,
+    interval: Duration,
+    cancellation: &AtomicBool,
+    emitter: &SignalEmitter<'static>,
+) -> Result<()> {
+    let mut previous: Option<DeviceStatisticsSample> = None;
+    while !cancellation.load(Ordering::Relaxed) {
+        let mut sample = nm.device_statistics(&device.path)?;
+        if let Some(previous) = &previous {
+            statistics_rates(previous, &mut sample);
+        }
+        emit_json_event_nonfatal(
+            emitter,
+            STREAM,
+            Some(request_id),
+            "sample",
+            json!({
+                "request_id": request_id,
+                "device_path": device.path,
+                "device_iface": device.interface,
+                "statistics": &sample,
+            }),
+        );
+        previous = Some(sample);
+        if !sleep_until_cancelled(interval, cancellation) {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Sleeps in short slices so cancellation is observed well before the next

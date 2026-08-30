@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::daemon_connect::DbusConnectTargetParams;
-use crate::daemon_event::{emit_json_event_nonfatal, next_request_id};
-use crate::daemon_runtime::DaemonRuntime;
+use crate::daemon_event::emit_json_event_nonfatal;
+use crate::daemon_runtime::{DaemonRuntime, next_request_id};
 use crate::daemon_scan::DbusScanParams;
 use crate::error::{DomainError, ErrorOperation, ErrorReport, operation_result};
 use crate::output::{api_data_value, api_error_value_for};

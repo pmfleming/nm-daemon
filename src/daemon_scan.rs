@@ -8,11 +8,10 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, PreparedScanRequest, ScanEvent, ScanRequest};
-use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, next_request_id};
+use crate::daemon_event::{OperationEvents, emit_json_event, started_response};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
-use crate::error::{ErrorOperation, ErrorReport};
+use crate::error::ErrorOperation;
 use crate::nm::Nm;
-use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
 
 const STREAM: Stream = Stream::WifiScan;
@@ -47,46 +46,27 @@ pub(crate) fn start_scan(
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
     let request = ScanRequest::from(params).prepare()?;
-    let request_id = next_request_id("scan");
-    let worker_request_id = request_id.clone();
-    runtime.start_cancellable(
-        request_id.clone(),
+    let request_id = runtime.start_cancellable(
+        "scan",
         TaskKind::Scan,
         owner,
         None,
-        move |nm, cancellation| {
-            if let Err(err) =
-                run_scan_events(nm, &worker_request_id, request, cancellation, &emitter)
-            {
-                let report = ErrorReport::from_error(&err, ErrorOperation::Scan);
-                emit_json_event_nonfatal(
-                    &emitter,
-                    STREAM,
-                    Some(&worker_request_id),
-                    if report.code == crate::error::ErrorCode::Cancelled {
-                        "cancelled"
-                    } else {
-                        "failed"
-                    },
-                    json!({
-                        "request_id": worker_request_id,
-                        "code": report.code,
-                        "message": report.message,
-                        "details": report.api_details(),
-                    }),
+        move |nm, cancellation, request_id| {
+            if let Err(error) = run_scan_events(nm, request_id, request, cancellation, &emitter) {
+                OperationEvents::new(&emitter, STREAM, request_id).error(
+                    &error,
+                    ErrorOperation::Scan,
+                    "Wi-Fi scan was cancelled",
                 );
             }
         },
     )?;
-    api_data_value(
-        Method::WifiScan.spec().response_key,
-        &json!({
-            "status": "started",
-            "request_id": request_id,
-            "stream": STREAM,
-            "message": "Wi-Fi scan started; listen for Event('wifi.scan', event_json) signals",
-        }),
-        "serialize scan start response JSON",
+    started_response(
+        Method::WifiScan,
+        STREAM,
+        &request_id,
+        "Wi-Fi scan started; listen for Event('wifi.scan', event_json) signals",
+        json!({}),
     )
 }
 

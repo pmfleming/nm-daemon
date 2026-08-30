@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -10,7 +10,7 @@ use super::{
     ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE,
     NM_ACTIVE_CONNECTION_STATE_ACTIVATED, Nm, WIFI_IFACE, owned_value,
 };
-use crate::error::{DomainError, ErrorOperation};
+use crate::error::{DomainError, ErrorOperation, check_cancellation};
 use crate::model::{
     HotspotCapabilities, HotspotDevice, HotspotSecurity, HotspotShare, HotspotStartResult,
     HotspotStatus, HotspotStopResult, HotspotUnavailableReason, WifiBand, display_ssid, ssid_hex,
@@ -93,7 +93,7 @@ impl Nm {
                 return Ok(status);
             }
         }
-        Ok(inactive_hotspot_status())
+        Ok(HotspotStatus::default())
     }
 
     pub(crate) fn start_hotspot(
@@ -110,7 +110,11 @@ impl Nm {
             .into());
         }
         let resolved = self.resolve_hotspot(request)?;
-        check_cancelled(cancellation)?;
+        check_cancellation(
+            cancellation,
+            ErrorOperation::HotspotOperation,
+            "hotspot start was cancelled",
+        )?;
         let settings = hotspot_connection_settings(&resolved, request)?;
         tracing::info!(
             ssid = %resolved.ssid,
@@ -327,7 +331,11 @@ impl Nm {
     ) -> Result<()> {
         let deadline = Instant::now() + ACTIVATION_TIMEOUT;
         loop {
-            check_cancelled(cancellation)?;
+            check_cancellation(
+                cancellation,
+                ErrorOperation::HotspotOperation,
+                "hotspot start was cancelled",
+            )?;
             let state: u32 = self
                 .proxy(active_path.as_str(), ACTIVE_CONNECTION_IFACE)
                 .and_then(|proxy| {
@@ -637,38 +645,8 @@ fn wifi_mode_name(mode: u32) -> &'static str {
     }
 }
 
-fn inactive_hotspot_status() -> HotspotStatus {
-    HotspotStatus {
-        active: false,
-        device_path: None,
-        device_iface: None,
-        ssid: None,
-        ssid_hex: None,
-        band: None,
-        channel: None,
-        security: None,
-        hidden: false,
-        profile_path: None,
-        active_connection: None,
-        state: None,
-        state_name: None,
-        share: None,
-    }
-}
-
 fn root_path() -> OwnedObjectPath {
     OwnedObjectPath::default()
-}
-
-fn check_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
-    if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-        return Err(DomainError::cancelled_operation(
-            ErrorOperation::HotspotOperation,
-            "hotspot start was cancelled",
-        )
-        .into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

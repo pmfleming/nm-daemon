@@ -208,7 +208,7 @@ pub(crate) struct HotspotDevice {
     pub(crate) bands: Vec<WifiBand>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct HotspotStatus {
     pub(crate) active: bool,
     pub(crate) device_path: Option<String>,

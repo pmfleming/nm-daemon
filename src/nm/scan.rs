@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -11,7 +11,7 @@ use super::scan_schedule::{
 };
 use super::{Nm, WIFI_IFACE};
 use crate::deadline::Deadline;
-use crate::error::{DomainError, ErrorOperation, ErrorReport};
+use crate::error::{DomainError, ErrorOperation, ErrorReport, check_cancellation};
 use crate::generated::SCAN_RETRY_DELAY;
 use crate::model::{InterfaceName, ScanRequestOptions, WifiDevice};
 
@@ -160,22 +160,34 @@ impl Nm {
                 }
             }
             check_scan_cancelled(cancellation)?;
-            match self.request_scan_for_ssids(device, ssids) {
-                Ok(()) => {
-                    self.scan_schedule.note_request(&device_path);
-                    return Ok(());
-                }
-                Err(error) if !is_transient_scan_rejection(&error) => return Err(error),
-                Err(error) if deadline.expired() => return Err(error),
-                Err(error) => {
-                    tracing::debug!(
-                        iface = %device.iface,
-                        error = %crate::error::err_chain(&error),
-                        "NetworkManager rejected the scan request; retrying within the deadline"
-                    );
-                    wait = SCAN_RETRY_DELAY;
-                }
+            if self.try_scan_request(device, ssids, &device_path, deadline)? {
+                return Ok(());
             }
+            wait = SCAN_RETRY_DELAY;
+        }
+    }
+
+    fn try_scan_request(
+        &self,
+        device: &WifiDevice,
+        ssids: &[Vec<u8>],
+        device_path: &str,
+        deadline: Deadline,
+    ) -> Result<bool> {
+        match self.request_scan_for_ssids(device, ssids) {
+            Ok(()) => {
+                self.scan_schedule.note_request(device_path);
+                Ok(true)
+            }
+            Err(error) if is_transient_scan_rejection(&error) && !deadline.expired() => {
+                tracing::debug!(
+                    iface = %device.iface,
+                    error = %crate::error::err_chain(&error),
+                    "NetworkManager rejected the scan request; retrying within the deadline"
+                );
+                Ok(false)
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -316,10 +328,5 @@ fn ensure_scan_deadline(deadline: Deadline, message: &str) -> Result<()> {
 }
 
 fn check_scan_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
-    if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-        return Err(
-            DomainError::cancelled_operation(ErrorOperation::Scan, "Wi-Fi scan cancelled").into(),
-        );
-    }
-    Ok(())
+    check_cancellation(cancellation, ErrorOperation::Scan, "Wi-Fi scan cancelled")
 }

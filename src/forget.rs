@@ -476,7 +476,7 @@ fn status_matches_target(status: &WifiStatus, target: &WifiConnectTarget) -> boo
 
 fn normalized_request_id(request_id: String) -> String {
     if request_id.trim().is_empty() {
-        crate::daemon_event::next_request_id("forget")
+        crate::daemon_runtime::next_request_id("forget")
     } else {
         request_id
     }

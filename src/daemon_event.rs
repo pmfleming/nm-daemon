@@ -1,15 +1,11 @@
 use anyhow::Result;
+use serde::Serialize;
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
-use crate::error::{DomainError, ErrorOperation, best_effort};
-use crate::protocol::Stream;
-
-static REQUEST_IDS: shelllist_daemon_core::IdSequence = shelllist_daemon_core::IdSequence::new(1);
-
-pub(crate) fn next_request_id(prefix: &str) -> String {
-    REQUEST_IDS.next(prefix)
-}
+use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport, best_effort};
+use crate::output::api_data_value;
+use crate::protocol::{Method, Stream};
 
 pub(crate) fn event_value(
     stream: Stream,
@@ -72,17 +68,96 @@ pub(crate) fn emit_json_event_nonfatal(
     );
 }
 
-pub(crate) fn emit_cancelled_operation(
-    emitter: &SignalEmitter<'_>,
+pub(crate) fn started_response(
+    method: Method,
     stream: Stream,
     request_id: &str,
     message: &str,
-) {
-    emit_json_event_nonfatal(
-        emitter,
-        stream,
-        Some(request_id),
-        "cancelled",
-        json!({ "request_id": request_id, "phase": "cancelled", "message": message }),
-    );
+    mut details: Value,
+) -> Result<Value> {
+    let object = details.as_object_mut().ok_or_else(|| {
+        DomainError::internal(
+            ErrorOperation::SerializeResponse,
+            "operation start response details must be a JSON object",
+        )
+    })?;
+    object.insert("status".into(), json!("started"));
+    object.insert("request_id".into(), json!(request_id));
+    object.insert("stream".into(), json!(stream));
+    object.insert("message".into(), json!(message));
+    api_data_value(
+        method.spec().response_key,
+        &details,
+        "serialize operation start response JSON",
+    )
+}
+
+pub(crate) struct OperationEvents<'a, 'e> {
+    emitter: &'a SignalEmitter<'e>,
+    stream: Stream,
+    request_id: &'a str,
+}
+
+impl<'a, 'e> OperationEvents<'a, 'e> {
+    pub(crate) fn new(emitter: &'a SignalEmitter<'e>, stream: Stream, request_id: &'a str) -> Self {
+        Self {
+            emitter,
+            stream,
+            request_id,
+        }
+    }
+
+    pub(crate) fn event(&self, event: &str, data: Value) {
+        emit_json_event_nonfatal(
+            self.emitter,
+            self.stream,
+            Some(self.request_id),
+            event,
+            data,
+        );
+    }
+
+    pub(crate) fn phase(&self, event: &str, phase: &str) {
+        self.event(
+            event,
+            json!({ "request_id": self.request_id, "phase": phase }),
+        );
+    }
+
+    pub(crate) fn succeeded(&self, result: &impl Serialize) {
+        self.event(
+            "succeeded",
+            json!({ "request_id": self.request_id, "phase": "complete", "result": result }),
+        );
+    }
+
+    pub(crate) fn cancelled(&self, message: &str) {
+        self.event(
+            "cancelled",
+            json!({ "request_id": self.request_id, "phase": "cancelled", "message": message }),
+        );
+    }
+
+    pub(crate) fn error(
+        &self,
+        error: &anyhow::Error,
+        operation: ErrorOperation,
+        cancellation_message: &str,
+    ) {
+        let report = ErrorReport::from_error(error, operation);
+        if report.code == ErrorCode::Cancelled {
+            self.cancelled(cancellation_message);
+        } else {
+            self.event(
+                "failed",
+                json!({
+                    "request_id": self.request_id,
+                    "phase": "failed",
+                    "code": report.code,
+                    "message": report.message,
+                    "details": report.api_details(),
+                }),
+            );
+        }
+    }
 }

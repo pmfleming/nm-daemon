@@ -202,21 +202,9 @@ fn file_len_or_zero(path: &Path) -> Result<u64> {
 }
 
 fn append_private_file(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut options = OpenOptions::new();
+    let mut options = private_open_options();
     options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("open {}", path.display()))?;
-    file.write_all(contents)
-        .with_context(|| format!("write {}", path.display()))?;
-    file.sync_data()
-        .with_context(|| format!("sync {}", path.display()))?;
-    set_private_file_permissions(path)
+    write_private_contents(path, contents, options, File::sync_data)
 }
 
 fn rotate_files(path: &Path, rotations: usize) -> Result<()> {
@@ -249,13 +237,8 @@ fn rename_if_exists(from: &Path, to: &Path) -> Result<()> {
 
 fn open_lock_file(path: &Path) -> Result<File> {
     reject_symlink_file(path, "storage lock")?;
-    let mut options = OpenOptions::new();
+    let mut options = private_open_options();
     options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
     let file = options
         .open(path)
         .with_context(|| format!("open storage lock {}", path.display()))?;
@@ -289,20 +272,33 @@ fn temp_path_for(path: &Path) -> Result<PathBuf> {
 }
 
 fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut options = OpenOptions::new();
+    let mut options = private_open_options();
     options.write(true).create_new(true);
+    write_private_contents(path, contents, options, File::sync_all)
+}
+
+fn private_open_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    options
+}
+
+fn write_private_contents(
+    path: &Path,
+    contents: &[u8],
+    options: OpenOptions,
+    sync: fn(&File) -> io::Result<()>,
+) -> Result<()> {
     let mut file = options
         .open(path)
         .with_context(|| format!("open {}", path.display()))?;
     file.write_all(contents)
         .with_context(|| format!("write {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("sync {}", path.display()))?;
+    sync(&file).with_context(|| format!("sync {}", path.display()))?;
     set_private_file_permissions(path)
 }
 

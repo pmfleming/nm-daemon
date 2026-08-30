@@ -19,6 +19,12 @@ use crate::protocol::Stream;
 
 type Job = Box<dyn FnOnce(&Nm) + Send + 'static>;
 
+static REQUEST_IDS: shelllist_daemon_core::IdSequence = shelllist_daemon_core::IdSequence::new(1);
+
+pub(crate) fn next_request_id(prefix: &str) -> String {
+    REQUEST_IDS.next(prefix)
+}
+
 const FAST_WORKER_COUNT: usize = 1;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -289,12 +295,13 @@ impl DaemonRuntime {
 
     pub(crate) fn start_cancellable(
         self: &Arc<Self>,
-        request_id: String,
+        request_prefix: &str,
         kind: TaskKind,
         owner: Option<String>,
         target_ssid: Option<Vec<u8>>,
-        task: impl FnOnce(&Nm, &AtomicBool) + Send + 'static,
-    ) -> Result<()> {
+        task: impl FnOnce(&Nm, &AtomicBool, &str) + Send + 'static,
+    ) -> Result<String> {
+        let request_id = next_request_id(request_prefix);
         let cancellation = Arc::new(AtomicBool::new(false));
         let target_ssid = target_ssid.map(Arc::from);
         recover_lock(&self.tasks, "daemon task map").insert(
@@ -308,17 +315,19 @@ impl DaemonRuntime {
         );
         let registration = TaskRegistration {
             runtime: Arc::downgrade(self),
-            request_id,
+            request_id: request_id.clone(),
             cancellation: Arc::clone(&cancellation),
         };
+        let worker_request_id = request_id.clone();
         let operation = kind.operation();
         self.submit(
             operation,
             Box::new(move |nm| {
                 let _registration = registration;
-                task(nm, &cancellation);
+                task(nm, &cancellation, &worker_request_id);
             }),
-        )
+        )?;
+        Ok(request_id)
     }
 
     pub(crate) fn cancel_connects_for_ssid(
@@ -778,7 +787,7 @@ fn publish_health_signal(
     let queued = runtime.submit_fast(
         ErrorOperation::Status,
         Box::new(move |nm| {
-            let request_id = crate::daemon_event::next_request_id("health");
+            let request_id = next_request_id("health");
             match nm.network_health_event(&signal) {
                 Ok(health) => {
                     let _ = control.blocking_send(Control::ExternalEvent {

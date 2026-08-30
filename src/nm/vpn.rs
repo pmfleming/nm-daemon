@@ -6,7 +6,7 @@
 //! for secrets, and the plugin's own state, banner, and typed failure reason.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use super::{
     ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, HealthSubject, Nm,
     inventory::active_connection_state_name,
 };
-use crate::error::{DomainError, ErrorOperation};
+use crate::error::{DomainError, ErrorOperation, check_cancellation};
 use crate::model::{
     NetworkConnectionSummary, TypedReason, VpnActivationResult, VpnActiveStatus,
     VpnDisconnectResult, VpnProfileSummary, VpnStatus, active_connection_state_reason,
@@ -160,13 +160,11 @@ impl Nm {
     ) -> Result<VpnActiveStatus> {
         let deadline = Instant::now() + timeout;
         loop {
-            if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                return Err(DomainError::cancelled_operation(
-                    ErrorOperation::VpnOperation,
-                    "VPN activation was cancelled",
-                )
-                .into());
-            }
+            check_cancellation(
+                cancellation,
+                ErrorOperation::VpnOperation,
+                "VPN activation was cancelled",
+            )?;
             let status = self.vpn_status_for_active_path(active_path, profile_id)?;
             if let Some(error) = vpn_failure(&status) {
                 return Err(error);

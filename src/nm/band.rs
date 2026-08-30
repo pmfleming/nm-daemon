@@ -6,7 +6,7 @@ use zvariant::OwnedObjectPath;
 
 use super::{ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, Nm};
 use crate::connect_wait::wait_for_active_target;
-use crate::error::{DomainError, ErrorOperation};
+use crate::error::{DomainError, ErrorOperation, cancellation_requested, check_cancellation};
 use crate::generated::WIFI_BAND_CHECKPOINT_TIMEOUT;
 use crate::model::{
     InterfaceName, NmObjectPath, WifiBand, WifiBandSelectionResult, WifiBandStatus, WifiDevice,
@@ -310,7 +310,7 @@ fn normalize_band_change_error(
     error: anyhow::Error,
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Error {
-    if cancellation.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+    if cancellation_requested(cancellation) {
         DomainError::cancelled_operation(
             ErrorOperation::BandOperation,
             "Wi-Fi band selection cancelled",
@@ -322,15 +322,11 @@ fn normalize_band_change_error(
 }
 
 fn check_band_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
-    if cancellation.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
-        Err(DomainError::cancelled_operation(
-            ErrorOperation::BandOperation,
-            "Wi-Fi band selection cancelled",
-        )
-        .into())
-    } else {
-        Ok(())
-    }
+    check_cancellation(
+        cancellation,
+        ErrorOperation::BandOperation,
+        "Wi-Fi band selection cancelled",
+    )
 }
 
 fn selected_band(settings: &ConnectionSettings) -> WifiBand {

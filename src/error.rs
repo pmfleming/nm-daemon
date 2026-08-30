@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Error;
 use serde::Serialize;
@@ -23,6 +24,22 @@ where
     E: fmt::Display + ?Sized,
 {
     ErrorChain(error)
+}
+
+pub(crate) fn cancellation_requested(cancellation: Option<&AtomicBool>) -> bool {
+    cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+pub(crate) fn check_cancellation(
+    cancellation: Option<&AtomicBool>,
+    operation: ErrorOperation,
+    message: &str,
+) -> anyhow::Result<()> {
+    if cancellation_requested(cancellation) {
+        Err(DomainError::cancelled_operation(operation, message).into())
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn best_effort<T>(

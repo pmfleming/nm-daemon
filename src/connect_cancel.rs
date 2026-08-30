@@ -1,17 +1,13 @@
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use crate::application::Application;
-use crate::error::{DomainError, best_effort};
+use crate::error::{DomainError, best_effort, cancellation_requested};
 use crate::model::WifiConnectTarget;
 use crate::nm::Nm;
 
-pub(crate) fn cancellation_is_set(cancellation: Option<&AtomicBool>) -> bool {
-    cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed))
-}
-
 pub(crate) fn check_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
-    if cancellation_is_set(cancellation) {
+    if cancellation_requested(cancellation) {
         cancelled_error()
     } else {
         Ok(())
@@ -23,7 +19,7 @@ pub(crate) fn check_cancelled_and_abort(
     target: &WifiConnectTarget,
     cancellation: Option<&AtomicBool>,
 ) -> Result<()> {
-    if !cancellation_is_set(cancellation) {
+    if !cancellation_requested(cancellation) {
         return Ok(());
     }
     abort_activation(nm, target);
