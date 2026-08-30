@@ -2,8 +2,12 @@
   description = "NetworkManager JSON/JSONL adapter and user D-Bus daemon";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.daemonFramework = {
+    url = "git+file:../daemon-framework?ref=main";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, daemonFramework }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
@@ -15,13 +19,10 @@
             pname = "nm-daemon";
             version = "0.1.0";
             src = ./.;
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-              outputHashes = {
-                "shelllist-daemon-core-0.1.0" = "sha256-KvdGb1Gdad8JSo8r/rVBGdZKkuLm/GlgvF/H1ft7Fkw=";
-                "shelllist-daemon-tokio-0.1.0" = "sha256-KvdGb1Gdad8JSo8r/rVBGdZKkuLm/GlgvF/H1ft7Fkw=";
-              };
-            };
+            postUnpack = ''
+              cp -R --no-preserve=mode ${daemonFramework} "$(dirname "$sourceRoot")/daemon-framework"
+            '';
+            cargoLock.lockFile = ./Cargo.lock;
             checkFlags = [ "--test-threads=1" ];
             nativeBuildInputs = with pkgs; [ pkg-config ];
             postInstall = ''
