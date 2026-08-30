@@ -18,8 +18,8 @@
             cargoLock = {
               lockFile = ./Cargo.lock;
               outputHashes = {
-                "shelllist-daemon-core-0.1.0" = "sha256-bRtKUzbzvggMukjezdGBUgSnj/ndf19P7m7Xyqy5cY8=";
-                "shelllist-daemon-tokio-0.1.0" = "sha256-bRtKUzbzvggMukjezdGBUgSnj/ndf19P7m7Xyqy5cY8=";
+                "shelllist-daemon-core-0.1.0" = "sha256-PiHsCKoW0DoHuBDI7AYNts9GhmCTp1nUoLiC+nUoItQ=";
+                "shelllist-daemon-tokio-0.1.0" = "sha256-PiHsCKoW0DoHuBDI7AYNts9GhmCTp1nUoLiC+nUoItQ=";
               };
             };
             checkFlags = [ "--test-threads=1" ];
