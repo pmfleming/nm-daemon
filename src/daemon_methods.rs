@@ -163,7 +163,11 @@ pub(crate) fn call_networks(runtime: &Arc<DaemonRuntime>, params: NetworksParams
             .networks(NetworksRequest::new(
                 params.cached,
                 params.refresh_cache,
-                Duration::from_secs(params.refresh_timeout.unwrap_or(10)),
+                Duration::from_secs(
+                    params
+                        .refresh_timeout
+                        .unwrap_or(crate::generated::SCAN_DEFAULT_TIMEOUT.as_secs()),
+                ),
             ))?;
         let mut response = api_data_value(
             Method::WifiNetworks.spec().response_key,

@@ -151,7 +151,7 @@ Build-time data and policy live outside the Rust sources:
 - `config/daemon-capacity.conf` defines worker and queue capacities.
 - `config/storage-policy.conf` defines history retention limits.
 
-`build.rs` validates these files and generates typed Rust constants in Cargo's `OUT_DIR`; they are compiled into the binary and are not runtime configuration files.
+`build.rs` validates these files and generates typed Rust constants in Cargo's `OUT_DIR`; they are compiled into the binary and are not runtime configuration files. The two small shared daemon-framework crates are pinned as reviewed in-tree sources under `vendor/`, so a standalone checkout does not depend on a sibling repository; `vendor/README.md` records their upstream revision and update procedure.
 
 Development:
 

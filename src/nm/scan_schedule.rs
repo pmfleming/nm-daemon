@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::deadline::Deadline;
-use crate::error::{DomainError, ErrorOperation, ErrorReport};
+use crate::error::{DomainError, ErrorOperation, ErrorReport, cancellation_requested};
 use crate::generated::{SCAN_REQUEST_INTERVAL, SCAN_SCHEDULE_POLL_INTERVAL};
 
 /// What a caller must do after joining the scheduler for a device.
@@ -32,6 +32,13 @@ pub(super) enum ScanTurn {
 pub(super) enum SharedScanOutcome {
     Succeeded,
     Failed(ErrorReport),
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum ScanWait {
+    Completed(SharedScanOutcome),
+    Cancelled,
+    DeadlineExpired,
 }
 
 #[derive(Debug, Default)]
@@ -101,21 +108,26 @@ impl ScanScheduler {
         device_path: &str,
         generation: u64,
         deadline: Deadline,
-    ) -> Option<SharedScanOutcome> {
+        cancellation: Option<&AtomicBool>,
+    ) -> ScanWait {
         let mut devices = self.lock();
         loop {
+            if cancellation_requested(cancellation) {
+                consume_waiter(&mut devices, device_path, generation);
+                return ScanWait::Cancelled;
+            }
             if let Some(outcome) = devices
                 .get(device_path)
                 .and_then(|state| state.completions.get(&generation))
                 .cloned()
             {
                 consume_waiter(&mut devices, device_path, generation);
-                return Some(outcome);
+                return ScanWait::Completed(outcome);
             }
             let wait = deadline.wait(SCAN_SCHEDULE_POLL_INTERVAL);
             if wait.is_zero() {
                 consume_waiter(&mut devices, device_path, generation);
-                return None;
+                return ScanWait::DeadlineExpired;
             }
             devices = self
                 .finished
@@ -123,6 +135,10 @@ impl ScanScheduler {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .0;
         }
+    }
+
+    pub(super) fn notify_waiters(&self) {
+        self.finished.notify_all();
     }
 
     /// Records that a caller issued `RequestScan`, which restarts the interval.
@@ -252,11 +268,12 @@ pub(super) fn sleep_within_deadline(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
 
     use super::{
-        ScanScheduler, ScanTurn, SharedScanOutcome, boottime_ms, is_transient_scan_rejection,
-        rate_limit_wait,
+        ScanScheduler, ScanTurn, ScanWait, SharedScanOutcome, boottime_ms,
+        is_transient_scan_rejection, rate_limit_wait,
     };
     use crate::deadline::Deadline;
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport, ErrorSource};
@@ -332,11 +349,10 @@ mod tests {
             ScanTurn::Join { generation: 1 }
         );
         let expired = Deadline::from_now(Duration::from_millis(1)).unwrap();
-        assert!(
-            scheduler
-                .wait_for_completion("/devices/1", 1, expired)
-                .is_none()
-        );
+        assert!(matches!(
+            scheduler.wait_for_completion("/devices/1", 1, expired, None),
+            ScanWait::DeadlineExpired
+        ));
 
         assert_eq!(
             scheduler.claim("/devices/1", &[]),
@@ -344,9 +360,37 @@ mod tests {
         );
         scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
         assert!(matches!(
-            scheduler.wait_for_completion("/devices/1", 1, deadline),
-            Some(SharedScanOutcome::Succeeded)
+            scheduler.wait_for_completion("/devices/1", 1, deadline, None),
+            ScanWait::Completed(SharedScanOutcome::Succeeded)
         ));
+    }
+
+    #[test]
+    fn a_cancelled_waiter_stops_waiting_and_releases_its_outcome_slot() {
+        let scheduler = ScanScheduler::default();
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Request { generation: 1 }
+        );
+        assert_eq!(
+            scheduler.claim("/devices/1", &[]),
+            ScanTurn::Join { generation: 1 }
+        );
+        let cancellation = AtomicBool::new(true);
+        assert!(matches!(
+            scheduler.wait_for_completion(
+                "/devices/1",
+                1,
+                Deadline::from_now(Duration::from_secs(1)).unwrap(),
+                Some(&cancellation),
+            ),
+            ScanWait::Cancelled
+        ));
+        scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
+        let state = scheduler.lock();
+        let state = state.get("/devices/1").expect("device state");
+        assert!(!state.waiters.contains_key(&1));
+        assert!(!state.completions.contains_key(&1));
     }
 
     #[test]
@@ -372,14 +416,13 @@ mod tests {
             }),
         );
 
-        let outcome = scheduler
-            .wait_for_completion(
-                "/devices/1",
-                1,
-                Deadline::from_now(Duration::from_secs(1)).unwrap(),
-            )
-            .expect("owned scan outcome");
-        let SharedScanOutcome::Failed(report) = outcome else {
+        let outcome = scheduler.wait_for_completion(
+            "/devices/1",
+            1,
+            Deadline::from_now(Duration::from_secs(1)).unwrap(),
+            None,
+        );
+        let ScanWait::Completed(SharedScanOutcome::Failed(report)) = outcome else {
             panic!("joined scan unexpectedly succeeded");
         };
         assert_eq!(report.code, ErrorCode::AuthorizationRequired);

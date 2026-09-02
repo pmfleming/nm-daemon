@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use zvariant::OwnedObjectPath;
 
 use crate::connect_cancel::check_cancelled_and_abort;
 use crate::connect_error::{connect_failure, target_appears_to_need_secret};
@@ -22,7 +23,20 @@ pub(crate) fn wait_for_active_target(
     target: &WifiConnectTarget,
     cancellation: Option<&AtomicBool>,
 ) -> Result<()> {
-    tracing::info!(ssid = %target.ssid, "waiting for target Wi-Fi network to become active");
+    wait_for_active_target_path(nm, target, None, cancellation)
+}
+
+pub(crate) fn wait_for_active_target_path(
+    nm: &Nm,
+    target: &WifiConnectTarget,
+    requested_active_path: Option<&OwnedObjectPath>,
+    cancellation: Option<&AtomicBool>,
+) -> Result<()> {
+    tracing::info!(
+        ssid = %target.ssid,
+        active_path = ?requested_active_path,
+        "waiting for target Wi-Fi network to become active"
+    );
     let activation_device = nm
         .wifi_activation_device_for_target(target)?
         .inspect(|device| {
@@ -33,14 +47,22 @@ pub(crate) fn wait_for_active_target(
     let mut event_generation = nm.event_generation();
     while !deadline.expired() {
         check_cancelled_and_abort(nm, target, cancellation)?;
+        let requested_active_state =
+            requested_active_path.and_then(|path| nm.active_connection_state(path));
         let (ssid_matches, status) =
             activation_observation(nm, activation_device.as_ref(), target)?;
-        if wait.observe(target, status, ssid_matches)? {
+        if wait.observe(
+            target,
+            status,
+            ssid_matches,
+            requested_active_path,
+            requested_active_state,
+        )? {
             return Ok(());
         }
         // Cancellation wakes NetworkEvents, so a cancel racing this wait is
         // observed at the top of the next iteration without a second poll.
-        event_generation = nm.wait_for_event(event_generation, deadline.wait(Duration::MAX));
+        event_generation = nm.wait_for_event(event_generation, wait.next_wake(deadline));
     }
     Err(wait.timeout_error(target))
 }
@@ -58,6 +80,8 @@ impl ActivationWait {
         target: &WifiConnectTarget,
         status: Option<crate::nm::WifiActivationStatus>,
         ssid_matches: bool,
+        requested_active_path: Option<&OwnedObjectPath>,
+        requested_active_state: Option<u32>,
     ) -> Result<bool> {
         let Some(status) = status else {
             if ssid_matches {
@@ -66,13 +90,18 @@ impl ActivationWait {
             return Ok(ssid_matches);
         };
 
-        self.saw_progress |= status.device_state > 30;
+        self.saw_progress |= status.device_state > 30 || requested_active_path.is_some();
         if ssid_matches && status.activated() {
             tracing::info!(ssid = %target.ssid, iface = %status.iface, requested_bssid = ?target.bssid, "target SSID is fully activated");
             return Ok(true);
         }
         log_activation_progress(target, &status, ssid_matches);
-        self.check_terminal_failure(target, &status)?;
+        self.check_terminal_failure(
+            target,
+            &status,
+            requested_active_path,
+            requested_active_state,
+        )?;
         log_activation_status(target, &status);
         self.last_status = Some(status);
         Ok(false)
@@ -82,8 +111,14 @@ impl ActivationWait {
         &mut self,
         target: &WifiConnectTarget,
         status: &crate::nm::WifiActivationStatus,
+        requested_active_path: Option<&OwnedObjectPath>,
+        requested_active_state: Option<u32>,
     ) -> Result<()> {
-        if !(self.saw_progress && status.terminal_failure_after_progress()) {
+        let requested_activation_stopped =
+            requested_activation_stopped(requested_active_path, requested_active_state);
+        if !(self.saw_progress
+            && (status.terminal_failure_after_progress() || requested_activation_stopped))
+        {
             self.possible_failure_since = None;
             return Ok(());
         }
@@ -96,6 +131,14 @@ impl ActivationWait {
             reason,
             activation_failure_message(target, status, reason),
         ))
+    }
+
+    fn next_wake(&self, deadline: Deadline) -> Duration {
+        let grace_wait = self
+            .possible_failure_since
+            .map(|started| ACTIVATION_FAILURE_GRACE.saturating_sub(started.elapsed()))
+            .unwrap_or(Duration::MAX);
+        deadline.wait(grace_wait)
     }
 
     fn timeout_error(self, target: &WifiConnectTarget) -> anyhow::Error {
@@ -116,6 +159,7 @@ fn log_activation_status(target: &WifiConnectTarget, status: &crate::nm::WifiAct
         iface = %status.iface,
         device_state = status.device_state,
         device_state_reason = ?status.device_state_reason,
+        active_connection_path = ?status.active_connection_path,
         active_connection_state = ?status.active_connection_state,
         "activation status update"
     );
@@ -141,6 +185,13 @@ fn log_activation_progress(
             "device reports activation complete, waiting for active SSID identity to match target"
         );
     }
+}
+
+fn requested_activation_stopped(
+    requested_active_path: Option<&OwnedObjectPath>,
+    requested_active_state: Option<u32>,
+) -> bool {
+    requested_active_path.is_some() && requested_active_state.is_none_or(|state| state >= 3)
 }
 
 fn activation_failure_reason(
@@ -257,5 +308,39 @@ fn activation_observation(
             nm.active_ssid_matches(target)?,
             nm.wifi_activation_status_for(target)?,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{ActivationWait, requested_activation_stopped};
+    use crate::deadline::Deadline;
+    use crate::generated::ACTIVATION_FAILURE_GRACE;
+    use zvariant::OwnedObjectPath;
+
+    #[test]
+    fn requested_activation_disappearance_or_deactivation_is_terminal() {
+        let path = OwnedObjectPath::try_from("/active/1").unwrap();
+        assert!(requested_activation_stopped(Some(&path), None));
+        assert!(!requested_activation_stopped(Some(&path), Some(1)));
+        assert!(!requested_activation_stopped(Some(&path), Some(2)));
+        assert!(requested_activation_stopped(Some(&path), Some(3)));
+        assert!(requested_activation_stopped(Some(&path), Some(4)));
+        assert!(!requested_activation_stopped(None, None));
+    }
+
+    #[test]
+    fn terminal_failure_grace_sets_the_next_wake_instead_of_waiting_to_timeout() {
+        let wait = ActivationWait {
+            saw_progress: true,
+            possible_failure_since: Some(Instant::now() - ACTIVATION_FAILURE_GRACE),
+            last_status: None,
+        };
+        assert_eq!(
+            wait.next_wake(Deadline::from_now(Duration::from_secs(90)).unwrap()),
+            Duration::ZERO
+        );
     }
 }

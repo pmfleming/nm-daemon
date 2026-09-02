@@ -11,6 +11,7 @@ use crate::application::{Application, PreparedScanRequest, ScanEvent, ScanReques
 use crate::daemon_event::{OperationEvents, emit_json_event, started_response};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::ErrorOperation;
+use crate::generated::SCAN_DEFAULT_TIMEOUT;
 use crate::nm::Nm;
 use crate::protocol::{Method, Stream};
 
@@ -30,7 +31,7 @@ pub(crate) struct DbusScanParams {
 impl From<DbusScanParams> for ScanRequest {
     fn from(params: DbusScanParams) -> Self {
         Self {
-            timeout: Duration::from_secs(params.timeout.unwrap_or(12)),
+            timeout: Duration::from_secs(params.timeout.unwrap_or(SCAN_DEFAULT_TIMEOUT.as_secs())),
             strict: params.strict,
             cache: params.cache,
             ifname: params.ifname,
@@ -46,6 +47,7 @@ pub(crate) fn start_scan(
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
     let request = ScanRequest::from(params).prepare()?;
+    let request_owner = owner.clone();
     let request_id = runtime.start_cancellable(
         "scan",
         TaskKind::Scan,
@@ -61,6 +63,7 @@ pub(crate) fn start_scan(
             }
         },
     )?;
+    tracing::info!(%request_id, owner = ?request_owner, trigger = "explicit", "accepted Wi-Fi scan request");
     started_response(
         Method::WifiScan,
         STREAM,
@@ -130,5 +133,15 @@ fn emit_scan_event(
             }),
         ),
     };
-    emit_json_event(emitter, STREAM, Some(request_id), name, data)
+    emit_json_event(emitter, STREAM, Some(request_id), name, data)?;
+    match event {
+        ScanEvent::Warning { error } => {
+            tracing::warn!(%request_id, code = ?error.code, message = %error.message, "emitted Wi-Fi scan warning");
+        }
+        ScanEvent::Complete { networks_found } => {
+            tracing::info!(%request_id, networks_found, "emitted terminal Wi-Fi scan event");
+        }
+        _ => {}
+    }
+    Ok(())
 }

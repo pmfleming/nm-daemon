@@ -146,8 +146,16 @@ impl<'a, 'e> OperationEvents<'a, 'e> {
     ) {
         let report = ErrorReport::from_error(error, operation);
         if report.code == ErrorCode::Cancelled {
+            tracing::info!(request_id = self.request_id, stream = %self.stream, "emitting operation cancellation");
             self.cancelled(cancellation_message);
         } else {
+            tracing::warn!(
+                request_id = self.request_id,
+                stream = %self.stream,
+                code = ?report.code,
+                message = %report.message,
+                "emitting operation failure"
+            );
             self.event(
                 "failed",
                 json!({

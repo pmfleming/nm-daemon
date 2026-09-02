@@ -62,11 +62,11 @@ signal Event(s stream, s event_json)
 | `vpn.disconnect` | `{"uuid":null,"path":null}` (`VpnSelect`) | `result` | `—` | Deactivates one active VPN or WireGuard connection, or the only active one. |
 | `wifi.qr.parse` | `{"payload":"WIFI:T:WPA;S:Example;P:...;;"}` (`QrPayload`) | `qr` | `—` | Validates a scanned Wi-Fi QR payload without logging it or echoing its secret. |
 | `wifi.qr.connect` | `{"payload":"WIFI:T:WPA;S:Example;P:...;;","ifname":null}` (`QrConnect`) | `result` | `wifi.connect` | Connects to the network in a scanned Wi-Fi QR payload and returns a connect request id. |
-| `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":10}` (`Networks`) | `networks` | `wifi.networks` | Visible networks enriched with saved-profile, capability, and snapshot freshness details; optionally emits local change deltas. |
+| `wifi.networks` | `{"cached":false,"refresh_cache":false,"refresh_timeout":20}` (`Networks`) | `networks` | `wifi.networks` | Visible networks enriched with saved-profile, capability, and snapshot freshness details; optionally emits local change deltas. |
 | `wifi.band.status` | `{"path":"/org/freedesktop/NetworkManager/Settings/1"}` (`BandStatus`) | `band` | `—` | Reports the active, selected, and available bands for an active Wi-Fi profile. |
 | `wifi.band.set` | `{"path":"/org/freedesktop/NetworkManager/Settings/1","band":"5"}` (`BandSet`) | `result` | `wifi.band` | Transactionally changes an active Wi-Fi profile band and returns a request id. |
 | `wifi.saved` | `{}` (`Empty`) | `profiles` | `—` | All saved Wi-Fi NetworkManager profiles. |
-| `wifi.scan` | `{"timeout":12,"strict":false,"cache":false,"ifname":null,"ssids":[]}` (`Scan`) | `result` | `wifi.scan` | Starts an event-driven scan and returns its request id. |
+| `wifi.scan` | `{"timeout":20,"strict":false,"cache":false,"ifname":null,"ssids":[]}` (`Scan`) | `result` | `wifi.scan` | Starts an event-driven scan and returns its request id. |
 | `wifi.connectTarget` | `{"key":"ssid-hex:4578616d706c65|security:personal|ifname:776c616e30","password":null,"enterprise_identity":null,"enterprise":null,"wep_key_type":null}` (`ConnectTarget`) | `result` | `wifi.connect` | Starts an event-driven Wi-Fi connection by opaque network key and returns its request id; legacy target requests remain accepted. |
 | `wifi.disconnect` | `{}` (`Empty`) | `result` | `—` | Disconnects the active Wi-Fi connection. |
 | `wifi.profile.operation` | `{"operation":"set-autoconnect","path":"/org/freedesktop/NetworkManager/Settings/1","enabled":true}` (`ProfileOperation`) | `result` | `—` | Mutates or builds a share payload for one saved Wi-Fi profile. |
@@ -121,16 +121,16 @@ else showTypedError(response.error.code, response.error.message)
 NetworkManager rate-limits `RequestScan`, so the daemon owns one scheduler per Wi-Fi device rather than letting each caller ask independently:
 
 - Explicit `wifi.scan` requests and background cache refreshes share one in-flight scan per device. A caller that arrives while a scan is running waits for that scan's results instead of spending the shared rate-limit budget on a duplicate request.
-- Before issuing `RequestScan` the daemon waits out NetworkManager's request interval, measured from whichever is more recent: the device's `LastScan` (CLOCK_BOOTTIME) or the daemon's own previous request for that device.
+- Before issuing `RequestScan` the daemon waits out NetworkManager's request interval, measured from whichever is more recent: the device's `LastScan` (CLOCK_BOOTTIME) or the daemon's own previous request for that device. Completion must advance `LastScan` to at least the request-time CLOCK_BOOTTIME watermark, so an unrelated scan during the rate-limit wait cannot falsely complete the request.
 - Transient rejections — `Scanning not allowed immediately following previous scan`, `Device.NotAllowed`, and similar — are retried inside the caller's deadline instead of failing the request. Non-transient failures, such as a permission error, fail immediately.
 - Deadline behavior is unchanged: a scan that cannot run inside the caller's timeout is a `timeout` error under `strict:true`, and otherwise emits a `warning` event and falls back to NetworkManager's current access-point list, exactly as before.
-- Cancellation is checked while waiting for the interval, so a cancelled scan does not sit out the delay.
+- Cancellation is checked while waiting for the interval and while joining the per-device scheduler. Cancelling one scan does not cancel unrelated callers that joined it; those callers reacquire the scheduler within their own deadline.
 
 The interval, retry delay, and poll granularity are compile-time values in [`config/timeouts.conf`](../config/timeouts.conf).
 
 ## Cache refresh lifecycle
 
-Shelllist should own scan/cache refresh intent. Prefer on-demand refresh while the Wi-Fi UI is open or focused instead of an always-on user timer. On open, call `wifi.networks` with `cached:true, refresh_cache:true` to render the last snapshot immediately and warm the next one. For explicit refresh/spinner flows, subscribe to `wifi.scan`, then call `wifi.scan` with `cache:true` and filter events by `request_id`. Stop requesting refreshes when the UI closes. The daemon coalesces duplicate background refresh requests and performs them in its bounded runtime; it does not spawn another executable.
+Shelllist should own scan/cache refresh intent. Prefer on-demand refresh while the Wi-Fi UI is open or focused instead of an always-on user timer. On open, call `wifi.networks` with `cached:true, refresh_cache:true` to render available results immediately and warm a missing or stale cache. A fresh cache suppresses the background scan. For explicit refresh/spinner flows, subscribe to `wifi.scan`, then call `wifi.scan` with `cache:true` and filter events by `request_id`. Stop requesting refreshes when the UI closes. The daemon coalesces duplicate background refresh requests and performs them in its bounded runtime; it does not spawn another executable.
 
 ## Event streams
 
@@ -357,7 +357,7 @@ Every connect event carries a typed `phase` and `target`. Target identity includ
 
 Cancellation is deep and best-effort for the connect task: the daemon sets its cancellation flag, wakes activation waits, and queues a target-guarded NetworkManager activation abort. Before deactivation it resolves the current active-connection object's profile and requires that profile's exact SSID bytes to match the cancelled request; it then deactivates the captured object path rather than re-querying whichever connection is active later. If the attempt has already failed and NetworkManager restored another profile, cancellation is a no-op. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call, but transitions check cancellation before and after those calls. Cancellation is coordinated by the shared runtime; it does not add a watcher thread per connection.
 
-The underlying connection workflow is the canonical `AlreadyActive → SavedProfile → CreateProfile → Rescan → Verify` NetworkManager D-Bus state machine. One targeted rescan is allowed for missing visible targets, terminal authentication/authorization failures remain terminal, and a failed profile created by the attempt is cleaned up centrally. Activation success requires exact SSID bytes; requested BSSID and AP object path are selection hints and are logged rather than enforced after NetworkManager may roam.
+The underlying connection workflow is the canonical `AlreadyActive → SavedProfile → CreateProfile → Rescan → Verify` NetworkManager D-Bus state machine. One targeted rescan is allowed for missing visible targets, terminal authentication/authorization failures remain terminal, and a failed profile created by the attempt is cleaned up centrally. Verification tracks the exact active-connection object returned by NetworkManager, so restoration of a previous healthy connection is recognized as failure after the short grace period rather than timing out. Activation success requires exact SSID bytes; requested BSSID and AP object path are selection hints and are logged rather than enforced after NetworkManager may roam.
 
 ### `wifi.band`
 

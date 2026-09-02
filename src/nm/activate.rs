@@ -10,17 +10,23 @@ use super::{ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, Nm};
 use crate::error::DomainError;
 use crate::model::{WepKeyType, WifiConnectTarget};
 
+#[derive(Debug)]
+pub(crate) struct WifiActivation {
+    pub(crate) profile_path: OwnedObjectPath,
+    pub(crate) active_path: OwnedObjectPath,
+}
+
 impl Nm {
     pub(crate) fn activate_saved_wifi_connection_for(
         &self,
         target: &WifiConnectTarget,
         password: Option<&str>,
         wep_key_type: Option<WepKeyType>,
-    ) -> Result<bool> {
+    ) -> Result<Option<OwnedObjectPath>> {
         let Some((connection_path, device_path, specific_object)) =
             self.saved_wifi_activation_target_for(target)?
         else {
-            return Ok(false);
+            return Ok(None);
         };
         self.prepare_saved_activation(&connection_path, target, password, wep_key_type)?;
         tracing::info!(
@@ -31,7 +37,7 @@ impl Nm {
             "activating saved Wi-Fi connection over D-Bus"
         );
         let nm = self.root_proxy();
-        let _active_connection: OwnedObjectPath = nm
+        let active_connection: OwnedObjectPath = nm
             .call(
                 "ActivateConnection",
                 &(connection_path, device_path, specific_object),
@@ -39,7 +45,7 @@ impl Nm {
             .with_context(|| {
                 format!("ActivateConnection for saved Wi-Fi profile {}", target.ssid)
             })?;
-        Ok(true)
+        Ok(Some(active_connection))
     }
 
     fn prepare_saved_activation(
@@ -78,7 +84,7 @@ impl Nm {
         target: &WifiConnectTarget,
         password: Option<&str>,
         wep_key_type: Option<WepKeyType>,
-    ) -> Result<Option<OwnedObjectPath>> {
+    ) -> Result<Option<WifiActivation>> {
         if target.hidden {
             return self.add_and_activate_hidden_wifi_connection(target, password, wep_key_type);
         }
@@ -135,7 +141,7 @@ impl Nm {
         target: &WifiConnectTarget,
         password: Option<&str>,
         wep_key_type: Option<WepKeyType>,
-    ) -> Result<Option<OwnedObjectPath>> {
+    ) -> Result<Option<WifiActivation>> {
         let Some(device) = self.wifi_devices_for_target(target)?.into_iter().next() else {
             return Ok(None);
         };
@@ -157,16 +163,19 @@ impl Nm {
         settings: ConnectionSettings,
         device_path: OwnedObjectPath,
         specific_object: OwnedObjectPath,
-    ) -> Result<OwnedObjectPath> {
+    ) -> Result<WifiActivation> {
         tracing::info!(ssid, device = %device_path, specific_object = %specific_object, "calling NetworkManager AddAndActivateConnection");
         let nm = self.root_proxy();
-        let (connection_path, _active_path): (OwnedObjectPath, OwnedObjectPath) = nm
+        let (profile_path, active_path): (OwnedObjectPath, OwnedObjectPath) = nm
             .call(
                 "AddAndActivateConnection",
                 &(settings, device_path, specific_object),
             )
             .with_context(|| format!("AddAndActivateConnection for Wi-Fi network {ssid}"))?;
-        Ok(connection_path)
+        Ok(WifiActivation {
+            profile_path,
+            active_path,
+        })
     }
 
     pub(crate) fn wifi_activation_status_for(
@@ -209,11 +218,13 @@ impl Nm {
             iface: device.iface.clone(),
             device_state,
             device_state_reason,
+            active_connection_path: (active_connection_path.as_str() != "/")
+                .then_some(active_connection_path),
             active_connection_state,
         })
     }
 
-    fn active_connection_state(&self, path: &OwnedObjectPath) -> Option<u32> {
+    pub(crate) fn active_connection_state(&self, path: &OwnedObjectPath) -> Option<u32> {
         if path.as_str() == "/" {
             return None;
         }

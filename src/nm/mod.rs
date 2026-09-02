@@ -61,6 +61,7 @@ pub(crate) struct WifiActivationStatus {
     pub(crate) iface: String,
     pub(crate) device_state: u32,
     pub(crate) device_state_reason: (u32, u32),
+    pub(crate) active_connection_path: Option<OwnedObjectPath>,
     pub(crate) active_connection_state: Option<u32>,
 }
 
@@ -194,6 +195,7 @@ impl Nm {
 
     pub(crate) fn wake_waiters(&self) {
         self.events.notify();
+        self.scan_schedule.notify_waiters();
     }
 
     pub(super) fn root_proxy(&self) -> Proxy<'static> {

@@ -547,9 +547,19 @@ impl DaemonRuntime {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
             .is_err()
         {
-            tracing::debug!("coalesced duplicate daemon cache refresh");
+            tracing::debug!(
+                trigger = "cache-refresh",
+                disposition = "coalesced",
+                "coalesced duplicate daemon cache refresh"
+            );
             return;
         }
+        tracing::info!(
+            trigger = "cache-refresh",
+            disposition = "started",
+            timeout_ms = timeout.as_millis(),
+            "scheduled background Wi-Fi cache refresh"
+        );
         let runtime = Arc::downgrade(self);
         let submit = self.submit(
             ErrorOperation::Scan,

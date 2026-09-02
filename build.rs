@@ -174,6 +174,7 @@ fn generate_durations(path: &Path, generated: &mut String) {
             "wifi_band_checkpoint_timeout_ms",
             "WIFI_BAND_CHECKPOINT_TIMEOUT",
         ),
+        ("scan_default_timeout_ms", "SCAN_DEFAULT_TIMEOUT"),
         ("scan_request_interval_ms", "SCAN_REQUEST_INTERVAL"),
         ("scan_retry_delay_ms", "SCAN_RETRY_DELAY"),
         (
@@ -183,6 +184,12 @@ fn generate_durations(path: &Path, generated: &mut String) {
     ];
     let values = parse_key_values(path);
     ensure_exact_keys(path, &values, specs.iter().map(|(key, _)| *key));
+    if values["scan_default_timeout_ms"] <= values["scan_request_interval_ms"] {
+        fail(format!(
+            "{}: scan_default_timeout_ms must exceed scan_request_interval_ms",
+            path.display()
+        ));
+    }
     for (key, constant) in specs {
         let milliseconds = values[key];
         if milliseconds == 0 {

@@ -6,12 +6,12 @@ use anyhow::{Context, Result};
 use zvariant::Value;
 
 use super::scan_schedule::{
-    ScanTurn, SharedScanOutcome, boottime_ms, is_transient_scan_rejection, rate_limit_wait,
-    scan_deadline_expired, sleep_within_deadline,
+    ScanTurn, ScanWait, SharedScanOutcome, boottime_ms, is_transient_scan_rejection,
+    rate_limit_wait, scan_deadline_expired, sleep_within_deadline,
 };
 use super::{Nm, WIFI_IFACE};
 use crate::deadline::Deadline;
-use crate::error::{DomainError, ErrorOperation, ErrorReport, check_cancellation};
+use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport, check_cancellation};
 use crate::generated::SCAN_RETRY_DELAY;
 use crate::model::{InterfaceName, ScanRequestOptions, WifiDevice};
 
@@ -88,28 +88,46 @@ impl Nm {
                 ScanTurn::Join { generation } => {
                     // The owner requested every SSID this caller needs.
                     tracing::debug!(iface = %device.iface, "joining a compatible in-flight scan");
-                    let Some(outcome) =
-                        self.scan_schedule
-                            .wait_for_completion(&device_path, generation, deadline)
-                    else {
-                        return Err(scan_deadline_expired(
-                            "timed out waiting for an in-flight scan on this device",
-                        ));
-                    };
-                    return joined_scan_result(outcome);
+                    match self.scan_schedule.wait_for_completion(
+                        &device_path,
+                        generation,
+                        deadline,
+                        cancellation,
+                    ) {
+                        ScanWait::Completed(SharedScanOutcome::Failed(report))
+                            if shared_owner_failure_is_retryable(&report)
+                                && !deadline.expired() =>
+                        {
+                            // Cancellation and timeout belong to the owner. This
+                            // caller still has its own cancellation flag/deadline.
+                            continue;
+                        }
+                        ScanWait::Completed(outcome) => return joined_scan_result(outcome),
+                        ScanWait::Cancelled => return Err(scan_cancelled_error()),
+                        ScanWait::DeadlineExpired => {
+                            return Err(scan_deadline_expired(
+                                "timed out waiting for an in-flight scan on this device",
+                            ));
+                        }
+                    }
                 }
                 ScanTurn::Wait { generation } => {
                     // A wildcard scan cannot stand in for a hidden-SSID probe,
                     // and a probe for another SSID cannot satisfy this caller.
                     tracing::debug!(iface = %device.iface, "waiting behind an incompatible in-flight scan");
-                    if self
-                        .scan_schedule
-                        .wait_for_completion(&device_path, generation, deadline)
-                        .is_none()
-                    {
-                        return Err(scan_deadline_expired(
-                            "timed out waiting to schedule a targeted scan",
-                        ));
+                    match self.scan_schedule.wait_for_completion(
+                        &device_path,
+                        generation,
+                        deadline,
+                        cancellation,
+                    ) {
+                        ScanWait::Completed(_) => {}
+                        ScanWait::Cancelled => return Err(scan_cancelled_error()),
+                        ScanWait::DeadlineExpired => {
+                            return Err(scan_deadline_expired(
+                                "timed out waiting to schedule a targeted scan",
+                            ));
+                        }
                     }
                 }
             }
@@ -127,10 +145,11 @@ impl Nm {
         ssids: &[Vec<u8>],
         cancellation: Option<&AtomicBool>,
     ) -> Result<()> {
-        let before = self.last_scan(device);
-        tracing::debug!(iface = %device.iface, before, ssid_count = ssids.len(), "requesting blocking scan for device");
-        self.request_scan_within_deadline(device, ssids, before, deadline, cancellation)?;
-        self.wait_for_scan_completion(device, before, deadline, cancellation)
+        let last_scan = self.last_scan(device);
+        tracing::debug!(iface = %device.iface, last_scan, ssid_count = ssids.len(), "requesting blocking scan for device");
+        let token =
+            self.request_scan_within_deadline(device, ssids, last_scan, deadline, cancellation)?;
+        self.wait_for_scan_completion(device, token, deadline, cancellation)
     }
 
     /// Waits out NetworkManager's request interval, then issues `RequestScan`,
@@ -142,7 +161,7 @@ impl Nm {
         last_scan: i64,
         deadline: Deadline,
         cancellation: Option<&AtomicBool>,
-    ) -> Result<()> {
+    ) -> Result<ScanCompletionToken> {
         let device_path = device.path.to_string();
         let mut wait = self.rate_limit_wait_for(device, last_scan);
         loop {
@@ -160,8 +179,8 @@ impl Nm {
                 }
             }
             check_scan_cancelled(cancellation)?;
-            if self.try_scan_request(device, ssids, &device_path, deadline)? {
-                return Ok(());
+            if let Some(token) = self.try_scan_request(device, ssids, &device_path, deadline)? {
+                return Ok(token);
             }
             wait = SCAN_RETRY_DELAY;
         }
@@ -173,11 +192,22 @@ impl Nm {
         ssids: &[Vec<u8>],
         device_path: &str,
         deadline: Deadline,
-    ) -> Result<bool> {
+    ) -> Result<Option<ScanCompletionToken>> {
+        let last_scan_before_request = self.last_scan(device);
+        let requested_at_boottime_ms = boottime_ms();
         match self.request_scan_for_ssids(device, ssids) {
             Ok(()) => {
                 self.scan_schedule.note_request(device_path);
-                Ok(true)
+                tracing::debug!(
+                    iface = %device.iface,
+                    last_scan_before_request,
+                    ?requested_at_boottime_ms,
+                    "NetworkManager accepted scan request"
+                );
+                Ok(Some(ScanCompletionToken {
+                    last_scan_before_request,
+                    requested_at_boottime_ms,
+                }))
             }
             Err(error) if is_transient_scan_rejection(&error) && !deadline.expired() => {
                 tracing::debug!(
@@ -185,7 +215,7 @@ impl Nm {
                     error = %crate::error::err_chain(&error),
                     "NetworkManager rejected the scan request; retrying within the deadline"
                 );
-                Ok(false)
+                Ok(None)
             }
             Err(error) => Err(error),
         }
@@ -207,15 +237,22 @@ impl Nm {
     fn wait_for_scan_completion(
         &self,
         device: &WifiDevice,
-        before: i64,
+        token: ScanCompletionToken,
         deadline: Deadline,
         cancellation: Option<&AtomicBool>,
     ) -> Result<()> {
         let mut event_generation = self.event_generation();
         while !deadline.expired() {
             check_scan_cancelled(cancellation)?;
-            if self.last_scan_completed(device, before) {
-                tracing::debug!(iface = %device.iface, after = self.last_scan(device), "device scan completed");
+            let after = self.last_scan(device);
+            if scan_completed(after, token) {
+                tracing::debug!(
+                    iface = %device.iface,
+                    after,
+                    before = token.last_scan_before_request,
+                    requested_at_boottime_ms = ?token.requested_at_boottime_ms,
+                    "device scan completed"
+                );
                 return Ok(());
             }
             event_generation = self.wait_for_event(event_generation, deadline.wait(Duration::MAX));
@@ -253,11 +290,20 @@ impl Nm {
             .and_then(|wifi| wifi.get_property("LastScan").context("read LastScan"))
             .unwrap_or(-1)
     }
+}
 
-    fn last_scan_completed(&self, device: &WifiDevice, before: i64) -> bool {
-        let after = self.last_scan(device);
-        after != before && after >= 0
-    }
+#[derive(Debug, Clone, Copy)]
+struct ScanCompletionToken {
+    last_scan_before_request: i64,
+    requested_at_boottime_ms: Option<i64>,
+}
+
+fn scan_completed(after: i64, token: ScanCompletionToken) -> bool {
+    after >= 0
+        && after != token.last_scan_before_request
+        && token
+            .requested_at_boottime_ms
+            .is_none_or(|requested_at| after >= requested_at)
 }
 
 /// Publishes the device scan's outcome even when the owner unwinds.
@@ -306,6 +352,10 @@ fn shared_scan_outcome(result: &Result<()>) -> SharedScanOutcome {
     }
 }
 
+fn shared_owner_failure_is_retryable(report: &ErrorReport) -> bool {
+    matches!(report.code, ErrorCode::Cancelled | ErrorCode::Timeout)
+}
+
 fn joined_scan_result(outcome: SharedScanOutcome) -> Result<()> {
     match outcome {
         SharedScanOutcome::Succeeded => Ok(()),
@@ -329,4 +379,55 @@ fn ensure_scan_deadline(deadline: Deadline, message: &str) -> Result<()> {
 
 fn check_scan_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
     check_cancellation(cancellation, ErrorOperation::Scan, "Wi-Fi scan cancelled")
+}
+
+fn scan_cancelled_error() -> anyhow::Error {
+    DomainError::cancelled_operation(ErrorOperation::Scan, "Wi-Fi scan cancelled").into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ScanCompletionToken, scan_completed, shared_owner_failure_is_retryable};
+    use crate::error::{ErrorCode, ErrorOperation, ErrorReport, ErrorSource};
+
+    #[test]
+    fn scan_completion_must_be_newer_than_the_request_watermark() {
+        let token = ScanCompletionToken {
+            last_scan_before_request: 100,
+            requested_at_boottime_ms: Some(200),
+        };
+        assert!(!scan_completed(150, token));
+        assert!(scan_completed(200, token));
+        assert!(scan_completed(201, token));
+    }
+
+    #[test]
+    fn scan_completion_falls_back_to_an_immediate_baseline_without_boottime() {
+        let token = ScanCompletionToken {
+            last_scan_before_request: 100,
+            requested_at_boottime_ms: None,
+        };
+        assert!(!scan_completed(100, token));
+        assert!(scan_completed(101, token));
+    }
+
+    #[test]
+    fn a_joiner_retries_only_owner_scoped_failures() {
+        let report = |code| ErrorReport {
+            code,
+            operation: ErrorOperation::Scan,
+            source: ErrorSource::NetworkManager,
+            message: "scan outcome".to_string(),
+            details: Default::default(),
+        };
+        assert!(shared_owner_failure_is_retryable(&report(
+            ErrorCode::Cancelled
+        )));
+        assert!(shared_owner_failure_is_retryable(&report(
+            ErrorCode::Timeout
+        )));
+        assert!(!shared_owner_failure_is_retryable(&report(
+            ErrorCode::AuthorizationRequired
+        )));
+    }
 }

@@ -212,18 +212,18 @@ pub(crate) struct ListOptions {
     /// Use the latest cached live-scan snapshot if available.
     #[arg(long)]
     pub(crate) cached: bool,
-    /// Refresh the scan cache after returning cached results. If no cache exists, scan first.
+    /// Refresh a missing or stale scan cache after returning available results.
     #[arg(long)]
     pub(crate) refresh_cache: bool,
-    /// Scan timeout in seconds when --refresh-cache has to scan before returning.
-    #[arg(long, default_value_t = 10)]
+    /// Background scan timeout in seconds when --refresh-cache schedules a scan.
+    #[arg(long, default_value_t = 20)]
     pub(crate) refresh_timeout: u64,
 }
 
 #[derive(Clone, Args)]
 pub(crate) struct ScanOptions {
     /// Scan completion timeout in seconds.
-    #[arg(long, default_value_t = 12)]
+    #[arg(long, default_value_t = 20)]
     pub(crate) timeout: u64,
     /// Return an error instead of printing cached results when scan fails.
     #[arg(long)]

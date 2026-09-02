@@ -520,9 +520,9 @@ impl<'a> Application<'a> {
             return Ok(cached);
         }
         let networks = self.nm.list_all_access_points()?;
-        self.schedule_requested_refresh(request);
+        let refresh_requested = self.schedule_requested_refresh(request, true);
         let mut snapshot = NetworkSnapshotMetadata::live(NetworkSnapshotSource::NetworkManager);
-        snapshot.refresh_requested = request.refresh_cache;
+        snapshot.refresh_requested = refresh_requested;
         Ok(LoadedNetworks {
             access_points: networks,
             warning: None,
@@ -534,20 +534,15 @@ impl<'a> Application<'a> {
         if !request.cached {
             return Ok(None);
         }
-        if let Some(loaded) = self.read_cached_networks(request)? {
-            return Ok(Some(loaded));
-        }
-        request
-            .refresh_cache
-            .then(|| self.scan_and_cache(request.refresh_timeout))
-            .transpose()
+        self.read_cached_networks(request)
     }
 
     fn read_cached_networks(&self, request: &NetworksRequest) -> Result<Option<LoadedNetworks>> {
         match cache::read_snapshot()? {
             cache::CacheRead::Available(snapshot) => {
-                let metadata = snapshot.metadata(request.refresh_cache);
-                self.schedule_requested_refresh(request);
+                let mut metadata = snapshot.metadata(false);
+                metadata.refresh_requested =
+                    self.schedule_requested_refresh(request, metadata.stale);
                 Ok(Some(LoadedNetworks {
                     access_points: snapshot.into_networks(),
                     warning: None,
@@ -565,38 +560,18 @@ impl<'a> Application<'a> {
         }
     }
 
-    fn schedule_requested_refresh(&self, request: &NetworksRequest) {
-        if request.refresh_cache {
-            self.schedule_cache_refresh(request.refresh_timeout);
+    fn schedule_requested_refresh(&self, request: &NetworksRequest, refresh_needed: bool) -> bool {
+        if !request.refresh_cache {
+            return false;
         }
-    }
-
-    fn scan_and_cache(&self, timeout: Duration) -> Result<LoadedNetworks> {
-        let warning = self
-            .nm
-            .scan_with_options(
-                ScanRequestOptions {
-                    timeout,
-                    ifname: None,
-                    ssid_bytes: Vec::new(),
-                },
-                None,
-            )
-            .err()
-            .map(|err| {
-                let err = ensure_domain(ErrorOperation::Scan, err);
-                let report = ErrorReport::from_error(&err, ErrorOperation::Scan);
-                tracing::warn!(error = %report.message, code = ?report.code, "cache refresh scan failed before list");
-                report
-            });
-        let networks = self.nm.list_all_access_points()?;
-        cache::write_snapshot(false, &networks)?;
-        cache::write_complete(networks.len())?;
-        Ok(LoadedNetworks {
-            access_points: networks,
-            warning,
-            snapshot: NetworkSnapshotMetadata::live(NetworkSnapshotSource::Scan),
-        })
+        if !refresh_needed {
+            tracing::debug!(
+                "skipped background Wi-Fi refresh because the cached snapshot is fresh"
+            );
+            return false;
+        }
+        self.schedule_cache_refresh(request.refresh_timeout);
+        true
     }
 
     fn enrich_access_points(&self, access_points: Vec<AccessPoint>) -> Result<Vec<NetworkEntry>> {

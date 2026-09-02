@@ -9,7 +9,6 @@ use crate::connect_cancel::check_cancelled;
 use crate::connect_error::{
     connect_failure, connect_failure_from_error, should_return_secret_agent_error,
 };
-use crate::connect_wait::wait_for_active_target;
 use crate::deadline::Deadline;
 use crate::error::{ErrorOperation, best_effort, ensure_domain};
 use crate::generated::{NOT_FOUND_RESCAN_TIMEOUT, POST_CONNECT_STATUS_WAIT};
@@ -97,6 +96,7 @@ struct ConnectionMachine<'a> {
     progress: &'a mut dyn FnMut(ConnectPhase) -> Result<()>,
     rescanned: bool,
     created_connection: Option<OwnedObjectPath>,
+    activation_path: Option<OwnedObjectPath>,
 }
 
 impl<'a> ConnectionMachine<'a> {
@@ -117,6 +117,7 @@ impl<'a> ConnectionMachine<'a> {
             progress,
             rescanned: false,
             created_connection: None,
+            activation_path: None,
         }
     }
 
@@ -197,13 +198,14 @@ impl<'a> ConnectionMachine<'a> {
             self.password,
             self.wep_key_type,
         ) {
-            Ok(true) => {
-                tracing::info!(ssid = %self.target.ssid, "requested activation of saved Wi-Fi profile over D-Bus");
+            Ok(Some(active_path)) => {
+                tracing::info!(ssid = %self.target.ssid, %active_path, "requested activation of saved Wi-Fi profile over D-Bus");
+                self.activation_path = Some(active_path);
                 Ok(StateTransition::Next(ConnectionState::Verify(
                     VerificationKind::SavedProfile,
                 )))
             }
-            Ok(false) => Ok(StateTransition::Next(ConnectionState::CreateProfile)),
+            Ok(None) => Ok(StateTransition::Next(ConnectionState::CreateProfile)),
             Err(err) => self.finish_dbus_failure(attempt, err),
         }
     }
@@ -220,9 +222,15 @@ impl<'a> ConnectionMachine<'a> {
             self.password,
             self.wep_key_type,
         ) {
-            Ok(Some(created_connection)) => {
-                tracing::info!(ssid = %self.target.ssid, connection = %created_connection, "created and requested activation of Wi-Fi profile over D-Bus");
-                self.created_connection = Some(created_connection);
+            Ok(Some(activation)) => {
+                tracing::info!(
+                    ssid = %self.target.ssid,
+                    connection = %activation.profile_path,
+                    active_path = %activation.active_path,
+                    "created and requested activation of Wi-Fi profile over D-Bus"
+                );
+                self.created_connection = Some(activation.profile_path);
+                self.activation_path = Some(activation.active_path);
                 Ok(StateTransition::Next(ConnectionState::Verify(
                     VerificationKind::CreatedProfile,
                 )))
@@ -307,16 +315,27 @@ impl<'a> ConnectionMachine<'a> {
     }
 
     fn verify(&mut self, kind: VerificationKind) -> Result<StateTransition> {
+        let active_path = self.activation_path.as_ref();
         let outcome = match kind {
             VerificationKind::SavedProfile => {
-                wait_for_active_target(self.nm, self.target, self.cancellation)?;
+                crate::connect_wait::wait_for_active_target_path(
+                    self.nm,
+                    self.target,
+                    active_path,
+                    self.cancellation,
+                )?;
                 ActivationOutcome::new(
                     format!("Connected to saved network {} via D-Bus", self.target.ssid),
                     ConnectEnginePath::Dbus,
                 )
             }
             VerificationKind::CreatedProfile => {
-                wait_for_active_target(self.nm, self.target, self.cancellation)?;
+                crate::connect_wait::wait_for_active_target_path(
+                    self.nm,
+                    self.target,
+                    active_path,
+                    self.cancellation,
+                )?;
                 self.created_connection = None;
                 ActivationOutcome::new(
                     format!("Connected to Wi-Fi network {} via D-Bus", self.target.ssid),
