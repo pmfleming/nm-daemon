@@ -140,6 +140,12 @@ fn cloned_profile_settings_replace_secret_and_preserve_profile_options() {
     );
     assert_eq!(
         settings
+            .get("connection")
+            .and_then(|section| setting::<i32>(section, "mdns")),
+        Some(0)
+    );
+    assert_eq!(
+        settings
             .get("802-11-wireless")
             .and_then(|section| setting::<String>(section, "assigned-mac-address"))
             .as_deref(),

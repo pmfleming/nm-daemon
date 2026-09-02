@@ -1,7 +1,8 @@
 use super::{
-    ConnectionSettings, apply_mac_address_policy, privacy_from_settings, profile_ip_settings,
-    profile_secret_spec, profile_secret_values, saved_wifi_profile_candidate_from_settings,
-    setting_string, settings_match_access_point, settings_match_wifi_ssid, ssid_bytes_match,
+    ConnectionSettings, apply_mac_address_policy, casting_enabled_from_settings,
+    privacy_from_settings, profile_ip_settings, profile_secret_spec, profile_secret_values,
+    saved_wifi_profile_candidate_from_settings, set_casting_enabled, setting_string,
+    settings_match_access_point, settings_match_wifi_ssid, ssid_bytes_match,
     update_profile_secrets, validate_profile_update, wifi_settings_need_secret_agent,
 };
 use crate::model::{AccessPoint, TargetIpAddress, TargetIpSettings, WifiProfileUpdate};
@@ -14,6 +15,26 @@ fn ssid_bytes_match_exact_bytes() {
     assert!(ssid_bytes_match(b"Example", b"Example"));
     assert!(ssid_bytes_match(&[0xff], &[0xff]));
     assert!(!ssid_bytes_match(&[0xff], "�".as_bytes()));
+}
+
+#[test]
+fn casting_uses_resolve_only_mdns_and_can_be_disabled_per_profile() {
+    let mut settings = wifi_settings("Example", "802-11-wireless");
+    assert!(!casting_enabled_from_settings(&settings));
+
+    set_casting_enabled(&mut settings, false).expect("disable casting");
+    assert!(!casting_enabled_from_settings(&settings));
+    assert_eq!(
+        i32::try_from(settings["connection"]["mdns"].clone()).unwrap(),
+        0
+    );
+
+    set_casting_enabled(&mut settings, true).expect("enable casting");
+    assert!(casting_enabled_from_settings(&settings));
+    assert_eq!(
+        i32::try_from(settings["connection"]["mdns"].clone()).unwrap(),
+        1
+    );
 }
 
 #[test]

@@ -476,6 +476,10 @@ pub(crate) struct SavedWifiConnection {
     /// Exact SSID bytes used for identity/matching.
     pub(crate) ssid_bytes: Vec<u8>,
     pub(crate) autoconnect: bool,
+    /// Whether this profile permits mDNS discovery used by casting devices.
+    /// Profiles without an explicit NetworkManager setting default to disabled.
+    #[serde(default)]
+    pub(crate) casting_enabled: bool,
     #[serde(default)]
     pub(crate) privacy: ProfilePrivacy,
 }
@@ -588,6 +592,7 @@ pub(crate) struct WifiProfileDetails {
     pub(crate) band: WifiBand,
     pub(crate) channel: Option<u32>,
     pub(crate) send_hostname: bool,
+    pub(crate) casting_enabled: bool,
     pub(crate) permissions: Vec<String>,
     pub(crate) firewall_zone: Option<String>,
     /// Secondary connection UUIDs, typically a VPN started with this profile.
@@ -736,6 +741,8 @@ pub(crate) struct WifiProfileAdvancedUpdate {
     pub(crate) channel: Option<u32>,
     /// Empty list makes the profile available to every user.
     pub(crate) permissions: Option<Vec<String>>,
+    /// Enables resolve-only mDNS for Cast discovery, or disables mDNS on this profile.
+    pub(crate) casting_enabled: Option<bool>,
     /// Empty string restores the default firewall zone.
     pub(crate) firewall_zone: Option<String>,
     pub(crate) secondaries: Option<Vec<String>>,

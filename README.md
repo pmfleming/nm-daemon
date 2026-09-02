@@ -13,7 +13,7 @@ Local NetworkManager JSON/JSONL adapter and user D-Bus service for Shelllist and
 - Connection orchestration is an explicit NetworkManager D-Bus state machine with SSID-based activation verification, target-guarded cancellation, and failed-profile cleanup; BSSID and AP paths are selection hints rather than post-activation invariants. Cancellation deactivates only the captured active-connection object whose profile still has the requested SSID, so a previously healthy profile reactivated after a failed attempt is not torn down.
 - The daemon owns one NetworkManager connection, bounded and panic-contained background work, owner-scoped requests, and signal-driven shared subscriptions; it does not create a polling thread per subscriber.
 - Typed protocol registries, errors, identifiers, authentication/readiness states, cache results, and command results define the internal boundaries while custom serializers preserve the `nm-api` v1 response fields.
-- Local DNS-SD browsing and resolution is exposed through `discovery.services`, backed by systemd-resolved over D-Bus so the daemon never opens a competing mDNS socket.
+- Local DNS-SD browsing and resolution is exposed through `discovery.services`, backed by systemd-resolved over D-Bus so the daemon never opens a competing mDNS socket; saved Wi-Fi profiles have an opt-in, default-off per-network Cast discovery toggle backed by resolve-only/disabled NetworkManager mDNS policy.
 - Event-driven scan/connect, cancellation, NetworkManager SecretAgent bridging, transactional keyring outcomes, and concurrency-safe cache repositories are implemented.
 - `nm-daemon client` provides a long-lived JSONL frontend session over one D-Bus connection for Shelllist and similar process-oriented UIs.
 
@@ -101,7 +101,7 @@ Forwarded today:
 - `nm-daemon wifi connect-target ...`
 - `nm-daemon network connectivity`
 - `nm-daemon wifi disconnect`
-- `nm-daemon wifi profile delete|autoconnect|mac-randomization|share|send-hostname ...`
+- `nm-daemon wifi profile delete|autoconnect|casting|mac-randomization|share|send-hostname ...`
 
 The D-Bus/JSONL profile-operation API additionally exposes advanced profile details, updates, and secret reveal for frontends; these are intentionally not argv-oriented CLI commands.
 
@@ -115,6 +115,7 @@ nm-daemon wifi connect-target [--wep-key-type key|phrase] < request.json
 nm-daemon wifi saved
 nm-daemon wifi profile delete <path>
 nm-daemon wifi profile autoconnect <path> true|false
+nm-daemon wifi profile casting <path> true|false
 nm-daemon wifi profile mac-randomization <path> true|false
 nm-daemon wifi profile share <path>
 nm-daemon wifi profile send-hostname <path> true|false

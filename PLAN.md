@@ -240,6 +240,8 @@ Implemented in this repository:
 
 49. Added bounded local DNS-SD discovery through `discovery.services`. systemd-resolved remains the sole mDNS engine; the daemon enumerates PTR records, resolves each instance's SRV/TXT/address data through resolve1, validates untrusted wire-format names, preserves arbitrary TXT bytes, and returns an on-demand frontend snapshot without implementing application protocols such as Google Cast.
 
+50. Added a per-saved-network casting toggle through `wifi.profile.operation` and the CLI. It defaults off and persists NetworkManager's `connection.mdns` policy, using resolve-only mode when enabled so Cast discovery does not also register the local hostname, and reports the state in saved profiles, visible-network profile matches, profile details, and capability flags.
+
 ## Remaining open items
 
 1. Optionally add desktop UI integration for Secret Service prompts. The daemon now dismisses create/delete/unlock prompts and reports `prompt_unsupported` instead of claiming success.

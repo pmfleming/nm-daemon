@@ -103,7 +103,7 @@ Runtime scan/status data lives under `$XDG_RUNTIME_DIR/nm-daemon` (with a per-us
 
 ## Local discovery boundary
 
-`src/discovery.rs` validates local DNS-SD queries and calls `org.freedesktop.resolve1.Manager.ResolveRecord` for DNS-SD PTR enumeration, followed by `ResolveService` for each instance, over the existing system-bus connection. systemd-resolved remains the sole mDNS packet engine; `nm-daemon` only converts PTR, SRV, address, and TXT results into a frontend-safe typed snapshot. The domain is fixed to `local`, arbitrary TXT bytes are preserved as hexadecimal data, and no discovery result is treated as trusted input. Cast control remains outside this boundary.
+`src/discovery.rs` validates local DNS-SD queries and calls `org.freedesktop.resolve1.Manager.ResolveRecord` for DNS-SD PTR enumeration, followed by `ResolveService` for each instance, over the existing system-bus connection. systemd-resolved remains the sole mDNS packet engine; `nm-daemon` only converts PTR, SRV, address, and TXT results into a frontend-safe typed snapshot. The domain is fixed to `local`, arbitrary TXT bytes are preserved as hexadecimal data, and no discovery result is treated as trusted input. Saved Wi-Fi profiles can permit or block this traffic per network through NetworkManager's `connection.mdns`; discovery is opt-in/default-off, and the enabled state uses resolve-only mode without advertising the local hostname. Cast control remains outside this boundary.
 
 ## External command boundary
 

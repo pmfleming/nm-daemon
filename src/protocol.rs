@@ -377,7 +377,7 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 33] = &[
         method: Method::WifiProfileOperation,
         name: "wifi.profile.operation",
         parameters: ParameterKind::ProfileOperation,
-        params_example: r#"{"operation":"set-autoconnect","path":"/org/freedesktop/NetworkManager/Settings/1","enabled":true}"#,
+        params_example: r#"{"operation":"set-casting","path":"/org/freedesktop/NetworkManager/Settings/1","enabled":true}"#,
         response_key: "result",
         stream: None,
         operation: ErrorOperation::ProfileOperation,

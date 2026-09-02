@@ -25,6 +25,11 @@ const NM_SECRET_FLAG_AGENT_OWNED: u32 = 0x1;
 const NM_SECRET_FLAG_NOT_SAVED: u32 = 0x2;
 const NM_SECRET_FLAG_NOT_REQUIRED: u32 = 0x4;
 
+// NMSettingConnectionMdns values. Cast discovery only needs resolve access;
+// enabling hostname registration would expose more than this toggle promises.
+const NM_MDNS_DISABLED: i32 = 0;
+const NM_MDNS_RESOLVE: i32 = 1;
+
 type ActivationTarget = (OwnedObjectPath, OwnedObjectPath, OwnedObjectPath);
 
 impl Nm {
@@ -106,6 +111,12 @@ impl Nm {
         })
     }
 
+    pub(crate) fn set_connection_casting_by_path(&self, path: &str, enabled: bool) -> Result<()> {
+        self.mutate_connection_settings(path, "Cast discovery", |settings| {
+            set_casting_enabled(settings, enabled)
+        })
+    }
+
     pub(crate) fn set_connection_mac_randomization_by_path(
         &self,
         path: &str,
@@ -179,6 +190,7 @@ impl Nm {
                 .and_then(setting_u32)
                 .filter(|v| *v > 0),
             send_hostname: profile.privacy.send_hostname,
+            casting_enabled: profile.casting_enabled,
             permissions: connection
                 .get("permissions")
                 .and_then(setting_string_list)
@@ -598,8 +610,30 @@ fn saved_wifi_connection_from_settings(
         ssid,
         ssid_bytes,
         autoconnect,
+        casting_enabled: casting_enabled_from_settings(settings),
         privacy,
     })
+}
+
+fn casting_enabled_from_settings(settings: &ConnectionSettings) -> bool {
+    settings
+        .get("connection")
+        .and_then(|connection| connection.get("mdns"))
+        .and_then(|value| value.try_clone().ok()?.try_into().ok())
+        .is_some_and(|value: i32| value > NM_MDNS_DISABLED)
+}
+
+fn set_casting_enabled(settings: &mut ConnectionSettings, enabled: bool) -> Result<()> {
+    let value = if enabled {
+        NM_MDNS_RESOLVE
+    } else {
+        NM_MDNS_DISABLED
+    };
+    settings
+        .entry("connection".to_string())
+        .or_default()
+        .insert("mdns".to_string(), owned_value(value)?);
+    Ok(())
 }
 
 fn wifi_share_payload_for_settings(

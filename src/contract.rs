@@ -114,6 +114,10 @@ fn wifi_method_fixtures() -> Value {
             "status": "ok",
             "message": "Saved Wi-Fi profile settings updated",
         })),
+        "wifi-profile.set-casting": response_fixture(Method::WifiProfileOperation, json!({
+            "status": "ok",
+            "message": "Saved Wi-Fi profile Cast discovery updated",
+        })),
         "wifi-profile.update-conflict": json!({
             "protocol": crate::output::API_PROTOCOL,
             "version": crate::output::API_VERSION,
@@ -1298,6 +1302,7 @@ fn contract_profile() -> SavedWifiConnection {
         ssid: "Example".to_string(),
         ssid_bytes: b"Example".to_vec(),
         autoconnect: true,
+        casting_enabled: false,
         privacy: ProfilePrivacy {
             mac_address_policy: "stable".to_string(),
             randomized_mac: true,
@@ -1326,6 +1331,7 @@ fn contract_profile_details() -> WifiProfileDetails {
         band: WifiBand::Ghz5,
         channel: Some(36),
         send_hostname: false,
+        casting_enabled: false,
         permissions: vec!["user:laufan:".to_string()],
         firewall_zone: Some("home".to_string()),
         secondaries: vec!["0a1c9c6e-3d21-4a55-8c2b-1e5b9d6f7a22".to_string()],

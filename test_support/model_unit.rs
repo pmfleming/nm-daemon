@@ -372,6 +372,7 @@ fn test_profile() -> SavedWifiConnection {
         ssid: "Example".to_string(),
         ssid_bytes: b"Example".to_vec(),
         autoconnect: true,
+        casting_enabled: false,
         privacy: ProfilePrivacy::default(),
     }
 }

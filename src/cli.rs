@@ -285,6 +285,14 @@ pub(crate) enum ProfileCommand {
         #[arg(action = ArgAction::Set)]
         enabled: bool,
     },
+    /// Enable or disable Cast device discovery on this network.
+    Casting {
+        /// NetworkManager settings object path, from `nm-daemon wifi saved`.
+        path: NmObjectPath,
+        /// true permits resolve-only mDNS discovery, false disables mDNS on the profile.
+        #[arg(action = ArgAction::Set)]
+        enabled: bool,
+    },
     /// Set per-profile Wi-Fi MAC privacy.
     MacRandomization {
         /// NetworkManager settings object path, from `nm-daemon wifi saved`.

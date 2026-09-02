@@ -423,6 +423,9 @@ impl<'a> Application<'a> {
             ProfileOperation::SetAutoconnect { path, enabled } => {
                 self.set_profile_autoconnect(path.as_str(), enabled)
             }
+            ProfileOperation::SetCasting { path, enabled } => {
+                self.set_profile_casting(path.as_str(), enabled)
+            }
             ProfileOperation::SetMacRandomization { path, randomized } => {
                 self.set_profile_mac_randomization(path.as_str(), randomized)
             }
@@ -470,6 +473,13 @@ impl<'a> Application<'a> {
     fn set_profile_autoconnect(&self, path: &str, enabled: bool) -> Result<ProfileOperationResult> {
         self.nm.set_connection_autoconnect_by_path(path, enabled)?;
         Ok(profile_updated("Saved Wi-Fi profile autoconnect updated"))
+    }
+
+    fn set_profile_casting(&self, path: &str, enabled: bool) -> Result<ProfileOperationResult> {
+        self.nm.set_connection_casting_by_path(path, enabled)?;
+        Ok(profile_updated(
+            "Saved Wi-Fi profile Cast discovery updated",
+        ))
     }
 
     fn set_profile_mac_randomization(
@@ -777,6 +787,10 @@ pub(crate) enum ProfileOperation {
         path: NmObjectPath,
     },
     SetAutoconnect {
+        path: NmObjectPath,
+        enabled: bool,
+    },
+    SetCasting {
         path: NmObjectPath,
         enabled: bool,
     },

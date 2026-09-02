@@ -154,6 +154,10 @@ pub(crate) fn run_profile_command(nm: &Nm, command: ProfileCommand) -> Result<()
             tracing::info!(path = %path.as_str(), enabled, "setting saved Wi-Fi profile autoconnect");
             ProfileOperation::SetAutoconnect { path, enabled }
         }
+        ProfileCommand::Casting { path, enabled } => {
+            tracing::info!(path = %path.as_str(), enabled, "setting saved Wi-Fi profile Cast discovery");
+            ProfileOperation::SetCasting { path, enabled }
+        }
         ProfileCommand::MacRandomization { path, randomized } => {
             tracing::info!(path = %path.as_str(), randomized, "setting saved Wi-Fi profile MAC privacy");
             ProfileOperation::SetMacRandomization { path, randomized }

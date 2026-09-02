@@ -246,6 +246,9 @@ pub(crate) fn call_profile_operation(
         ProfileOperationParams::SetAutoconnect { path, enabled } => {
             ProfileOperation::SetAutoconnect { path, enabled }
         }
+        ProfileOperationParams::SetCasting { path, enabled } => {
+            ProfileOperation::SetCasting { path, enabled }
+        }
         ProfileOperationParams::SetMacRandomization { path, randomized } => {
             ProfileOperation::SetMacRandomization { path, randomized }
         }
@@ -335,6 +338,10 @@ pub(crate) enum ProfileOperationParams {
         target: Option<Box<WifiConnectTarget>>,
     },
     SetAutoconnect {
+        path: NmObjectPath,
+        enabled: bool,
+    },
+    SetCasting {
         path: NmObjectPath,
         enabled: bool,
     },

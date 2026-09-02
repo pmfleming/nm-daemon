@@ -137,6 +137,8 @@ struct NetworkCapabilitiesV1 {
     #[serde(default)]
     can_set_mac_randomization: bool,
     #[serde(default)]
+    can_toggle_casting: bool,
+    #[serde(default)]
     can_set_send_hostname: bool,
     #[serde(default)]
     can_share_qr: bool,
@@ -155,6 +157,7 @@ struct NetworkCapabilitiesRef<'a> {
     can_forget: bool,
     can_toggle_autoconnect: bool,
     can_set_mac_randomization: bool,
+    can_toggle_casting: bool,
     can_set_send_hostname: bool,
     can_share_qr: bool,
     supported_auth: bool,
@@ -176,6 +179,7 @@ impl<'a> From<&'a NetworkCapabilities> for NetworkCapabilitiesRef<'a> {
             can_forget: capabilities.has_profile,
             can_toggle_autoconnect: capabilities.has_profile,
             can_set_mac_randomization: capabilities.has_profile,
+            can_toggle_casting: capabilities.has_profile,
             can_set_send_hostname: capabilities.has_profile,
             can_share_qr: capabilities.can_share_qr,
         }
@@ -199,6 +203,13 @@ impl<'de> Deserialize<'de> for NetworkCapabilities {
         if profile_flags.iter().any(|flag| *flag != profile_flags[0]) {
             return Err(D::Error::custom(
                 "profile mutation capability flags must agree",
+            ));
+        }
+        // Older v1 cache entries predate this capability and deserialize it as
+        // false, but a true value is only coherent for a saved profile.
+        if wire.can_toggle_casting && !profile_flags[0] {
+            return Err(D::Error::custom(
+                "Cast discovery cannot be changed without a saved profile",
             ));
         }
         let readiness = match (

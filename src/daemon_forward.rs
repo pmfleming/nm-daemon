@@ -454,6 +454,9 @@ fn profile_params(command: &ProfileCommand) -> String {
         ProfileCommand::Autoconnect { path, enabled } => {
             json!({ "operation": "set-autoconnect", "path": path, "enabled": enabled })
         }
+        ProfileCommand::Casting { path, enabled } => {
+            json!({ "operation": "set-casting", "path": path, "enabled": enabled })
+        }
         ProfileCommand::MacRandomization { path, randomized } => {
             json!({ "operation": "set-mac-randomization", "path": path, "randomized": randomized })
         }

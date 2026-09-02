@@ -67,6 +67,12 @@ fn apply_connection_settings(
     profile: &TargetProfileSettings,
 ) -> Result<()> {
     let connection = settings.entry("connection".to_string()).or_default();
+    // Cast discovery is opt-in. Preserve an explicit per-profile toggle, but
+    // pin profiles with no mDNS policy to disabled instead of inheriting a
+    // potentially permissive system default.
+    connection
+        .entry("mdns".to_string())
+        .or_insert(owned_value(0_i32)?);
     if let Some(autoconnect) = profile.autoconnect {
         connection.insert("autoconnect".to_string(), owned_value(autoconnect)?);
     }

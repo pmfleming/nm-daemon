@@ -146,6 +146,9 @@ fn apply_connection_fields(
     set_clearable_text(connection, "zone", update.firewall_zone.as_deref())?;
     set_list(connection, "permissions", update.permissions.as_deref())?;
     set_list(connection, "secondaries", update.secondaries.as_deref())?;
+    if let Some(enabled) = update.casting_enabled {
+        super::set_casting_enabled(settings, enabled)?;
+    }
     Ok(())
 }
 
@@ -528,6 +531,7 @@ mod tests {
         let mut settings = settings();
         let update = WifiProfileAdvancedUpdate {
             autoconnect_priority: Some(30),
+            casting_enabled: Some(true),
             bssid: Some("00:11:22:33:44:55".to_string()),
             mtu: Some(1400),
             band: Some(WifiBand::Ghz5),
@@ -544,6 +548,7 @@ mod tests {
             30
         );
         assert!(connection.contains_key("id"), "unsent fields are preserved");
+        assert_eq!(i32::try_from(connection["mdns"].clone()).unwrap(), 1);
         assert!(
             !connection.contains_key("zone"),
             "unsent fields are not created"

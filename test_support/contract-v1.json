@@ -344,6 +344,7 @@
       "can_set_send_hostname": false,
       "can_share_qr": false,
       "can_toggle_autoconnect": false,
+      "can_toggle_casting": false,
       "needs_credentials": true,
       "needs_password": false,
       "supported_auth": true,
@@ -427,6 +428,7 @@
       "can_set_send_hostname": false,
       "can_share_qr": false,
       "can_toggle_autoconnect": false,
+      "can_toggle_casting": false,
       "needs_credentials": false,
       "needs_password": true,
       "supported_auth": true,
@@ -447,6 +449,7 @@
       "autoconnect_priority": 10,
       "band": "5",
       "bssid": "00:11:22:33:44:55",
+      "casting_enabled": false,
       "channel": 36,
       "cloned_mac_address": null,
       "enterprise": {
@@ -654,6 +657,7 @@
       "can_set_send_hostname": true,
       "can_share_qr": true,
       "can_toggle_autoconnect": true,
+      "can_toggle_casting": true,
       "needs_credentials": false,
       "needs_password": false,
       "supported_auth": true,
@@ -676,6 +680,7 @@
     "profiles": [
       {
         "autoconnect": true,
+        "casting_enabled": false,
         "id": "Example",
         "path": "/org/freedesktop/NetworkManager/Settings/1",
         "privacy": {
@@ -789,6 +794,7 @@
               "can_set_send_hostname": false,
               "can_share_qr": false,
               "can_toggle_autoconnect": false,
+              "can_toggle_casting": false,
               "needs_credentials": false,
               "needs_password": true,
               "supported_auth": true,
