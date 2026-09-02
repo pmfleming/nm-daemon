@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -31,6 +32,7 @@ const READ_WORKER_COUNT: usize = 4;
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NETWORK_CHANGE_DEBOUNCE: Duration = Duration::from_millis(75);
+const WRONG_PASSWORD_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 struct BlockingLane {
     sender: tokio_mpsc::Sender<Job>,
@@ -209,6 +211,140 @@ struct CancelledTask {
     target_ssid: Option<Arc<[u8]>>,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct ConnectAttemptKey {
+    identity: String,
+    credential_fingerprint: u64,
+    supplied_credentials: bool,
+}
+
+impl ConnectAttemptKey {
+    pub(crate) fn new(
+        identity: String,
+        credential_material: &[u8],
+        supplied_credentials: bool,
+    ) -> Self {
+        let mut fingerprint = DefaultHasher::new();
+        credential_material.hash(&mut fingerprint);
+        Self {
+            identity,
+            credential_fingerprint: fingerprint.finish(),
+            supplied_credentials,
+        }
+    }
+}
+
+#[derive(Default)]
+struct ConnectAttemptPolicy {
+    active_identities: HashSet<String>,
+    blocked_until: HashMap<(String, u64), Instant>,
+    stale_credentials: HashSet<String>,
+}
+
+enum ConnectAdmission {
+    Active,
+    RetryAfter(Duration),
+    CredentialsRequired,
+}
+
+impl ConnectAttemptPolicy {
+    fn admit(
+        &mut self,
+        attempt: &ConnectAttemptKey,
+        now: Instant,
+    ) -> std::result::Result<(), ConnectAdmission> {
+        self.blocked_until.retain(|_, deadline| *deadline > now);
+        if self.active_identities.contains(&attempt.identity) {
+            return Err(ConnectAdmission::Active);
+        }
+        if self.stale_credentials.contains(&attempt.identity) && !attempt.supplied_credentials {
+            return Err(ConnectAdmission::CredentialsRequired);
+        }
+        if let Some(deadline) = self
+            .blocked_until
+            .get(&(attempt.identity.clone(), attempt.credential_fingerprint))
+        {
+            return Err(ConnectAdmission::RetryAfter(
+                deadline.saturating_duration_since(now),
+            ));
+        }
+        self.active_identities.insert(attempt.identity.clone());
+        Ok(())
+    }
+
+    fn complete(
+        &mut self,
+        attempt: &ConnectAttemptKey,
+        reason: Option<crate::model::ConnectFailureReason>,
+        succeeded: bool,
+        now: Instant,
+    ) {
+        self.active_identities.remove(&attempt.identity);
+        if succeeded {
+            self.stale_credentials.remove(&attempt.identity);
+            self.blocked_until
+                .retain(|(identity, _), _| identity != &attempt.identity);
+            return;
+        }
+        if matches!(
+            reason,
+            Some(
+                crate::model::ConnectFailureReason::WrongPassword
+                    | crate::model::ConnectFailureReason::PasswordUnavailable
+                    | crate::model::ConnectFailureReason::SecretRequired
+            )
+        ) {
+            self.stale_credentials.insert(attempt.identity.clone());
+        }
+        if reason == Some(crate::model::ConnectFailureReason::WrongPassword) {
+            self.blocked_until.insert(
+                (attempt.identity.clone(), attempt.credential_fingerprint),
+                now + WRONG_PASSWORD_RETRY_DELAY,
+            );
+        }
+    }
+
+    fn abandon(&mut self, attempt: &ConnectAttemptKey) {
+        self.active_identities.remove(&attempt.identity);
+    }
+}
+
+pub(crate) struct ConnectAttemptGuard {
+    runtime: Weak<DaemonRuntime>,
+    attempt: ConnectAttemptKey,
+    finished: bool,
+}
+
+impl ConnectAttemptGuard {
+    pub(crate) fn finish(
+        mut self,
+        reason: Option<crate::model::ConnectFailureReason>,
+        succeeded: bool,
+    ) {
+        if let Some(runtime) = self.runtime.upgrade() {
+            recover_lock(&runtime.connect_attempts, "Wi-Fi connect attempt policy").complete(
+                &self.attempt,
+                reason,
+                succeeded,
+                Instant::now(),
+            );
+        }
+        self.finished = true;
+    }
+}
+
+impl Drop for ConnectAttemptGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some(runtime) = self.runtime.upgrade() {
+            recover_lock(&runtime.connect_attempts, "Wi-Fi connect attempt policy")
+                .abandon(&self.attempt);
+        }
+    }
+}
+
 struct CachedStatus {
     recorded_at: Instant,
     response: Value,
@@ -222,6 +358,7 @@ pub(crate) struct DaemonRuntime {
     control: tokio_mpsc::Sender<Control>,
     tasks: Mutex<HashMap<String, TaskHandle>>,
     tasks_changed: Condvar,
+    connect_attempts: Mutex<ConnectAttemptPolicy>,
     status_cache: Mutex<Option<CachedStatus>>,
     status_generation: AtomicUsize,
     cache_refresh_pending: AtomicBool,
@@ -261,6 +398,7 @@ impl DaemonRuntime {
             control: control_tx,
             tasks: Mutex::new(HashMap::new()),
             tasks_changed: Condvar::new(),
+            connect_attempts: Mutex::new(ConnectAttemptPolicy::default()),
             status_cache: Mutex::new(None),
             status_generation: AtomicUsize::new(0),
             cache_refresh_pending: AtomicBool::new(false),
@@ -409,6 +547,37 @@ impl DaemonRuntime {
             }),
         )?;
         reply_rx.recv().map_err(|_| runtime_stopped(operation))?
+    }
+
+    pub(crate) fn begin_connect_attempt(
+        self: &Arc<Self>,
+        attempt: ConnectAttemptKey,
+    ) -> Result<ConnectAttemptGuard> {
+        let admission = recover_lock(&self.connect_attempts, "Wi-Fi connect attempt policy")
+            .admit(&attempt, Instant::now());
+        if let Err(admission) = admission {
+            let error = match admission {
+                ConnectAdmission::Active => DomainError::connect(
+                    crate::model::ConnectFailureReason::ActivationFailed,
+                    "A connection attempt for this network is already running",
+                ),
+                ConnectAdmission::CredentialsRequired => DomainError::connect(
+                    crate::model::ConnectFailureReason::SecretRequired,
+                    "The saved Wi-Fi credentials failed; provide replacement credentials",
+                ),
+                ConnectAdmission::RetryAfter(delay) => DomainError::connect(
+                    crate::model::ConnectFailureReason::WrongPassword,
+                    "NetworkManager is temporarily ignoring this access point after a failed password",
+                )
+                .with_detail("retry_after_ms", delay.as_millis() as u64),
+            };
+            return Err(error.into());
+        }
+        Ok(ConnectAttemptGuard {
+            runtime: Arc::downgrade(self),
+            attempt,
+            finished: false,
+        })
     }
 
     pub(crate) fn start_cancellable(
@@ -1143,7 +1312,11 @@ fn runtime_stopped(operation: ErrorOperation) -> anyhow::Error {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{RefreshGate, recover_lock};
+    use super::{
+        ConnectAdmission, ConnectAttemptKey, ConnectAttemptPolicy, RefreshGate,
+        WRONG_PASSWORD_RETRY_DELAY, recover_lock,
+    };
+    use crate::model::ConnectFailureReason;
 
     #[test]
     fn refresh_gate_coalesces_invalidations_without_losing_a_change() {
@@ -1158,6 +1331,38 @@ mod tests {
         assert!(refresh.invalidate());
         refresh.started();
         assert!(!refresh.complete());
+    }
+
+    #[test]
+    fn connect_attempt_policy_owns_duplicate_retry_and_stale_secret_rules() {
+        let now = std::time::Instant::now();
+        let saved = ConnectAttemptKey::new("network".into(), b"saved", false);
+        let wrong = ConnectAttemptKey::new("network".into(), b"wrong", true);
+        let replacement = ConnectAttemptKey::new("network".into(), b"replacement", true);
+        let mut policy = ConnectAttemptPolicy::default();
+
+        assert!(policy.admit(&wrong, now).is_ok());
+        assert!(matches!(
+            policy.admit(&wrong, now),
+            Err(ConnectAdmission::Active)
+        ));
+        policy.complete(
+            &wrong,
+            Some(ConnectFailureReason::WrongPassword),
+            false,
+            now,
+        );
+        assert!(matches!(
+            policy.admit(&wrong, now),
+            Err(ConnectAdmission::RetryAfter(delay)) if delay == WRONG_PASSWORD_RETRY_DELAY
+        ));
+        assert!(matches!(
+            policy.admit(&saved, now),
+            Err(ConnectAdmission::CredentialsRequired)
+        ));
+        assert!(policy.admit(&replacement, now).is_ok());
+        policy.complete(&replacement, None, true, now);
+        assert!(policy.admit(&saved, now).is_ok());
     }
 
     #[test]

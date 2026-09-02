@@ -2,13 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, ConnectEvent, ConnectOutcome, ConnectRequest};
 use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, started_response};
-use crate::daemon_runtime::{DaemonRuntime, TaskKind};
+use crate::daemon_runtime::{ConnectAttemptKey, DaemonRuntime, TaskKind};
 use crate::error::{DomainError, ErrorOperation, ErrorReport};
 use crate::model::{
     ConnectPhase, ConnectTargetIdentity, EnterpriseAuth, WepKeyType, WifiConnectTarget,
@@ -19,7 +19,7 @@ use crate::protocol::{Method, Stream};
 
 const STREAM: Stream = Stream::WifiConnect;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DbusConnectTargetParams {
     #[serde(default)]
@@ -66,6 +66,25 @@ impl DbusConnectTargetParams {
             }
             (None, None) => bail!("connect request must provide key or target"),
         }
+    }
+
+    fn attempt_key(&self) -> Result<ConnectAttemptKey> {
+        let identity = self.requested_identity()?;
+        let identity = identity.network_key.unwrap_or_else(|| {
+            format!(
+                "{}:{}:{}",
+                identity.ssid_hex,
+                identity.device_iface.unwrap_or_default(),
+                identity.bssid.unwrap_or_default()
+            )
+        });
+        let supplied_credentials = self.password.is_some() || self.enterprise.is_some();
+        let credential_material = serde_json::to_vec(self)?;
+        Ok(ConnectAttemptKey::new(
+            identity,
+            &credential_material,
+            supplied_credentials,
+        ))
     }
 
     fn validated_ssid(&self) -> Result<Vec<u8>> {
@@ -123,6 +142,8 @@ pub(crate) fn start_connect_target(
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
     let target_ssid = params.validated_ssid().map_err(connect_validation_error)?;
+    let attempt =
+        runtime.begin_connect_attempt(params.attempt_key().map_err(connect_validation_error)?)?;
     let requested_identity = params
         .requested_identity()
         .map_err(connect_validation_error)?;
@@ -133,9 +154,24 @@ pub(crate) fn start_connect_target(
         TaskKind::Connect,
         owner,
         Some(target_ssid),
-        move |nm, cancel_flag, request_id| {
-            if let Err(error) = run_connect_worker(nm, request_id, params, cancel_flag, &emitter) {
+        move |nm, cancel_flag, request_id| match run_connect_worker(
+            nm,
+            request_id,
+            params,
+            cancel_flag,
+            &emitter,
+        ) {
+            Ok(outcome) => {
+                let (reason, succeeded) = match &outcome {
+                    ConnectOutcome::Succeeded(_) => (None, true),
+                    ConnectOutcome::Failed { result, .. } => (result.reason, false),
+                    ConnectOutcome::Cancelled { .. } => (None, false),
+                };
+                attempt.finish(reason, succeeded);
+            }
+            Err(error) => {
                 let report = ErrorReport::from_error(&error, ErrorOperation::Connect);
+                attempt.finish(report.code.connect_reason(), false);
                 emit_connect_failure(&emitter, request_id, &requested_identity, &report);
             }
         },
@@ -167,13 +203,11 @@ fn run_connect_worker(
     params: DbusConnectTargetParams,
     cancel_flag: &AtomicBool,
     emitter: &SignalEmitter<'static>,
-) -> Result<()> {
+) -> Result<ConnectOutcome> {
     let request = params.into_request(nm)?;
-    Application::new(nm)
-        .connect(&request, Some(cancel_flag), |event| {
-            emit_connect_event(emitter, request_id, event)
-        })
-        .map(|_| ())
+    Application::new(nm).connect(&request, Some(cancel_flag), |event| {
+        emit_connect_event(emitter, request_id, event)
+    })
 }
 
 fn emit_connect_event(
