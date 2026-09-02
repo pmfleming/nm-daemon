@@ -17,9 +17,7 @@ use crate::output::api_data_value;
 use crate::protocol::Method;
 
 pub(crate) fn call_status(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_application(runtime, Method::WifiStatus, |application| {
-        application.status()
-    })
+    runtime.call_status()
 }
 
 pub(crate) fn call_set_enabled(
@@ -172,7 +170,7 @@ fn nonempty(value: Option<String>) -> Option<String> {
 
 pub(crate) fn call_networks(runtime: &Arc<DaemonRuntime>, params: NetworksParams) -> Result<Value> {
     let background_scans = Arc::clone(runtime);
-    runtime.call(ErrorOperation::Networks, move |nm| {
+    runtime.call_read(ErrorOperation::Networks, move |nm| {
         let application = Application::new(nm);
         let result = application
             .with_background_scans(&background_scans)
@@ -213,14 +211,28 @@ fn call_application<T: Serialize>(
     action: impl FnOnce(&Application<'_>) -> Result<T> + Send + 'static,
 ) -> Result<Value> {
     let spec = method.spec();
-    runtime.call(spec.operation, move |nm| {
+    let call = move |nm: &crate::nm::Nm| {
         let result = action(&Application::new(nm))?;
         api_data_value(
             spec.response_key,
             &result,
             "serialize daemon method response JSON",
         )
-    })
+    };
+    if matches!(
+        method,
+        Method::NetworkConnectivity
+            | Method::NetworkInventory
+            | Method::NetworkDevices
+            | Method::NetworkConnections
+            | Method::NetworkState
+            | Method::DiscoveryServices
+            | Method::WifiSaved
+    ) {
+        runtime.call_read(spec.operation, call)
+    } else {
+        runtime.call(spec.operation, call)
+    }
 }
 
 pub(crate) fn call_profile_operation(

@@ -15,7 +15,8 @@ use crate::daemon_status::{SubscriptionState, refresh_payloads};
 use crate::error::{DomainError, ErrorOperation};
 use crate::generated::{CONTROL_QUEUE_CAPACITY, WORK_QUEUE_CAPACITY, WORKER_COUNT};
 use crate::nm::Nm;
-use crate::protocol::Stream;
+use crate::output::api_data_value;
+use crate::protocol::{Method, Stream};
 
 type Job = Box<dyn FnOnce(&Nm) + Send + 'static>;
 
@@ -26,6 +27,8 @@ pub(crate) fn next_request_id(prefix: &str) -> String {
 }
 
 const FAST_WORKER_COUNT: usize = 1;
+const READ_WORKER_COUNT: usize = 4;
+const STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const NETWORK_CHANGE_DEBOUNCE: Duration = Duration::from_millis(75);
 
@@ -206,13 +209,21 @@ struct CancelledTask {
     target_ssid: Option<Arc<[u8]>>,
 }
 
+struct CachedStatus {
+    recorded_at: Instant,
+    response: Value,
+}
+
 pub(crate) struct DaemonRuntime {
     nm: Arc<Nm>,
     work: BlockingLane,
     fast_work: BlockingLane,
+    read_work: BlockingLane,
     control: tokio_mpsc::Sender<Control>,
     tasks: Mutex<HashMap<String, TaskHandle>>,
     tasks_changed: Condvar,
+    status_cache: Mutex<Option<CachedStatus>>,
+    status_generation: AtomicUsize,
     cache_refresh_pending: AtomicBool,
 }
 
@@ -233,20 +244,34 @@ impl DaemonRuntime {
             WORK_QUEUE_CAPACITY,
             FAST_WORKER_COUNT,
         );
+        let read_work = BlockingLane::start(
+            &tokio,
+            Arc::clone(&nm),
+            "read-work",
+            WORK_QUEUE_CAPACITY,
+            READ_WORKER_COUNT,
+        );
         let (control_tx, control_rx) = tokio_mpsc::channel(CONTROL_QUEUE_CAPACITY);
 
         let runtime = Arc::new(Self {
             nm,
             work,
             fast_work,
+            read_work,
             control: control_tx,
             tasks: Mutex::new(HashMap::new()),
             tasks_changed: Condvar::new(),
+            status_cache: Mutex::new(None),
+            status_generation: AtomicUsize::new(0),
             cache_refresh_pending: AtomicBool::new(false),
         });
         start_event_loop(&tokio, Arc::downgrade(&runtime), control_rx);
         let control = runtime.control.clone();
+        let event_runtime = Arc::downgrade(&runtime);
         runtime.nm.subscribe_events(Arc::new(move || {
+            if let Some(runtime) = event_runtime.upgrade() {
+                runtime.invalidate_status();
+            }
             let _ = control.try_send(Control::NetworkChanged);
         }));
         let health_control = runtime.control.clone();
@@ -273,7 +298,76 @@ impl DaemonRuntime {
         if self.control.send(Control::Shutdown(reply)).await.is_ok() {
             let _ = tokio::time::timeout(RUNTIME_SHUTDOWN_TIMEOUT, stopped).await;
         }
-        tokio::join!(self.work.shutdown(), self.fast_work.shutdown());
+        tokio::join!(
+            self.work.shutdown(),
+            self.fast_work.shutdown(),
+            self.read_work.shutdown()
+        );
+    }
+
+    pub(crate) fn call_status(self: &Arc<Self>) -> Result<Value> {
+        if let Some(response) = self.cached_status() {
+            return Ok(response);
+        }
+        let generation = self.status_generation.load(Ordering::Acquire);
+        let runtime = Arc::downgrade(self);
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.submit_read(
+            ErrorOperation::Status,
+            Box::new(move |nm| {
+                let application = Application::new(nm);
+                match application.status_snapshot().and_then(|status| {
+                    let response = api_data_value(
+                        Method::WifiStatus.spec().response_key,
+                        &status,
+                        "serialize daemon method response JSON",
+                    )?;
+                    Ok((response, status))
+                }) {
+                    Ok((response, status)) => {
+                        if let Some(runtime) = runtime.upgrade() {
+                            runtime.store_status(generation, response.clone());
+                        }
+                        // Release the interactive response before filesystem
+                        // cache maintenance, which is only best-effort state.
+                        let _ = reply_tx.send(Ok(response));
+                        application.persist_status(&status);
+                    }
+                    Err(error) => {
+                        let _ = reply_tx.send(Err(error));
+                    }
+                }
+            }),
+        )?;
+        reply_rx
+            .recv()
+            .map_err(|_| runtime_stopped(ErrorOperation::Status))?
+    }
+
+    fn cached_status(&self) -> Option<Value> {
+        let mut cached = recover_lock(&self.status_cache, "Wi-Fi status cache");
+        if cached
+            .as_ref()
+            .is_some_and(|status| status.recorded_at.elapsed() <= STATUS_CACHE_TTL)
+        {
+            return cached.as_ref().map(|status| status.response.clone());
+        }
+        cached.take();
+        None
+    }
+
+    fn store_status(&self, generation: usize, response: Value) {
+        if self.status_generation.load(Ordering::Acquire) == generation {
+            *recover_lock(&self.status_cache, "Wi-Fi status cache") = Some(CachedStatus {
+                recorded_at: Instant::now(),
+                response,
+            });
+        }
+    }
+
+    fn invalidate_status(&self) {
+        self.status_generation.fetch_add(1, Ordering::AcqRel);
+        recover_lock(&self.status_cache, "Wi-Fi status cache").take();
     }
 
     pub(crate) fn call<T>(
@@ -284,8 +378,31 @@ impl DaemonRuntime {
     where
         T: Send + 'static,
     {
+        self.call_on_lane(&self.fast_work, operation, task)
+    }
+
+    pub(crate) fn call_read<T>(
+        &self,
+        operation: ErrorOperation,
+        task: impl FnOnce(&Nm) -> Result<T> + Send + 'static,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+    {
+        self.call_on_lane(&self.read_work, operation, task)
+    }
+
+    fn call_on_lane<T>(
+        &self,
+        lane: &BlockingLane,
+        operation: ErrorOperation,
+        task: impl FnOnce(&Nm) -> Result<T> + Send + 'static,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+    {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        self.submit_fast(
+        lane.try_submit(
             operation,
             Box::new(move |nm| {
                 let _ = reply_tx.send(task(nm));
@@ -598,6 +715,10 @@ impl DaemonRuntime {
 
     fn submit_fast(&self, operation: ErrorOperation, job: Job) -> Result<()> {
         self.fast_work.try_submit(operation, job)
+    }
+
+    fn submit_read(&self, operation: ErrorOperation, job: Job) -> Result<()> {
+        self.read_work.try_submit(operation, job)
     }
 }
 

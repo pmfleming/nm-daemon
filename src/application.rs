@@ -46,11 +46,19 @@ impl<'a> Application<'a> {
     }
 
     pub(crate) fn status(&self) -> Result<WifiStatus> {
-        let status = operation_result(ErrorOperation::Status, self.nm.wifi_status())?;
-        best_effort("failed to cache active Wi-Fi status", || {
-            cache::cache_connected_network_status(&status)
-        });
+        let status = self.status_snapshot()?;
+        self.persist_status(&status);
         Ok(status)
+    }
+
+    pub(crate) fn status_snapshot(&self) -> Result<WifiStatus> {
+        operation_result(ErrorOperation::Status, self.nm.wifi_status())
+    }
+
+    pub(crate) fn persist_status(&self, status: &WifiStatus) {
+        best_effort("failed to cache active Wi-Fi status", || {
+            cache::cache_connected_network_status(status)
+        });
     }
 
     pub(crate) fn connectivity(&self) -> Result<ConnectivityStatus> {
