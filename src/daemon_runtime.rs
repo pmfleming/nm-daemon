@@ -27,6 +27,7 @@ pub(crate) fn next_request_id(prefix: &str) -> String {
 
 const FAST_WORKER_COUNT: usize = 1;
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const NETWORK_CHANGE_DEBOUNCE: Duration = Duration::from_millis(75);
 
 struct BlockingLane {
     sender: tokio_mpsc::Sender<Job>,
@@ -685,16 +686,42 @@ fn start_event_loop(
 async fn run_event_loop(runtime: Weak<DaemonRuntime>, mut receiver: tokio_mpsc::Receiver<Control>) {
     let mut subscriptions = HashMap::<String, SubscriptionState>::new();
     let mut refresh = RefreshGate::default();
-    while let Some(control) = receiver.recv().await {
-        if let Control::Shutdown(reply) = control {
-            subscriptions.clear();
-            let _ = reply.send(());
-            return;
+    let mut network_change_deadline = None;
+    loop {
+        tokio::select! {
+            control = receiver.recv() => {
+                let Some(control) = control else { return };
+                if let Control::Shutdown(reply) = control {
+                    subscriptions.clear();
+                    let _ = reply.send(());
+                    return;
+                }
+                if matches!(&control, Control::NetworkChanged) {
+                    // NetworkManager emits a burst of property signals for one
+                    // logical transition. Start one short deadline so the burst
+                    // produces one shared snapshot instead of one per signal.
+                    network_change_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + NETWORK_CHANGE_DEBOUNCE
+                    });
+                    continue;
+                }
+                let Some(runtime) = runtime.upgrade() else { return };
+                handle_control(control, &runtime, &mut subscriptions, &mut refresh);
+            }
+            () = wait_for_deadline(network_change_deadline), if network_change_deadline.is_some() => {
+                network_change_deadline = None;
+                let Some(runtime) = runtime.upgrade() else { return };
+                request_shared_refresh(&runtime, &subscriptions, &mut refresh);
+            }
         }
-        let Some(runtime) = runtime.upgrade() else {
-            return;
-        };
-        handle_control(control, &runtime, &mut subscriptions, &mut refresh);
+    }
+}
+
+async fn wait_for_deadline(deadline: Option<tokio::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        std::future::pending().await
     }
 }
 
@@ -733,7 +760,9 @@ fn handle_control(
         } => emit_external_to_subscribers(subscriptions, stream, &request_id, event, &data),
         Control::DropOwner(owner) => drop_subscriptions_for_owner(&owner, subscriptions),
         Control::HealthSignal(signal) => publish_health_signal(signal, runtime, subscriptions),
-        Control::NetworkChanged => request_shared_refresh(runtime, subscriptions, refresh),
+        Control::NetworkChanged => {
+            unreachable!("network changes are debounced by the control actor")
+        }
         Control::Refreshed(payloads) => {
             complete_shared_refresh(payloads, runtime, subscriptions, refresh)
         }
