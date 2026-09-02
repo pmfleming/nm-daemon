@@ -126,6 +126,7 @@ pub(crate) enum ErrorOperation {
     CreateDbusProxy,
     Status,
     Connectivity,
+    Discovery,
     Inventory,
     Statistics,
     HotspotOperation,

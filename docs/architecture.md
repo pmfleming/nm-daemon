@@ -6,6 +6,7 @@
 CLI actions ─────┐
                  ├─> Application services ─> NetworkManager D-Bus
 D-Bus handlers ──┘           │               Secret Service D-Bus
+                             │               systemd-resolved D-Bus
                              │               diagnostic nmcli adapter
                              │               kernel nl80211 telemetry
                              └──────────────> cache repositories
@@ -23,7 +24,8 @@ Tokio D-Bus/JSONL transports ─> shared runtime ─> bounded blocking lanes, ca
 - connect requests and typed state-machine/target events;
 - active-profile band discovery and transactional band selection;
 - disconnect;
-- saved-profile listing and profile mutations.
+- saved-profile listing and profile mutations;
+- on-demand local DNS-SD browsing and resolution through systemd-resolved.
 
 `src/forget.rs` owns the complete disconnect-and-forget vertical slice: in-flight connect cancellation, exact-SSID profile resolution, deactivation confirmation, profile mutation, cache refresh, result construction, and audit persistence.
 
@@ -98,6 +100,10 @@ Repository guarantees include:
 - serialized append/rotation for connection history.
 
 Runtime scan/status data lives under `$XDG_RUNTIME_DIR/nm-daemon` (with a per-user temporary fallback). Persistent connection history lives under `$XDG_STATE_HOME/nm-daemon`, or `~/.local/state/nm-daemon`. `connects.jsonl` rotates at 512 KiB and keeps three older generations.
+
+## Local discovery boundary
+
+`src/discovery.rs` validates local DNS-SD queries and calls `org.freedesktop.resolve1.Manager.ResolveRecord` for DNS-SD PTR enumeration, followed by `ResolveService` for each instance, over the existing system-bus connection. systemd-resolved remains the sole mDNS packet engine; `nm-daemon` only converts PTR, SRV, address, and TXT results into a frontend-safe typed snapshot. The domain is fixed to `local`, arbitrary TXT bytes are preserved as hexadecimal data, and no discovery result is treated as trusted input. Cast control remains outside this boundary.
 
 ## External command boundary
 

@@ -57,6 +57,16 @@ impl<'a> Application<'a> {
         operation_result(ErrorOperation::Connectivity, self.nm.connectivity_check())
     }
 
+    pub(crate) fn discover_services(
+        &self,
+        query: &crate::discovery::ServiceQuery,
+    ) -> Result<crate::discovery::DiscoverySnapshot> {
+        operation_result(
+            ErrorOperation::Discovery,
+            crate::discovery::resolve_services(self.nm.connection(), query),
+        )
+    }
+
     pub(crate) fn hotspot_capabilities(&self) -> Result<HotspotCapabilities> {
         operation_result(
             ErrorOperation::HotspotOperation,

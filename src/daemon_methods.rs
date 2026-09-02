@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::application::{Application, NetworksRequest, ProfileOperation, ProfileOperationResult};
 use crate::daemon_runtime::DaemonRuntime;
+use crate::discovery::{AddressFamily, ServiceQuery};
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     NmObjectPath, WifiConnectTarget, WifiProfileUpdate, connect_target_for_network_key,
@@ -51,6 +52,21 @@ pub(crate) fn call_set_airplane_mode(
 pub(crate) fn call_connectivity(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
     call_application(runtime, Method::NetworkConnectivity, |application| {
         application.connectivity()
+    })
+}
+
+pub(crate) fn call_discovery_services(
+    runtime: &Arc<DaemonRuntime>,
+    params: DiscoveryServicesParams,
+) -> Result<Value> {
+    let query = ServiceQuery::new(
+        params.service_type,
+        params.name,
+        params.interface_index,
+        params.family,
+    )?;
+    call_application(runtime, Method::DiscoveryServices, move |application| {
+        application.discover_services(&query)
     })
 }
 
@@ -272,6 +288,18 @@ fn serialize_profile_result(result: ProfileOperationResult) -> Result<Value> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetEnabledParams {
     enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DiscoveryServicesParams {
+    service_type: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    interface_index: Option<i32>,
+    #[serde(default)]
+    family: AddressFamily,
 }
 
 #[derive(Default, Deserialize)]

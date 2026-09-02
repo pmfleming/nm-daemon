@@ -28,6 +28,7 @@ mod daemon_status;
 mod daemon_vpn;
 mod deadline;
 mod diagnose;
+mod discovery;
 mod error;
 mod forget;
 mod generated {

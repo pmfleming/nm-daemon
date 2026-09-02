@@ -5,10 +5,11 @@ use serde_json::Value;
 
 use super::{EmptyParams, parse_params, parse_required_params, wrong_dispatch_group};
 use crate::daemon_methods::{
-    ActivateProfileParams, DeactivateParams, ProfileOperationParams, SetEnabledParams,
-    call_connectivity, call_disconnect, call_network_activate_profile, call_network_connections,
-    call_network_deactivate, call_network_devices, call_network_inventory, call_network_state,
-    call_networks, call_profile_operation, call_saved, call_set_airplane_mode, call_set_enabled,
+    ActivateProfileParams, DeactivateParams, DiscoveryServicesParams, ProfileOperationParams,
+    SetEnabledParams, call_connectivity, call_disconnect, call_discovery_services,
+    call_network_activate_profile, call_network_connections, call_network_deactivate,
+    call_network_devices, call_network_inventory, call_network_state, call_networks,
+    call_profile_operation, call_saved, call_set_airplane_mode, call_set_enabled,
     call_set_wwan_enabled, call_status,
 };
 use crate::daemon_runtime::DaemonRuntime;
@@ -54,6 +55,10 @@ pub(super) fn dispatch(
             dispatch_radio(method, params_json, runtime)
         }
         Method::WifiNetworks => call_networks(runtime, parse_params(params_json)?),
+        Method::DiscoveryServices => call_discovery_services(
+            runtime,
+            parse_required_params::<DiscoveryServicesParams>(params_json)?,
+        ),
         Method::WifiBandStatus => crate::daemon_band::status(
             runtime,
             parse_required_params::<crate::daemon_band::BandStatusParams>(params_json)?,

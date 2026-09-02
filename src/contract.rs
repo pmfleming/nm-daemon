@@ -49,6 +49,7 @@ fn method_contract_fixtures() -> Value {
         registry_fixtures(),
         wifi_method_fixtures(),
         network_method_fixtures(),
+        discovery_method_fixtures(),
         hotspot_method_fixtures(),
         vpn_method_fixtures(),
     ] {
@@ -160,6 +161,42 @@ fn wifi_method_fixtures() -> Value {
         "wifi-secret.stream": { "events": operation_stream_events(Stream::WifiSecret) },
         "continuous.streams": { "events": continuous_stream_events() },
         "network-health.stream": { "events": health_stream_events() },
+    })
+}
+
+fn discovery_method_fixtures() -> Value {
+    json!({
+        "discovery-services.cast": response_fixture(Method::DiscoveryServices, json!({
+            "source": "systemd-resolved",
+            "service_type": "_googlecast._tcp",
+            "domain": "local",
+            "instance": null,
+            "interface_index": 0,
+            "family": "any",
+            "response_flags": 16,
+            "services": [{
+                "instance": "Living Room",
+                "service_type": "_googlecast._tcp",
+                "domain": "local",
+                "hostname": "living-room.local",
+                "canonical_hostname": "living-room.local",
+                "port": 8009,
+                "priority": 0,
+                "weight": 0,
+                "addresses": [{
+                    "interface_index": 3,
+                    "family": "ipv4",
+                    "address": "192.0.2.10",
+                    "raw_hex": "c000020a",
+                }],
+                "txt": [{
+                    "key": "fn",
+                    "value": "Living Room",
+                    "raw_hex": "666e3d4c6976696e6720526f6f6d",
+                }],
+            }],
+            "warnings": [],
+        })),
     })
 }
 
@@ -1553,6 +1590,7 @@ mod tests {
             crate::protocol::Method::WifiProfileOperation,
             crate::protocol::Method::WifiSecretCapabilities,
             crate::protocol::Method::WifiSecretProvide,
+            crate::protocol::Method::DiscoveryServices,
         ]);
         let registered_methods = crate::protocol::METHOD_REGISTRY
             .iter()

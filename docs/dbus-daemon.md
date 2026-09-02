@@ -72,6 +72,7 @@ signal Event(s stream, s event_json)
 | `wifi.profile.operation` | `{"operation":"set-autoconnect","path":"/org/freedesktop/NetworkManager/Settings/1","enabled":true}` (`ProfileOperation`) | `result` | `—` | Mutates or builds a share payload for one saved Wi-Fi profile. |
 | `wifi.secret.capabilities` | `{}` (`SecretCapabilities`) | `secret_agent` | `wifi.secret` | Reports SecretAgent and keyring capabilities. |
 | `wifi.secret.provide` | `{"request_id":"...","values":{"psk":"..."},"save":false,"cancel":false}` (`SecretProvide`) | `result` | `wifi.secret` | Answers a pending SecretAgent request. |
+| `discovery.services` | `{"service_type":"_googlecast._tcp","name":null,"interface_index":null,"family":"any"}` (`DiscoveryServices`) | `discovery` | `—` | Browses or resolves one local DNS-SD service type through systemd-resolved. |
 
 ### Stream registry
 
@@ -115,6 +116,18 @@ assert(response.protocol == "nm-api" && response.version == 1)
 if (response.ok) render(response.data.networks)
 else showTypedError(response.error.code, response.error.message)
 ```
+
+## Local service discovery
+
+`discovery.services` delegates mDNS/DNS-SD resolution to the system `org.freedesktop.resolve1` service; `nm-daemon` does not bind UDP 5353 or run a second multicast engine. Omit `name` to browse instances of a service type, or provide an instance name to resolve it. The domain is intentionally fixed to `local`, `interface_index` defaults to all eligible links, and `family` accepts `any`, `ipv4`, or `ipv6`.
+
+For Google Cast discovery, call:
+
+```text
+Call("discovery.services", "{\"service_type\":\"_googlecast._tcp\",\"family\":\"any\"}")
+```
+
+The response preserves interface indices, SRV priority/weight/port, resolved addresses, and DNS-SD TXT bytes. UTF-8 TXT entries are also split into frontend-friendly `key` and `value` fields; `raw_hex` remains authoritative for arbitrary records. This method is an on-demand snapshot and does not implement the Google Cast control protocol.
 
 ## Scan scheduling
 

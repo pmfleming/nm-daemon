@@ -43,6 +43,7 @@ pub(crate) enum Method {
     WifiProfileOperation,
     WifiSecretCapabilities,
     WifiSecretProvide,
+    DiscoveryServices,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -66,6 +67,7 @@ pub(crate) enum ParameterKind {
     ProfileOperation,
     SecretCapabilities,
     SecretProvide,
+    DiscoveryServices,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -80,7 +82,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static METHOD_REGISTRY: &[MethodSpec; 32] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 33] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -400,6 +402,16 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 32] = &[
         stream: Some(Stream::WifiSecret),
         operation: ErrorOperation::SecretOperation,
         description: "Answers a pending SecretAgent request.",
+    },
+    MethodSpec {
+        method: Method::DiscoveryServices,
+        name: "discovery.services",
+        parameters: ParameterKind::DiscoveryServices,
+        params_example: r#"{"service_type":"_googlecast._tcp","name":null,"interface_index":null,"family":"any"}"#,
+        response_key: "discovery",
+        stream: None,
+        operation: ErrorOperation::Discovery,
+        description: "Browses or resolves one local DNS-SD service type through systemd-resolved.",
     },
 ];
 

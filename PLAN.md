@@ -238,6 +238,8 @@ Implemented in this repository:
 
 48. Added Wi-Fi QR intake: `wifi.qr.parse` and `wifi.qr.connect`. Escaped `WIFI:` fields, supported authentication, hidden state, and secret lengths are validated, enterprise payloads are rejected, and the payload is never logged, echoed in a response, or included in an error. Connecting reuses the existing `wifi.connect` operation, stream, cancellation, and typed failure reasons.
 
+49. Added bounded local DNS-SD discovery through `discovery.services`. systemd-resolved remains the sole mDNS engine; the daemon enumerates PTR records, resolves each instance's SRV/TXT/address data through resolve1, validates untrusted wire-format names, preserves arbitrary TXT bytes, and returns an on-demand frontend snapshot without implementing application protocols such as Google Cast.
+
 ## Remaining open items
 
 1. Optionally add desktop UI integration for Secret Service prompts. The daemon now dismisses create/delete/unlock prompts and reports `prompt_unsupported` instead of claiming success.
