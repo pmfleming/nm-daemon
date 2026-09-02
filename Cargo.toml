@@ -14,8 +14,8 @@ neli = "0.6.5"
 neli-wifi = "0.6.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-shelllist-daemon-core = { path = "vendor/shelllist-daemon-core" }
-shelllist-daemon-tokio = { path = "vendor/shelllist-daemon-tokio" }
+shelllist-daemon-core = { path = "../daemon-framework/crates/shelllist-daemon-core" }
+shelllist-daemon-tokio = { path = "../daemon-framework/crates/shelllist-daemon-tokio" }
 rustix = { version = "1", features = ["fs", "process"] }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
