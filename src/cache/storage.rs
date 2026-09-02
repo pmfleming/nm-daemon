@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
+use shelllist_daemon_core::{XdgRoot, resolve_xdg_root};
 
 use super::CacheRead;
 use crate::generated::{CACHE_MAX_BYTES, HISTORY_MAX_BYTES, HISTORY_ROTATIONS};
@@ -422,16 +423,7 @@ fn cache_dir() -> PathBuf {
 }
 
 fn state_dir() -> PathBuf {
-    if let Some(state_home) = std::env::var_os("XDG_STATE_HOME") {
-        return PathBuf::from(state_home).join(CACHE_DIR_NAME);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".local")
-            .join("state")
-            .join(CACHE_DIR_NAME);
-    }
-    cache_dir()
+    resolve_xdg_root(XdgRoot::State).map_or_else(cache_dir, |root| root.join(CACHE_DIR_NAME))
 }
 
 fn current_user_id() -> u32 {
