@@ -44,6 +44,7 @@ pub(crate) enum Method {
     WifiSecretCapabilities,
     WifiSecretProvide,
     DiscoveryServices,
+    OperationStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -68,6 +69,7 @@ pub(crate) enum ParameterKind {
     SecretCapabilities,
     SecretProvide,
     DiscoveryServices,
+    RequestStatus,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -82,7 +84,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static METHOD_REGISTRY: &[MethodSpec; 33] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 34] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -412,6 +414,16 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 33] = &[
         stream: None,
         operation: ErrorOperation::Discovery,
         description: "Browses or resolves one local DNS-SD service type through systemd-resolved.",
+    },
+    MethodSpec {
+        method: Method::OperationStatus,
+        name: "operation.status",
+        parameters: ParameterKind::RequestStatus,
+        params_example: r#"{"request_id":"connect-1"}"#,
+        response_key: "result",
+        stream: None,
+        operation: ErrorOperation::Status,
+        description: "Reports whether an owner-scoped operation is running and replays a cached Wi-Fi connect terminal event when available.",
     },
 ];
 

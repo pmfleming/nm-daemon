@@ -108,6 +108,7 @@
   },
   "connect_error": {
     "connectivity": null,
+    "fallback_used": false,
     "message": "password required for Example",
     "reason": "secret-required",
     "ssid": "Example",
@@ -194,6 +195,7 @@
             "primary_connection": null,
             "state": "full"
           },
+          "fallback_used": false,
           "message": "Connected to Example via D-Bus",
           "path": "dbus",
           "ssid": "Example",
@@ -232,6 +234,7 @@
         "request_id": "connect-contract",
         "result": {
           "connectivity": null,
+          "fallback_used": false,
           "message": "password required for Example",
           "reason": "secret-required",
           "ssid": "Example",
@@ -299,6 +302,7 @@
       "primary_connection": null,
       "state": "full"
     },
+    "fallback_used": false,
     "message": "Connected to Example via D-Bus",
     "path": "dbus",
     "ssid": "Example",

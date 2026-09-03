@@ -6,11 +6,11 @@ use serde_json::Value;
 use super::{EmptyParams, parse_params, parse_required_params, wrong_dispatch_group};
 use crate::daemon_methods::{
     ActivateProfileParams, DeactivateParams, DiscoveryServicesParams, ProfileOperationParams,
-    SetEnabledParams, call_connectivity, call_disconnect, call_discovery_services,
-    call_network_activate_profile, call_network_connections, call_network_deactivate,
-    call_network_devices, call_network_inventory, call_network_state, call_networks,
-    call_profile_operation, call_saved, call_set_airplane_mode, call_set_enabled,
-    call_set_wwan_enabled, call_status,
+    RequestStatusParams, SetEnabledParams, call_connectivity, call_disconnect,
+    call_discovery_services, call_network_activate_profile, call_network_connections,
+    call_network_deactivate, call_network_devices, call_network_inventory, call_network_state,
+    call_networks, call_profile_operation, call_request_status, call_saved, call_set_airplane_mode,
+    call_set_enabled, call_set_wwan_enabled, call_status,
 };
 use crate::daemon_runtime::DaemonRuntime;
 use crate::daemon_secret::{SecretCapabilitiesParams, SecretProvideParams};
@@ -75,6 +75,11 @@ pub(super) fn dispatch(
         Method::WifiSecretProvide => crate::daemon_secret::provide(
             owner,
             parse_required_params::<SecretProvideParams>(params_json)?,
+        ),
+        Method::OperationStatus => call_request_status(
+            runtime,
+            parse_required_params::<RequestStatusParams>(params_json)?,
+            owner,
         ),
         _ => Err(wrong_dispatch_group(method)),
     }

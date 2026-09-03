@@ -36,6 +36,7 @@ signal Event(s stream, s event_json)
 `Event` signals are directed to the D-Bus sender that started an operation or created a subscription. `event_json` also carries `protocol`, `version`, `stream`, `event`, and usually `request_id` for correlation. Request and subscription cancellation is owner-scoped; disconnecting a client cancels its work and removes its subscriptions.
 
 <!-- BEGIN GENERATED PROTOCOL REGISTRY -->
+
 ### Method registry
 
 | Method | Parameters | Response key | Stream | Description |
@@ -73,6 +74,7 @@ signal Event(s stream, s event_json)
 | `wifi.secret.capabilities` | `{}` (`SecretCapabilities`) | `secret_agent` | `wifi.secret` | Reports SecretAgent and keyring capabilities. |
 | `wifi.secret.provide` | `{"request_id":"...","values":{"psk":"..."},"save":false,"cancel":false}` (`SecretProvide`) | `result` | `wifi.secret` | Answers a pending SecretAgent request. |
 | `discovery.services` | `{"service_type":"_googlecast._tcp","name":null,"interface_index":null,"family":"any"}` (`DiscoveryServices`) | `discovery` | `—` | Browses or resolves one local DNS-SD service type through systemd-resolved. |
+| `operation.status` | `{"request_id":"connect-1"}` (`RequestStatus`) | `result` | `—` | Reports whether an owner-scoped operation is running and replays a cached Wi-Fi connect terminal event when available. |
 
 ### Stream registry
 
@@ -92,6 +94,7 @@ signal Event(s stream, s event_json)
 | `wifi.secret` | true | false | `External` | `subscribed, requested, cancelled, persistence` | SecretAgent prompt, cancellation, and keyring persistence events. |
 | `daemon.request` | false | false | `Internal` | `cancelled` | Internal request-cancellation acknowledgements. |
 | `daemon.subscription` | false | false | `Internal` | `cancelled` | Internal subscription-cancellation acknowledgements. |
+
 <!-- END GENERATED PROTOCOL REGISTRY -->
 
 Unknown method keys and unsupported subscription streams return an `ok: false` envelope with `error.code = "validation-error"`. Invalid JSON/params use the same typed error shape. `Subscribe([])` selects the streams marked as defaults above; explicit subscriptions are deduplicated and rejected as a whole if any name is unsupported.
@@ -160,6 +163,8 @@ Then listen for:
 ```text
 Event("wifi.scan", event_json)
 ```
+
+Operation signals are not durable. After receiving a start response, a frontend that may have missed the terminal signal can call `operation.status` with the same `request_id`. For the same D-Bus owner, the result is `running`, `finished` (with the original terminal event in `event`), or `unknown`. Finished Wi-Fi connect results are retained for five minutes in a bounded in-memory cache; results are not exposed to another D-Bus owner and do not survive a daemon restart.
 
 ### `wifi.scan`
 
@@ -329,6 +334,7 @@ Each event carries `health` with:
 - `state`/`state_name` and `previous_state`/`previous_state_name`, using that subject's own vocabulary. Device states are NetworkManager's device states, active-connection states its activation states, and VPN states the plugin's.
 - `reason` — `{ code, name, category }`. The numeric code is NetworkManager's, the name is stable, and the category is one of `none`, `user-requested`, `authentication`, `configuration`, `hardware`, `carrier`, `address-assignment`, `service`, `dependency`, `lifecycle`, or `unknown`.
 - `user_requested` and `unexpected`, so a frontend can tell a deliberate disconnect from a failure without interpreting reason codes.
+- `message` and `suggested_actions`, populated for unexpected transitions so a frontend can show a useful toast or dialog without translating NetworkManager reason codes. Actions include values such as `check-credentials`, `retry`, `try-alternate-band`, `restart-access-point`, and `refresh-networks`.
 - Identity: `device_path`, `device_iface`, `device_type`, `active_connection_path`, `profile_path`, `id`, `uuid`, and `connection_type`. Device events resolve the connection through the device's active connection, and connection events resolve the device through the active connection's device list, so both directions are populated where NetworkManager knows them.
 - `at_ms`.
 
@@ -366,7 +372,9 @@ Events:
 - `failed`
 - `cancelled`
 
-Every connect event carries a typed `phase` and `target`. Target identity includes the original opaque `network_key` when supplied, exact `ssid_bytes`/`ssid_hex`, display `ssid`, and available interface/device/AP/BSSID identifiers. Phases are `starting`, `checking-active`, `activating-saved-profile`, `creating-profile`, `rescanning`, `verifying`, `connected`, `failed`, or `cancelled`; clients should render from these fields rather than parsing `message`.
+Every connect event carries a typed `phase` and `target`. Target identity includes the original opaque `network_key` when supplied, exact `ssid_bytes`/`ssid_hex`, display `ssid`, and available interface/device/AP/BSSID identifiers. Phases are `starting`, `trying-access-point`, `checking-active`, `activating-saved-profile`, `creating-profile`, `rescanning`, `verifying`, `retrying-alternative`, `connected`, `failed`, or `cancelled`; clients should render from these fields rather than parsing `message`.
+
+Network-key requests may try the preferred AP and one roaming-compatible alternative for the same exact SSID, security class, and interface. The alternative prefers a different band, then signal strength. Retry is limited to transient DHCP, AP-disappearance, activation, and timeout failures; authentication, authorization, validation, and cancellation failures are terminal. Explicit legacy AP/BSSID requests stay pinned and do not gain alternatives. Retry progress includes `candidate` (`attempt`, `total`, `bssid`, `band`, `channel`, and `strength`) and `previous_reason`. Terminal results include per-attempt summaries and `fallback_used`; fallback success has a recovery-oriented message suitable for a toast.
 
 Cancellation is deep and best-effort for the connect task: the daemon sets its cancellation flag, wakes activation waits, and queues a target-guarded NetworkManager activation abort. Before deactivation it resolves the current active-connection object's profile and requires that profile's exact SSID bytes to match the cancelled request; it then deactivates the captured object path rather than re-querying whichever connection is active later. If the attempt has already failed and NetworkManager restored another profile, cancellation is a no-op. Already-sent synchronous D-Bus method calls cannot be interrupted mid-call, but transitions check cancellation before and after those calls. Cancellation is coordinated by the shared runtime; it does not add a watcher thread per connection.
 

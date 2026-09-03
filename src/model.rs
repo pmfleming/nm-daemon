@@ -78,14 +78,46 @@ pub(crate) enum ConnectEnginePath {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ConnectPhase {
     Starting,
+    TryingAccessPoint,
     CheckingActive,
     ActivatingSavedProfile,
     CreatingProfile,
     Rescanning,
     Verifying,
+    RetryingAlternative,
     Connected,
     Failed,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ConnectCandidateInfo {
+    pub(crate) attempt: usize,
+    pub(crate) total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bssid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) band: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) channel: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) strength: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ConnectAttemptSummary {
+    pub(crate) attempt: usize,
+    pub(crate) status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<ConnectFailureReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bssid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) band: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) channel: Option<u32>,
+    pub(crate) duration_ms: u128,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,6 +206,10 @@ pub(crate) struct ConnectResult {
     pub(crate) message: String,
     pub(crate) connectivity: Option<ConnectivityStatus>,
     pub(crate) suggest_open_portal: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) attempts: Vec<ConnectAttemptSummary>,
+    #[serde(default)]
+    pub(crate) fallback_used: bool,
 }
 
 impl ConnectResult {
@@ -194,6 +230,8 @@ impl ConnectResult {
             message: message.into(),
             connectivity,
             suggest_open_portal,
+            attempts: Vec::new(),
+            fallback_used: false,
         }
     }
 
@@ -210,6 +248,8 @@ impl ConnectResult {
             message: message.into(),
             connectivity: None,
             suggest_open_portal: false,
+            attempts: Vec::new(),
+            fallback_used: false,
         }
     }
 }
@@ -1594,7 +1634,14 @@ pub(crate) fn connect_target_for_network(
     network: &NetworkEntry,
     enterprise_identity: Option<String>,
 ) -> Result<WifiConnectTarget> {
-    let access_point = &network.access_point;
+    connect_target_for_network_access_point(network, &network.access_point, enterprise_identity)
+}
+
+pub(crate) fn connect_target_for_network_access_point(
+    network: &NetworkEntry,
+    access_point: &AccessPoint,
+    enterprise_identity: Option<String>,
+) -> Result<WifiConnectTarget> {
     let mut target =
         connect_target_for_ssid(Ssid::from_bytes(access_point.ssid_bytes().into_owned())?);
     target.ap_path = (!access_point.path.is_empty())

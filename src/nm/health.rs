@@ -10,6 +10,7 @@ use zvariant::OwnedObjectPath;
 
 use super::inventory::{active_connection_state_name, device_state_name};
 use super::{ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, HealthSignal, HealthSubject, Nm};
+use crate::model::reason::ReasonCategory;
 use crate::model::{
     TypedReason, active_connection_state_reason, device_state_reason, vpn_state_name,
     vpn_state_reason,
@@ -29,6 +30,10 @@ pub(crate) struct NetworkHealthEvent {
     pub(crate) user_requested: bool,
     /// True when the transition was neither requested nor an ordinary step.
     pub(crate) unexpected: bool,
+    /// Ready-to-render summary for unexpected transitions. Frontends should
+    /// prefer this over translating NetworkManager's numeric state themselves.
+    pub(crate) message: Option<String>,
+    pub(crate) suggested_actions: Vec<&'static str>,
     pub(crate) device_path: Option<String>,
     pub(crate) device_iface: Option<String>,
     pub(crate) device_type: Option<u32>,
@@ -53,6 +58,8 @@ impl Nm {
             user_requested: reason.expected() && reason.name == "user-requested"
                 || reason.name == "user-disconnected",
             unexpected: !reason.expected(),
+            message: None,
+            suggested_actions: Vec::new(),
             device_path: None,
             device_iface: None,
             device_type: None,
@@ -68,6 +75,10 @@ impl Nm {
             HealthSubject::ActiveConnection | HealthSubject::Vpn => {
                 self.describe_active_connection(&signal.path, &mut event)
             }
+        }
+        if event.unexpected {
+            event.message = Some(health_message(&event));
+            event.suggested_actions = suggested_actions(event.reason.category);
         }
         Ok(event)
     }
@@ -136,6 +147,47 @@ impl Nm {
             event.uuid = connection.get("uuid").and_then(value_string);
             event.connection_type = connection.get("type").and_then(value_string);
         }
+    }
+}
+
+fn health_message(event: &NetworkHealthEvent) -> String {
+    let subject = event
+        .id
+        .as_deref()
+        .or(event.device_iface.as_deref())
+        .unwrap_or("Network connection");
+    match event.reason.category {
+        ReasonCategory::AddressAssignment => {
+            format!("{subject} connected to Wi-Fi, but IP address assignment failed")
+        }
+        ReasonCategory::Authentication => {
+            format!("{subject} could not authenticate with the Wi-Fi access point")
+        }
+        ReasonCategory::Carrier => format!("{subject} lost its wireless link"),
+        ReasonCategory::Hardware => format!("{subject} failed because the radio is unavailable"),
+        ReasonCategory::Configuration if event.reason.name == "ssid-not-found" => {
+            format!("{subject} could not find or reach the selected Wi-Fi access point")
+        }
+        ReasonCategory::Configuration => {
+            format!("{subject} failed because its network configuration is incompatible")
+        }
+        _ => format!(
+            "{subject} changed to {} because of {}",
+            event.state_name, event.reason.name
+        ),
+    }
+}
+
+fn suggested_actions(category: ReasonCategory) -> Vec<&'static str> {
+    match category {
+        ReasonCategory::AddressAssignment => {
+            vec!["retry", "try-alternate-band", "restart-access-point"]
+        }
+        ReasonCategory::Authentication => vec!["check-credentials", "retry"],
+        ReasonCategory::Carrier => vec!["retry", "move-closer", "try-alternate-band"],
+        ReasonCategory::Hardware => vec!["enable-wifi", "check-firmware"],
+        ReasonCategory::Configuration => vec!["refresh-networks", "retry"],
+        _ => vec!["retry"],
     }
 }
 

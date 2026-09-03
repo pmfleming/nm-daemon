@@ -1,5 +1,5 @@
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cache;
 use crate::connect;
@@ -9,16 +9,17 @@ use crate::error::{
 };
 use crate::generated::REQUEST_TIMEOUT_MAX;
 use crate::model::{
-    AccessPoint, ConnectPhase, ConnectResult, ConnectTargetIdentity, ConnectivityStatus,
-    DisconnectResult, HotspotCapabilities, HotspotStartResult, HotspotStatus, HotspotStopResult,
-    InterfaceName, NetworkConnectionSummary, NetworkDeactivateResult, NetworkDeviceSummary,
-    NetworkEntry, NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource,
-    NetworkStateSummary, NmObjectPath, ProfileActivationResult, RadioPowerResult,
-    SavedWifiConnection, ScanRequestOptions, VpnActivationResult, VpnDisconnectResult,
-    VpnProfileSummary, VpnStatus, WepKeyType, WifiBand, WifiBandSelectionResult, WifiBandStatus,
-    WifiConnectTarget, WifiPowerResult, WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate,
-    WifiSharePayload, WifiStatus, connect_target_for_network, connect_target_for_network_key,
-    validate_ssid_bytes,
+    AccessPoint, ConnectAttemptSummary, ConnectCandidateInfo, ConnectFailureReason, ConnectPhase,
+    ConnectResult, ConnectTargetIdentity, ConnectivityStatus, DisconnectResult,
+    HotspotCapabilities, HotspotStartResult, HotspotStatus, HotspotStopResult, InterfaceName,
+    NetworkConnectionSummary, NetworkDeactivateResult, NetworkDeviceSummary, NetworkEntry,
+    NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource, NetworkStateSummary,
+    NmObjectPath, ProfileActivationResult, RadioPowerResult, SavedWifiConnection,
+    ScanRequestOptions, VpnActivationResult, VpnDisconnectResult, VpnProfileSummary, VpnStatus,
+    WepKeyType, WifiBand, WifiBandSelectionResult, WifiBandStatus, WifiConnectTarget,
+    WifiPowerResult, WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload,
+    WifiStatus, connect_target_for_network, connect_target_for_network_access_point,
+    connect_target_for_network_key, validate_ssid_bytes,
 };
 use crate::nm::{ActiveConnectionSelector, HotspotRequest, Nm, ProfileSelector, VpnSelector};
 use anyhow::Result;
@@ -328,12 +329,18 @@ impl<'a> Application<'a> {
                 let networks = self
                     .nm
                     .network_entries_for_access_points(self.nm.list_all_access_points()?)?;
-                let target = resolve_connect_target(&networks, key, enterprise_identity)?;
+                let (target, candidate, mut alternatives) =
+                    resolve_connect_candidates(&networks, key, enterprise_identity)?;
+                if let Some(network) = networks.iter().find(|network| network.key == key) {
+                    constrain_alternatives_to_saved_profile(self.nm, network, &mut alternatives);
+                }
                 let request = ConnectRequest {
                     target,
                     network_key: Some(key.to_string()),
                     password,
                     wep_key_type,
+                    candidate,
+                    alternatives,
                 };
                 request.validate()?;
                 Ok(request)
@@ -364,40 +371,116 @@ impl<'a> Application<'a> {
         }
         let target_identity =
             ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref());
-        let mut progress = |phase| {
+        // A network-key request represents a roaming-compatible AP group. Try
+        // at most one alternate candidate; explicit legacy BSSID/AP requests
+        // remain strict and therefore contain no alternatives.
+        let candidates = request.candidates().into_iter().take(2).collect::<Vec<_>>();
+        let total = candidates.len();
+        let mut attempts = Vec::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let attempt = index + 1;
+            let candidate_info = candidate.info(attempt, total);
             emit(&ConnectEvent::Progress {
-                phase,
+                phase: ConnectPhase::TryingAccessPoint,
                 target: target_identity.clone(),
-                message: connect_phase_message(phase).to_string(),
-            })
-        };
-        let result = connect::connect_target_with_password(
-            self.nm,
-            &request.target,
-            request.password.as_deref(),
-            request.wep_key_type,
-            cancellation,
-            &mut progress,
-        );
+                message: candidate_message("trying", &candidate_info),
+                candidate: Some(candidate_info.clone()),
+                previous_reason: None,
+            })?;
+            let mut progress = |phase| {
+                emit(&ConnectEvent::Progress {
+                    phase,
+                    target: target_identity.clone(),
+                    message: connect_phase_message(phase).to_string(),
+                    candidate: Some(candidate_info.clone()),
+                    previous_reason: None,
+                })
+            };
+            let started_at = Instant::now();
+            let result = if total > 1 {
+                connect::connect_target_candidate(
+                    self.nm,
+                    &candidate.target,
+                    request.password.as_deref(),
+                    request.wep_key_type,
+                    cancellation,
+                    &mut progress,
+                )
+            } else {
+                connect::connect_target_with_password(
+                    self.nm,
+                    &candidate.target,
+                    request.password.as_deref(),
+                    request.wep_key_type,
+                    cancellation,
+                    &mut progress,
+                )
+            };
 
-        if let Some(outcome) = finish_connect_cancellation(request, cancellation, &mut emit)? {
-            return Ok(outcome);
+            if let Some(outcome) = finish_connect_cancellation(request, cancellation, &mut emit)? {
+                return Ok(outcome);
+            }
+            match result {
+                Ok(mut result) => {
+                    let actual = active_candidate_info(self.nm, attempt, total)
+                        .unwrap_or_else(|| candidate_info.clone());
+                    attempts.push(connect_attempt_summary(
+                        &actual,
+                        "connected",
+                        None,
+                        started_at,
+                        result.message.clone(),
+                    ));
+                    result.fallback_used = attempt > 1;
+                    result.attempts = attempts;
+                    if result.fallback_used {
+                        result.message = recovery_message(&result.ssid, &result.attempts);
+                        best_effort("failed to cache recovered Wi-Fi status", || {
+                            cache::write_status("connected", &result.message)
+                        });
+                    }
+                    let outcome = ConnectOutcome::Succeeded(result);
+                    emit_finished_connect(request, &outcome, &mut emit)?;
+                    return Ok(outcome);
+                }
+                Err(error) => {
+                    let report = ErrorReport::from_error(&error, ErrorOperation::Connect);
+                    let reason = report
+                        .code
+                        .connect_reason()
+                        .unwrap_or(ConnectFailureReason::Unknown);
+                    attempts.push(connect_attempt_summary(
+                        &candidate_info,
+                        "failed",
+                        Some(reason),
+                        started_at,
+                        report.message.clone(),
+                    ));
+                    if index + 1 < total && retryable_candidate_failure(reason) {
+                        let next = candidates[index + 1].info(attempt + 1, total);
+                        emit(&ConnectEvent::Progress {
+                            phase: ConnectPhase::RetryingAlternative,
+                            target: target_identity.clone(),
+                            message: retry_message(&candidate_info, &next, reason),
+                            candidate: Some(next),
+                            previous_reason: Some(reason),
+                        })?;
+                        continue;
+                    }
+                    if total > 1 {
+                        connect::publish_final_connect_failure(&request.target, &error);
+                    }
+                    let mut outcome = failed_connect_outcome(&request.target, &error);
+                    if let ConnectOutcome::Failed { result, .. } = &mut outcome {
+                        result.fallback_used = attempts.len() > 1;
+                        result.attempts = attempts;
+                    }
+                    emit_finished_connect(request, &outcome, &mut emit)?;
+                    return Ok(outcome);
+                }
+            }
         }
-        let outcome = connect_outcome(&request.target, result);
-        let phase = match &outcome {
-            ConnectOutcome::Succeeded(_) => ConnectPhase::Connected,
-            ConnectOutcome::Failed { .. } => ConnectPhase::Failed,
-            ConnectOutcome::Cancelled { .. } => ConnectPhase::Cancelled,
-        };
-        emit(&ConnectEvent::Finished {
-            phase,
-            target: ConnectTargetIdentity::from_target(
-                &request.target,
-                request.network_key.as_deref(),
-            ),
-            outcome: outcome.clone(),
-        })?;
-        Ok(outcome)
+        unreachable!("connect request always has a primary candidate")
     }
 
     pub(crate) fn saved_profiles(&self) -> Result<Vec<SavedWifiConnection>> {
@@ -726,14 +809,85 @@ pub(crate) struct ScanResult {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct ConnectCandidate {
+    pub(crate) target: WifiConnectTarget,
+    pub(crate) band: Option<String>,
+    pub(crate) channel: Option<u32>,
+    pub(crate) strength: Option<u8>,
+}
+
+impl ConnectCandidate {
+    fn from_access_point(target: WifiConnectTarget, access_point: &AccessPoint) -> Self {
+        Self {
+            target,
+            band: (!access_point.band.is_empty()).then(|| access_point.band.clone()),
+            channel: (access_point.channel != 0).then_some(access_point.channel),
+            strength: Some(access_point.strength),
+        }
+    }
+
+    fn from_target(target: WifiConnectTarget) -> Self {
+        Self {
+            target,
+            band: None,
+            channel: None,
+            strength: None,
+        }
+    }
+
+    fn info(&self, attempt: usize, total: usize) -> ConnectCandidateInfo {
+        ConnectCandidateInfo {
+            attempt,
+            total,
+            bssid: self
+                .target
+                .bssid
+                .as_ref()
+                .map(|value| value.as_str().to_string()),
+            band: self.band.clone(),
+            channel: self.channel,
+            strength: self.strength,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ConnectRequest {
     pub(crate) target: WifiConnectTarget,
     pub(crate) network_key: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) wep_key_type: Option<WepKeyType>,
+    pub(crate) candidate: Option<ConnectCandidate>,
+    pub(crate) alternatives: Vec<ConnectCandidate>,
 }
 
 impl ConnectRequest {
+    pub(crate) fn single(
+        target: WifiConnectTarget,
+        password: Option<String>,
+        wep_key_type: Option<WepKeyType>,
+    ) -> Self {
+        Self {
+            target,
+            network_key: None,
+            password,
+            wep_key_type,
+            candidate: None,
+            alternatives: Vec::new(),
+        }
+    }
+
+    fn candidates(&self) -> Vec<ConnectCandidate> {
+        let mut candidates = Vec::with_capacity(1 + self.alternatives.len());
+        candidates.push(
+            self.candidate
+                .clone()
+                .unwrap_or_else(|| ConnectCandidate::from_target(self.target.clone())),
+        );
+        candidates.extend(self.alternatives.clone());
+        candidates
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         self.target.validate().map_err(|error| {
             DomainError::validation(ErrorOperation::Connect, &error)
@@ -754,6 +908,8 @@ pub(crate) enum ConnectEvent {
         phase: ConnectPhase,
         target: ConnectTargetIdentity,
         message: String,
+        candidate: Option<ConnectCandidateInfo>,
+        previous_reason: Option<ConnectFailureReason>,
     },
     Finished {
         phase: ConnectPhase,
@@ -914,15 +1070,121 @@ fn start_connect(
 fn connect_phase_message(phase: ConnectPhase) -> &'static str {
     match phase {
         ConnectPhase::Starting => "starting Wi-Fi connection",
+        ConnectPhase::TryingAccessPoint => "trying Wi-Fi access point",
         ConnectPhase::CheckingActive => "checking current Wi-Fi connection",
         ConnectPhase::ActivatingSavedProfile => "activating saved NetworkManager profile",
         ConnectPhase::CreatingProfile => "creating NetworkManager Wi-Fi profile",
         ConnectPhase::Rescanning => "rescanning for selected Wi-Fi network",
         ConnectPhase::Verifying => "verifying Wi-Fi activation",
+        ConnectPhase::RetryingAlternative => "retrying an alternate Wi-Fi access point",
         ConnectPhase::Connected => "Wi-Fi connection succeeded",
         ConnectPhase::Failed => "Wi-Fi connection failed",
         ConnectPhase::Cancelled => "Wi-Fi connection cancelled",
     }
+}
+
+fn candidate_message(action: &str, candidate: &ConnectCandidateInfo) -> String {
+    match (&candidate.band, candidate.channel) {
+        (Some(band), Some(channel)) => format!(
+            "{action} {band} access point on channel {channel} (attempt {}/{})",
+            candidate.attempt, candidate.total
+        ),
+        (Some(band), None) => format!(
+            "{action} {band} access point (attempt {}/{})",
+            candidate.attempt, candidate.total
+        ),
+        _ => format!(
+            "{action} Wi-Fi access point (attempt {}/{})",
+            candidate.attempt, candidate.total
+        ),
+    }
+}
+
+fn retry_message(
+    previous: &ConnectCandidateInfo,
+    next: &ConnectCandidateInfo,
+    reason: ConnectFailureReason,
+) -> String {
+    let previous_band = previous.band.as_deref().unwrap_or("selected");
+    let next_band = next.band.as_deref().unwrap_or("alternate");
+    let failure = match reason {
+        ConnectFailureReason::DhcpFailed => "connected but did not receive an IP address",
+        ConnectFailureReason::NotFound => "became unavailable",
+        ConnectFailureReason::Timeout => "timed out",
+        _ => "failed",
+    };
+    format!("{previous_band} access point {failure}; trying {next_band}")
+}
+
+fn retryable_candidate_failure(reason: ConnectFailureReason) -> bool {
+    matches!(
+        reason,
+        ConnectFailureReason::DhcpFailed
+            | ConnectFailureReason::NotFound
+            | ConnectFailureReason::Timeout
+            | ConnectFailureReason::ActivationFailed
+    )
+}
+
+fn connect_attempt_summary(
+    candidate: &ConnectCandidateInfo,
+    status: &'static str,
+    reason: Option<ConnectFailureReason>,
+    started_at: Instant,
+    message: String,
+) -> ConnectAttemptSummary {
+    ConnectAttemptSummary {
+        attempt: candidate.attempt,
+        status,
+        reason,
+        bssid: candidate.bssid.clone(),
+        band: candidate.band.clone(),
+        channel: candidate.channel,
+        duration_ms: started_at.elapsed().as_millis(),
+        message,
+    }
+}
+
+fn active_candidate_info(nm: &Nm, attempt: usize, total: usize) -> Option<ConnectCandidateInfo> {
+    let access_point = nm.wifi_status().ok()?.access_point?;
+    Some(ConnectCandidateInfo {
+        attempt,
+        total,
+        bssid: (!access_point.bssid.is_empty()).then_some(access_point.bssid),
+        band: (!access_point.band.is_empty()).then_some(access_point.band),
+        channel: (access_point.channel != 0).then_some(access_point.channel),
+        strength: Some(access_point.strength),
+    })
+}
+
+fn recovery_message(ssid: &str, attempts: &[ConnectAttemptSummary]) -> String {
+    let failed_band = attempts
+        .iter()
+        .find(|attempt| attempt.status == "failed")
+        .and_then(|attempt| attempt.band.as_deref())
+        .unwrap_or("first access point");
+    let connected_band = attempts
+        .last()
+        .and_then(|attempt| attempt.band.as_deref())
+        .unwrap_or("alternate access point");
+    format!("Connected to {ssid} on {connected_band} after {failed_band} failed")
+}
+
+fn emit_finished_connect(
+    request: &ConnectRequest,
+    outcome: &ConnectOutcome,
+    emit: &mut impl FnMut(&ConnectEvent) -> Result<()>,
+) -> Result<()> {
+    let phase = match outcome {
+        ConnectOutcome::Succeeded(_) => ConnectPhase::Connected,
+        ConnectOutcome::Failed { .. } => ConnectPhase::Failed,
+        ConnectOutcome::Cancelled { .. } => ConnectPhase::Cancelled,
+    };
+    emit(&ConnectEvent::Finished {
+        phase,
+        target: ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref()),
+        outcome: outcome.clone(),
+    })
 }
 
 fn finish_connect_cancellation(
@@ -934,13 +1196,6 @@ fn finish_connect_cancellation(
         return cancelled_connect(request, emit, "connection attempt was cancelled").map(Some);
     }
     Ok(None)
-}
-
-fn connect_outcome(target: &WifiConnectTarget, result: Result<ConnectResult>) -> ConnectOutcome {
-    match result {
-        Ok(result) => ConnectOutcome::Succeeded(result),
-        Err(err) => failed_connect_outcome(target, &err),
-    }
 }
 
 fn failed_connect_outcome(target: &WifiConnectTarget, err: &anyhow::Error) -> ConnectOutcome {
@@ -962,24 +1217,122 @@ fn profile_updated(message: &'static str) -> ProfileOperationResult {
     ProfileOperationResult::Updated { message }
 }
 
-fn resolve_connect_target(
+fn resolve_connect_candidates(
     networks: &[NetworkEntry],
     key: &str,
     enterprise_identity: Option<String>,
-) -> Result<WifiConnectTarget> {
-    match networks.iter().find(|network| network.key == key) {
-        Some(network) => connect_target_for_network(network, enterprise_identity),
-        None if !key.contains('|') => {
-            // Protocol-v1 SSID-only keys retain their best-visible-AP fallback.
-            connect_target_for_network_key(key, enterprise_identity)
+) -> Result<(
+    WifiConnectTarget,
+    Option<ConnectCandidate>,
+    Vec<ConnectCandidate>,
+)> {
+    let Some(network) = networks.iter().find(|network| network.key == key) else {
+        if !key.contains('|') {
+            // Protocol-v1 SSID-only keys retain their generic fallback. It has
+            // no trustworthy AP group from which to build alternate candidates.
+            return Ok((
+                connect_target_for_network_key(key, enterprise_identity)?,
+                None,
+                Vec::new(),
+            ));
         }
-        None => Err(DomainError::validation(
+        return Err(DomainError::validation(
             ErrorOperation::Connect,
             "selected Wi-Fi network is no longer available; refresh the network list",
         )
         .with_detail("network_key", key)
-        .into()),
+        .into());
+    };
+
+    let target = connect_target_for_network(network, enterprise_identity.clone())?;
+    let candidate = Some(ConnectCandidate::from_access_point(
+        target.clone(),
+        &network.access_point,
+    ));
+    let primary_band = network.access_point.band.as_str();
+    let mut access_points = network
+        .access_points
+        .iter()
+        .filter(|access_point| {
+            access_point.path != network.access_point.path
+                || !access_point
+                    .bssid
+                    .eq_ignore_ascii_case(&network.access_point.bssid)
+        })
+        .collect::<Vec<_>>();
+    // After one AP fails, prefer a different radio band before another BSSID
+    // on the same band. Signal strength breaks ties within each class.
+    access_points.sort_by(|left, right| {
+        (left.band == primary_band)
+            .cmp(&(right.band == primary_band))
+            .then_with(|| right.strength.cmp(&left.strength))
+            .then_with(|| left.bssid.cmp(&right.bssid))
+    });
+    let alternatives = access_points
+        .into_iter()
+        .map(|access_point| {
+            let target = connect_target_for_network_access_point(
+                network,
+                access_point,
+                enterprise_identity.clone(),
+            )?;
+            Ok(ConnectCandidate::from_access_point(target, access_point))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((target, candidate, alternatives))
+}
+
+fn constrain_alternatives_to_saved_profile(
+    nm: &Nm,
+    network: &NetworkEntry,
+    alternatives: &mut Vec<ConnectCandidate>,
+) {
+    let Some(profile) = network.primary_profile.as_ref() else {
+        return;
+    };
+    let details = match nm.wifi_profile_details_by_path(&profile.path) {
+        Ok(details) => details,
+        Err(error) => {
+            tracing::warn!(
+                profile_path = %profile.path,
+                error = %crate::error::err_chain(&error),
+                "could not inspect saved Wi-Fi profile restrictions; disabling AP fallback"
+            );
+            alternatives.clear();
+            return;
+        }
+    };
+    alternatives.retain(|candidate| candidate_matches_profile_restrictions(candidate, &details));
+}
+
+fn candidate_matches_profile_restrictions(
+    candidate: &ConnectCandidate,
+    profile: &WifiProfileDetails,
+) -> bool {
+    if let Some(bssid) = profile.bssid.as_deref()
+        && !candidate
+            .target
+            .bssid
+            .as_ref()
+            .is_some_and(|candidate| candidate.as_str().eq_ignore_ascii_case(bssid))
+    {
+        return false;
     }
+    if profile.band != WifiBand::Auto
+        && candidate
+            .band
+            .as_deref()
+            .and_then(WifiBand::from_frequency_label)
+            != Some(profile.band)
+    {
+        return false;
+    }
+    if let Some(channel) = profile.channel
+        && candidate.channel != Some(channel)
+    {
+        return false;
+    }
+    true
 }
 
 fn scan_cancelled_error() -> anyhow::Error {
@@ -1006,7 +1359,76 @@ fn cancelled_connect(
 mod tests {
     use std::time::Duration;
 
-    use super::ScanRequest;
+    use super::{ScanRequest, recovery_message, retry_message, retryable_candidate_failure};
+    use crate::model::{ConnectAttemptSummary, ConnectCandidateInfo, ConnectFailureReason};
+
+    #[test]
+    fn dhcp_failure_can_fall_back_from_5_ghz_to_2_4_ghz() {
+        let primary = ConnectCandidateInfo {
+            attempt: 1,
+            total: 2,
+            bssid: Some("BA:9C:0F:DC:49:EE".to_string()),
+            band: Some("5 GHz".to_string()),
+            channel: Some(161),
+            strength: Some(80),
+        };
+        let fallback = ConnectCandidateInfo {
+            attempt: 2,
+            total: 2,
+            bssid: Some("BA:63:F0:DC:49:EE".to_string()),
+            band: Some("2.4 GHz".to_string()),
+            channel: Some(11),
+            strength: Some(70),
+        };
+
+        assert!(retryable_candidate_failure(
+            ConnectFailureReason::DhcpFailed
+        ));
+        assert_eq!(
+            retry_message(&primary, &fallback, ConnectFailureReason::DhcpFailed),
+            "5 GHz access point connected but did not receive an IP address; trying 2.4 GHz"
+        );
+        let attempts = vec![
+            ConnectAttemptSummary {
+                attempt: 1,
+                status: "failed",
+                reason: Some(ConnectFailureReason::DhcpFailed),
+                bssid: primary.bssid,
+                band: primary.band,
+                channel: primary.channel,
+                duration_ms: 90_000,
+                message: "IP configuration failed".to_string(),
+            },
+            ConnectAttemptSummary {
+                attempt: 2,
+                status: "connected",
+                reason: None,
+                bssid: fallback.bssid,
+                band: fallback.band,
+                channel: fallback.channel,
+                duration_ms: 3_000,
+                message: "connected".to_string(),
+            },
+        ];
+        assert_eq!(
+            recovery_message("PixelSpot", &attempts),
+            "Connected to PixelSpot on 2.4 GHz after 5 GHz failed"
+        );
+    }
+
+    #[test]
+    fn credential_authorization_validation_and_cancellation_failures_are_terminal() {
+        for reason in [
+            ConnectFailureReason::SecretRequired,
+            ConnectFailureReason::WrongPassword,
+            ConnectFailureReason::PasswordUnavailable,
+            ConnectFailureReason::AuthorizationRequired,
+            ConnectFailureReason::UnsupportedAuth,
+            ConnectFailureReason::ValidationError,
+        ] {
+            assert!(!retryable_candidate_failure(reason), "{reason:?}");
+        }
+    }
 
     #[test]
     fn scan_ssids_are_validated_once_at_the_application_boundary() {

@@ -20,6 +20,31 @@ pub(crate) fn call_status(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
     runtime.call_status()
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RequestStatusParams {
+    request_id: String,
+}
+
+pub(crate) fn call_request_status(
+    runtime: &Arc<DaemonRuntime>,
+    params: RequestStatusParams,
+    owner: Option<&str>,
+) -> Result<Value> {
+    if params.request_id.trim().is_empty() {
+        return Err(DomainError::validation(
+            ErrorOperation::Status,
+            "request_id must not be empty",
+        )
+        .into());
+    }
+    api_data_value(
+        Method::OperationStatus.spec().response_key,
+        &runtime.request_status(&params.request_id, owner),
+        "serialize daemon request status JSON",
+    )
+}
+
 pub(crate) fn call_set_enabled(
     runtime: &Arc<DaemonRuntime>,
     params: SetEnabledParams,

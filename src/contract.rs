@@ -66,6 +66,19 @@ fn registry_fixtures() -> Value {
             "metadata": crate::protocol::contract_registry(),
             "markdown": crate::protocol::markdown_reference(),
         },
+        "operation.status": response_fixture(Method::OperationStatus, json!({
+            "request_id": "connect-contract",
+            "status": "finished",
+            "stream": Stream::WifiConnect,
+            "event": {
+                "protocol": crate::output::API_PROTOCOL,
+                "version": crate::output::API_VERSION,
+                "stream": Stream::WifiConnect,
+                "request_id": "connect-contract",
+                "event": "succeeded",
+                "result": { "status": "connected" },
+            },
+        })),
     })
 }
 
@@ -1162,6 +1175,14 @@ fn contract_health_event(
         reason,
         user_requested: reason.name == "user-requested" || reason.name == "user-disconnected",
         unexpected: !matches!(reason.name, "none" | "user-requested" | "user-disconnected"),
+        message: (!matches!(reason.name, "none" | "user-requested" | "user-disconnected"))
+            .then(|| format!("Example changed to {state_name} because of {}", reason.name)),
+        suggested_actions: (!matches!(
+            reason.name,
+            "none" | "user-requested" | "user-disconnected"
+        ))
+        .then_some(vec!["retry"])
+        .unwrap_or_default(),
         device_path: Some("/org/freedesktop/NetworkManager/Devices/1".to_string()),
         device_iface: Some("wlan0".to_string()),
         device_type: Some(2),
@@ -1597,6 +1618,7 @@ mod tests {
             crate::protocol::Method::WifiSecretCapabilities,
             crate::protocol::Method::WifiSecretProvide,
             crate::protocol::Method::DiscoveryServices,
+            crate::protocol::Method::OperationStatus,
         ]);
         let registered_methods = crate::protocol::METHOD_REGISTRY
             .iter()

@@ -121,7 +121,7 @@ impl<'a> ConnectionMachine<'a> {
         }
     }
 
-    fn run(mut self) -> Result<ConnectResult> {
+    fn run(mut self, finalize_failure: bool) -> Result<ConnectResult> {
         check_cancelled(self.cancellation)?;
         self.target.validate().map_err(|err| {
             connect_failure_from_error(ConnectFailureReason::ValidationError, err)
@@ -136,7 +136,11 @@ impl<'a> ConnectionMachine<'a> {
             Ok(outcome) => self.finish_success(outcome, started_at),
             Err(err) => {
                 self.cleanup_created_connection();
-                self.finish_failure(err, started_at)
+                if finalize_failure {
+                    self.finish_failure(err, started_at)
+                } else {
+                    self.finish_candidate_failure(err, started_at)
+                }
             }
         }
     }
@@ -415,18 +419,20 @@ impl<'a> ConnectionMachine<'a> {
 
     fn finish_failure(self, error: anyhow::Error, started_at: Instant) -> Result<ConnectResult> {
         let error = ensure_domain(ErrorOperation::Connect, error);
-        tracing::error!(ssid = %self.target.ssid, error = %crate::error::err_chain(&error), "Wi-Fi connection failed");
-        best_effort("failed to write Wi-Fi cache status", || {
-            cache::write_status(
-                "error",
-                format!("Connection failed for {}: {error:#}", self.target.ssid),
-            )
-        });
-        let result = ConnectResult::failed(
-            self.target.ssid.to_string(),
-            connect_failure_reason(&error),
-            format!("{error:#}"),
-        );
+        publish_failure_status(self.target, &error);
+        let result = failed_result(self.target, &error);
+        record_connect_attempt(self.target, &result, started_at);
+        Err(error)
+    }
+
+    fn finish_candidate_failure(
+        self,
+        error: anyhow::Error,
+        started_at: Instant,
+    ) -> Result<ConnectResult> {
+        let error = ensure_domain(ErrorOperation::Connect, error);
+        tracing::warn!(ssid = %self.target.ssid, error = %crate::error::err_chain(&error), "Wi-Fi access-point candidate failed");
+        let result = failed_result(self.target, &error);
         record_connect_attempt(self.target, &result, started_at);
         Err(error)
     }
@@ -455,7 +461,40 @@ pub(crate) fn connect_target_with_password(
     cancellation: Option<&AtomicBool>,
     progress: &mut dyn FnMut(ConnectPhase) -> Result<()>,
 ) -> Result<ConnectResult> {
-    ConnectionMachine::new(nm, target, password, wep_key_type, cancellation, progress).run()
+    ConnectionMachine::new(nm, target, password, wep_key_type, cancellation, progress).run(true)
+}
+
+pub(crate) fn connect_target_candidate(
+    nm: &Nm,
+    target: &WifiConnectTarget,
+    password: Option<&str>,
+    wep_key_type: Option<WepKeyType>,
+    cancellation: Option<&AtomicBool>,
+    progress: &mut dyn FnMut(ConnectPhase) -> Result<()>,
+) -> Result<ConnectResult> {
+    ConnectionMachine::new(nm, target, password, wep_key_type, cancellation, progress).run(false)
+}
+
+pub(crate) fn publish_final_connect_failure(target: &WifiConnectTarget, error: &anyhow::Error) {
+    publish_failure_status(target, error);
+}
+
+fn publish_failure_status(target: &WifiConnectTarget, error: &anyhow::Error) {
+    tracing::error!(ssid = %target.ssid, error = %crate::error::err_chain(error), "Wi-Fi connection failed");
+    best_effort("failed to write Wi-Fi cache status", || {
+        cache::write_status(
+            "error",
+            format!("Connection failed for {}: {error:#}", target.ssid),
+        )
+    });
+}
+
+fn failed_result(target: &WifiConnectTarget, error: &anyhow::Error) -> ConnectResult {
+    ConnectResult::failed(
+        target.ssid.to_string(),
+        connect_failure_reason(error),
+        format!("{error:#}"),
+    )
 }
 
 fn record_connect_attempt(target: &WifiConnectTarget, result: &ConnectResult, started_at: Instant) {

@@ -46,12 +46,11 @@ pub(crate) fn connect_ssid_request(options: ConnectOptions) -> Result<ConnectReq
         enterprise: None,
         profile: Default::default(),
     };
-    Ok(ConnectRequest {
+    Ok(ConnectRequest::single(
         target,
-        network_key: None,
-        password: resolve_password(options.password_stdin)?,
-        wep_key_type: options.wep_key_type,
-    })
+        resolve_password(options.password_stdin)?,
+        options.wep_key_type,
+    ))
 }
 
 pub(crate) fn connect_target(nm: &Nm, options: ConnectTargetOptions) -> Result<()> {
@@ -405,12 +404,11 @@ fn parse_connect_target_request(
     wep_key_type: Option<WepKeyType>,
 ) -> Result<ConnectRequest> {
     match serde_json::from_str::<ConnectTargetStdinRequest>(request_json) {
-        Ok(request) => Ok(ConnectRequest {
-            target: request.target,
-            network_key: None,
-            password: request.password,
-            wep_key_type: request.wep_key_type.or(wep_key_type),
-        }),
+        Ok(request) => Ok(ConnectRequest::single(
+            request.target,
+            request.password,
+            request.wep_key_type.or(wep_key_type),
+        )),
         Err(request_error) => parse_bare_connect_target(request_json, wep_key_type, request_error),
     }
 }
@@ -431,10 +429,5 @@ fn parse_bare_connect_target(
             .with_detail("target_error", target_error.to_string())
             .with_cause(target_error.into())
         })?;
-    Ok(ConnectRequest {
-        target,
-        network_key: None,
-        password: None,
-        wep_key_type,
-    })
+    Ok(ConnectRequest::single(target, None, wep_key_type))
 }

@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Weak};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, ConnectEvent, ConnectOutcome, ConnectRequest};
-use crate::daemon_event::{emit_json_event, emit_json_event_nonfatal, started_response};
+use crate::daemon_event::{
+    emit_json_event, emit_json_event_nonfatal, event_value, started_response,
+};
 use crate::daemon_runtime::{ConnectAttemptKey, DaemonRuntime, TaskKind};
 use crate::error::{DomainError, ErrorOperation, ErrorReport};
 use crate::model::{
@@ -103,12 +105,11 @@ impl DbusConnectTargetParams {
 
     fn into_request(self, nm: &Nm) -> Result<ConnectRequest> {
         if let Some(target) = self.target {
-            return Ok(ConnectRequest {
+            return Ok(ConnectRequest::single(
                 target,
-                network_key: None,
-                password: self.password,
-                wep_key_type: self.wep_key_type,
-            });
+                self.password,
+                self.wep_key_type,
+            ));
         }
         let enterprise_identity = self.enterprise_identity.or_else(|| {
             self.enterprise
@@ -149,6 +150,8 @@ pub(crate) fn start_connect_target(
         .map_err(connect_validation_error)?;
     let target_display = crate::model::display_ssid(&target_ssid);
     let network_key = params.key.clone();
+    let terminal_runtime = Arc::downgrade(runtime);
+    let terminal_owner = owner.clone();
     let request_id = runtime.start_cancellable(
         "connect",
         TaskKind::Connect,
@@ -160,6 +163,8 @@ pub(crate) fn start_connect_target(
             params,
             cancel_flag,
             &emitter,
+            &terminal_runtime,
+            terminal_owner.as_deref(),
         ) {
             Ok(outcome) => {
                 let (reason, succeeded) = match &outcome {
@@ -172,7 +177,14 @@ pub(crate) fn start_connect_target(
             Err(error) => {
                 let report = ErrorReport::from_error(&error, ErrorOperation::Connect);
                 attempt.finish(report.code.connect_reason(), false);
-                emit_connect_failure(&emitter, request_id, &requested_identity, &report);
+                emit_connect_failure(
+                    &emitter,
+                    request_id,
+                    &requested_identity,
+                    &report,
+                    &terminal_runtime,
+                    terminal_owner.as_deref(),
+                );
             }
         },
     )?;
@@ -203,10 +215,12 @@ fn run_connect_worker(
     params: DbusConnectTargetParams,
     cancel_flag: &AtomicBool,
     emitter: &SignalEmitter<'static>,
+    terminal_runtime: &Weak<DaemonRuntime>,
+    terminal_owner: Option<&str>,
 ) -> Result<ConnectOutcome> {
     let request = params.into_request(nm)?;
     Application::new(nm).connect(&request, Some(cancel_flag), |event| {
-        emit_connect_event(emitter, request_id, event)
+        emit_connect_event(emitter, request_id, event, terminal_runtime, terminal_owner)
     })
 }
 
@@ -214,6 +228,8 @@ fn emit_connect_event(
     emitter: &SignalEmitter<'static>,
     request_id: &str,
     event: &ConnectEvent,
+    terminal_runtime: &Weak<DaemonRuntime>,
+    terminal_owner: Option<&str>,
 ) -> Result<()> {
     let (name, data) = match event {
         ConnectEvent::Started {
@@ -233,6 +249,8 @@ fn emit_connect_event(
             phase,
             target,
             message,
+            candidate,
+            previous_reason,
         } => (
             "progress",
             json!({
@@ -240,6 +258,8 @@ fn emit_connect_event(
                 "phase": phase,
                 "target": target,
                 "message": message,
+                "candidate": candidate,
+                "previous_reason": previous_reason,
             }),
         ),
         ConnectEvent::Finished {
@@ -319,7 +339,20 @@ fn emit_connect_event(
             )
         }
     };
-    emit_json_event(emitter, STREAM, Some(request_id), name, data)
+    let terminal = matches!(name, "succeeded" | "failed" | "cancelled");
+    let stored = terminal.then(|| event_value(STREAM, Some(request_id), name, data.clone()));
+    let emitted = emit_json_event(emitter, STREAM, Some(request_id), name, data);
+    if let Some(event) = stored
+        && let Some(runtime) = terminal_runtime.upgrade()
+    {
+        runtime.store_terminal_result(
+            request_id,
+            terminal_owner.map(ToString::to_string),
+            STREAM,
+            event,
+        );
+    }
+    emitted
 }
 
 fn emit_connect_failure(
@@ -327,22 +360,27 @@ fn emit_connect_failure(
     request_id: &str,
     target: &ConnectTargetIdentity,
     report: &ErrorReport,
+    terminal_runtime: &Weak<DaemonRuntime>,
+    terminal_owner: Option<&str>,
 ) {
-    emit_json_event_nonfatal(
-        emitter,
-        STREAM,
-        Some(request_id),
-        "failed",
-        json!({
-            "request_id": request_id,
-            "phase": ConnectPhase::Failed,
-            "target": target,
-            "reason": report.code.connect_reason(),
-            "code": report.code,
-            "message": report.message,
-            "details": report.api_details(),
-        }),
-    );
+    let data = json!({
+        "request_id": request_id,
+        "phase": ConnectPhase::Failed,
+        "target": target,
+        "reason": report.code.connect_reason(),
+        "code": report.code,
+        "message": report.message,
+        "details": report.api_details(),
+    });
+    emit_json_event_nonfatal(emitter, STREAM, Some(request_id), "failed", data.clone());
+    if let Some(runtime) = terminal_runtime.upgrade() {
+        runtime.store_terminal_result(
+            request_id,
+            terminal_owner.map(ToString::to_string),
+            STREAM,
+            event_value(STREAM, Some(request_id), "failed", data),
+        );
+    }
 }
 
 #[cfg(test)]
