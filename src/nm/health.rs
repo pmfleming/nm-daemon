@@ -354,14 +354,33 @@ mod tests {
     use crate::nm::{HealthSignal, HealthSubject};
 
     fn signal(subject: HealthSubject, state: u32, reason: u32) -> HealthSignal {
+        signal_from(subject, state, Some(70), reason)
+    }
+
+    fn signal_from(
+        subject: HealthSubject,
+        state: u32,
+        previous_state: Option<u32>,
+        reason: u32,
+    ) -> HealthSignal {
         HealthSignal {
             subject,
             path: "/object/1".to_string(),
             state,
-            previous_state: Some(70),
+            previous_state,
             reason,
             observed_at: Instant::now(),
         }
+    }
+
+    fn classify_trace(trace: &[HealthSignal]) -> Vec<HealthTransitionKind> {
+        trace
+            .iter()
+            .map(|signal| {
+                let (_, _, reason) = describe(signal);
+                classify_transition(signal, reason)
+            })
+            .collect()
     }
 
     #[test]
@@ -391,6 +410,66 @@ mod tests {
                 HealthTransitionKind::Failure
             );
         }
+    }
+
+    #[test]
+    fn observed_successful_activation_trace_never_becomes_a_failure() {
+        let trace = [
+            signal_from(HealthSubject::ActiveConnection, 1, None, 0),
+            signal_from(HealthSubject::Device, 40, Some(30), 0),
+            signal_from(HealthSubject::Device, 50, Some(40), 0),
+            signal_from(HealthSubject::Device, 60, Some(50), 0),
+            signal_from(HealthSubject::Device, 70, Some(50), 0),
+            signal_from(HealthSubject::Device, 80, Some(70), 0),
+            signal_from(HealthSubject::Device, 90, Some(80), 0),
+            signal_from(HealthSubject::Device, 100, Some(90), 0),
+            signal_from(HealthSubject::ActiveConnection, 2, None, 0),
+        ];
+        assert_eq!(
+            classify_trace(&trace),
+            vec![
+                HealthTransitionKind::Progress,
+                HealthTransitionKind::Progress,
+                HealthTransitionKind::Progress,
+                HealthTransitionKind::Progress,
+                HealthTransitionKind::Progress,
+                HealthTransitionKind::Progress,
+                HealthTransitionKind::Progress,
+                HealthTransitionKind::Success,
+                HealthTransitionKind::Success,
+            ]
+        );
+    }
+
+    #[test]
+    fn observed_sleep_trace_is_expected_lifecycle_not_failure() {
+        let trace = [
+            signal_from(HealthSubject::Device, 110, Some(100), 37),
+            signal_from(HealthSubject::ActiveConnection, 3, None, 0),
+            signal_from(HealthSubject::Device, 30, Some(110), 37),
+            signal_from(HealthSubject::Device, 10, Some(30), 73),
+        ];
+        assert_eq!(
+            classify_trace(&trace),
+            vec![
+                HealthTransitionKind::Progress,
+                HealthTransitionKind::Progress,
+                HealthTransitionKind::ExpectedLifecycle,
+                HealthTransitionKind::ExpectedLifecycle,
+            ]
+        );
+    }
+
+    #[test]
+    fn observed_terminal_failure_traces_remain_actionable() {
+        let dhcp = signal_from(HealthSubject::Device, 120, Some(70), 5);
+        let no_secrets = signal_from(HealthSubject::Device, 120, Some(60), 7);
+        let link_loss = signal_from(HealthSubject::Device, 30, Some(100), 8);
+        let vpn_unknown = signal_from(HealthSubject::Vpn, 6, None, 0);
+        assert_eq!(
+            classify_trace(&[dhcp, no_secrets, link_loss, vpn_unknown]),
+            vec![HealthTransitionKind::Failure; 4]
+        );
     }
 
     #[test]
