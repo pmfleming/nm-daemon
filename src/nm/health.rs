@@ -151,6 +151,7 @@ impl Nm {
 }
 
 fn transition_is_unexpected(signal: &HealthSignal, reason: TypedReason) -> bool {
+    let reason_expected = reason.expected() || benign_lifecycle_reason(reason.name);
     match signal.subject {
         HealthSubject::Device => match signal.state {
             // Preparation through activation are ordinary forward progress.
@@ -161,9 +162,9 @@ fn transition_is_unexpected(signal: &HealthSignal, reason: TypedReason) -> bool 
             // Failed is always significant unless NetworkManager says it was
             // explicitly requested. Disconnected/unavailable/unmanaged are
             // significant only when NetworkManager supplies a failure reason.
-            120 => !reason.expected(),
-            10 | 20 | 30 => !reason.expected(),
-            _ => !reason.expected(),
+            120 => !reason_expected,
+            10 | 20 | 30 => !reason_expected,
+            _ => !reason_expected,
         },
         HealthSubject::ActiveConnection => match signal.state {
             // Activating, activated, and deactivating commonly carry reason 0
@@ -171,17 +172,36 @@ fn transition_is_unexpected(signal: &HealthSignal, reason: TypedReason) -> bool 
             1..=3 => false,
             // A deactivated active-connection event with reason 0 has no useful
             // diagnosis; its device transition carries the actionable reason.
-            4 => !reason.expected() && reason.category != ReasonCategory::Unknown,
-            _ => !reason.expected(),
+            4 => !reason_expected && reason.category != ReasonCategory::Unknown,
+            _ => !reason_expected,
         },
         HealthSubject::Vpn => match signal.state {
             // prepare through activated
             1..=5 => false,
             // failed or unexpectedly disconnected
-            6 | 7 => !reason.expected(),
-            _ => !reason.expected(),
+            6 | 7 => !reason_expected,
+            _ => !reason_expected,
         },
     }
+}
+
+fn benign_lifecycle_reason(name: &str) -> bool {
+    matches!(
+        name,
+        "now-managed"
+            | "now-unmanaged"
+            | "sleeping"
+            | "new-activation"
+            | "unmanaged-by-default"
+            | "unmanaged-external-down"
+            | "unmanaged-link-not-init"
+            | "unmanaged-quitting"
+            | "unmanaged-sleeping"
+            | "unmanaged-user-conf"
+            | "unmanaged-user-explicit"
+            | "unmanaged-user-settings"
+            | "unmanaged-user-udev"
+    )
 }
 
 fn health_message(event: &NetworkHealthEvent) -> String {
@@ -285,6 +305,19 @@ mod tests {
             let (_, _, reason) = describe(&signal);
             assert!(!transition_is_unexpected(&signal, reason));
         }
+    }
+
+    #[test]
+    fn sleep_and_management_lifecycle_transitions_are_expected() {
+        for (state, reason_code) in [(110, 37), (30, 37), (10, 73), (20, 2)] {
+            let signal = signal(HealthSubject::Device, state, reason_code);
+            let (_, _, reason) = describe(&signal);
+            assert!(!transition_is_unexpected(&signal, reason), "{reason:?}");
+        }
+
+        let removed = signal(HealthSubject::Device, 10, 36);
+        let (_, _, reason) = describe(&removed);
+        assert!(transition_is_unexpected(&removed, reason));
     }
 
     #[test]
