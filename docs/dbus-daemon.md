@@ -341,6 +341,8 @@ Each event carries `health` with:
 
 An unmapped reason code is reported as `name: "unknown"` with its numeric `code` intact rather than dropped, so a newer NetworkManager cannot silence an event.
 
+When NetworkManager emits both a detailed device failure and a generic active-connection failure for the same device within three seconds, both remain visible as telemetry but only the device event recommends a notification. This prevents duplicate prompts while preserving the more useful reason.
+
 Payloads are built only while at least one subscriber is watching; an idle daemon does no extra D-Bus work per NetworkManager transition.
 
 ### Captive-portal context

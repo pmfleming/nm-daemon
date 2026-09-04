@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use zbus::MatchRule;
@@ -41,6 +41,7 @@ pub(crate) struct HealthSignal {
     pub(crate) state: u32,
     pub(crate) previous_state: Option<u32>,
     pub(crate) reason: u32,
+    pub(crate) observed_at: Instant,
 }
 
 type HealthListener = Arc<dyn Fn(HealthSignal) + Send + Sync>;
@@ -163,6 +164,7 @@ fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
                 state,
                 previous_state: Some(previous_state),
                 reason,
+                observed_at: Instant::now(),
             })
         }
         (ACTIVE_CONNECTION_IFACE, "StateChanged") => {
@@ -173,6 +175,7 @@ fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
                 state,
                 previous_state: None,
                 reason,
+                observed_at: Instant::now(),
             })
         }
         (VPN_CONNECTION_IFACE, "VpnStateChanged") => {
@@ -183,6 +186,7 @@ fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
                 state,
                 previous_state: None,
                 reason,
+                observed_at: Instant::now(),
             })
         }
         _ => None,
@@ -193,6 +197,7 @@ fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
 
     use super::{HealthSignal, HealthSubject, NetworkEvents};
 
@@ -229,6 +234,7 @@ mod tests {
             state: 120,
             previous_state: Some(70),
             reason: 7,
+            observed_at: Instant::now(),
         });
 
         assert_eq!(events.generation(), before);

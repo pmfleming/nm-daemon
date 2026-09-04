@@ -4,6 +4,8 @@
 //! the reason arrives with the signal and the surrounding identity — which
 //! device, which profile — is resolved here.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use serde::Serialize;
 use zvariant::OwnedObjectPath;
@@ -16,6 +18,8 @@ use crate::model::{
     vpn_state_reason,
 };
 use crate::variant::value_string;
+
+const HEALTH_FAILURE_CORRELATION_WINDOW: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -100,6 +104,22 @@ impl Nm {
             HealthSubject::ActiveConnection | HealthSubject::Vpn => {
                 self.describe_active_connection(&signal.path, &mut event)
             }
+        }
+        if event.notification_recommended
+            && signal.subject == HealthSubject::ActiveConnection
+            && event.device_path.as_deref().is_some_and(|device_path| {
+                recent_detailed_device_failure(
+                    self.latest_health_signal(HealthSubject::Device, device_path)
+                        .as_ref(),
+                )
+            })
+        {
+            event.notification_recommended = false;
+            tracing::debug!(
+                active_connection = %signal.path,
+                device_path = ?event.device_path,
+                "deprioritized generic active-connection failure in favor of recent device failure"
+            );
         }
         if event.notification_recommended {
             event.message = Some(health_message(&event));
@@ -247,6 +267,20 @@ fn benign_lifecycle_reason(name: &str) -> bool {
     )
 }
 
+fn recent_detailed_device_failure(signal: Option<&HealthSignal>) -> bool {
+    let Some(signal) = signal else {
+        return false;
+    };
+    if signal.subject != HealthSubject::Device
+        || signal.observed_at.elapsed() > HEALTH_FAILURE_CORRELATION_WINDOW
+    {
+        return false;
+    }
+    let (_, _, reason) = describe(signal);
+    classify_transition(signal, reason) == HealthTransitionKind::Failure
+        && reason.category != ReasonCategory::Unknown
+}
+
 fn health_message(event: &NetworkHealthEvent) -> String {
     let subject = event
         .id
@@ -310,8 +344,11 @@ fn describe(signal: &HealthSignal) -> (&'static str, Option<&'static str>, Typed
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::{
-        HealthSeverity, HealthTransitionKind, classify_transition, describe, transition_severity,
+        HEALTH_FAILURE_CORRELATION_WINDOW, HealthSeverity, HealthTransitionKind,
+        classify_transition, describe, recent_detailed_device_failure, transition_severity,
     };
     use crate::model::reason::ReasonCategory;
     use crate::nm::{HealthSignal, HealthSubject};
@@ -323,6 +360,7 @@ mod tests {
             state,
             previous_state: Some(70),
             reason,
+            observed_at: Instant::now(),
         }
     }
 
@@ -353,6 +391,21 @@ mod tests {
                 HealthTransitionKind::Failure
             );
         }
+    }
+
+    #[test]
+    fn recent_detailed_device_failures_can_own_the_notification() {
+        let recent = signal(HealthSubject::Device, 120, 17);
+        assert!(recent_detailed_device_failure(Some(&recent)));
+
+        let mut stale = recent.clone();
+        stale.observed_at =
+            Instant::now() - HEALTH_FAILURE_CORRELATION_WINDOW - Duration::from_millis(1);
+        assert!(!recent_detailed_device_failure(Some(&stale)));
+
+        let generic = signal(HealthSubject::Device, 120, 1);
+        assert!(!recent_detailed_device_failure(Some(&generic)));
+        assert!(!recent_detailed_device_failure(None));
     }
 
     #[test]
