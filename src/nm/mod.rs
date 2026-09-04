@@ -193,6 +193,14 @@ impl Nm {
         self.events.latest_health(subject, path)
     }
 
+    pub(crate) fn latest_detailed_health_signal(
+        &self,
+        subject: HealthSubject,
+        path: &str,
+    ) -> Option<HealthSignal> {
+        self.events.latest_detailed_health(subject, path)
+    }
+
     pub(crate) fn wake_waiters(&self) {
         self.events.notify();
         self.scan_schedule.notify_waiters();

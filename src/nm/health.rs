@@ -109,7 +109,7 @@ impl Nm {
             && signal.subject == HealthSubject::ActiveConnection
             && event.device_path.as_deref().is_some_and(|device_path| {
                 recent_detailed_device_failure(
-                    self.latest_health_signal(HealthSubject::Device, device_path)
+                    self.latest_detailed_health_signal(HealthSubject::Device, device_path)
                         .as_ref(),
                 )
             })

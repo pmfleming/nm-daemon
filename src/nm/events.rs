@@ -53,6 +53,7 @@ pub(super) struct NetworkEvents {
     listeners: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
     health_listeners: Mutex<Vec<HealthListener>>,
     latest_health: Mutex<HashMap<(HealthSubject, String), HealthSignal>>,
+    latest_detailed_health: Mutex<HashMap<(HealthSubject, String), HealthSignal>>,
 }
 
 impl NetworkEvents {
@@ -98,8 +99,11 @@ impl NetworkEvents {
     }
 
     fn notify_health(&self, signal: HealthSignal) {
-        recover_lock(&self.latest_health)
-            .insert((signal.subject, signal.path.clone()), signal.clone());
+        let key = (signal.subject, signal.path.clone());
+        recover_lock(&self.latest_health).insert(key.clone(), signal.clone());
+        if signal.reason != 0 {
+            recover_lock(&self.latest_detailed_health).insert(key, signal.clone());
+        }
         for listener in recover_lock(&self.health_listeners).iter() {
             listener(signal.clone());
         }
@@ -107,6 +111,16 @@ impl NetworkEvents {
 
     pub(super) fn latest_health(&self, subject: HealthSubject, path: &str) -> Option<HealthSignal> {
         recover_lock(&self.latest_health)
+            .get(&(subject, path.to_string()))
+            .cloned()
+    }
+
+    pub(super) fn latest_detailed_health(
+        &self,
+        subject: HealthSubject,
+        path: &str,
+    ) -> Option<HealthSignal> {
+        recover_lock(&self.latest_detailed_health)
             .get(&(subject, path.to_string()))
             .cloned()
     }
@@ -247,6 +261,40 @@ mod tests {
             .expect("latest transition");
         assert_eq!(latest.state, 120);
         assert_eq!(latest.reason, 7);
+        let detailed = events
+            .latest_detailed_health(HealthSubject::Device, "/devices/1")
+            .expect("latest detailed transition");
+        assert_eq!(detailed.reason, 7);
+    }
+
+    #[test]
+    fn neutral_followup_does_not_erase_recent_detailed_health_reason() {
+        let events = NetworkEvents::default();
+        let signal = |reason| HealthSignal {
+            subject: HealthSubject::Device,
+            path: "/devices/1".to_string(),
+            state: 30,
+            previous_state: Some(120),
+            reason,
+            observed_at: Instant::now(),
+        };
+        events.notify_health(signal(17));
+        events.notify_health(signal(0));
+
+        assert_eq!(
+            events
+                .latest_health(HealthSubject::Device, "/devices/1")
+                .unwrap()
+                .reason,
+            0
+        );
+        assert_eq!(
+            events
+                .latest_detailed_health(HealthSubject::Device, "/devices/1")
+                .unwrap()
+                .reason,
+            17
+        );
     }
 
     #[test]
