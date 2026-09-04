@@ -17,6 +17,24 @@ use crate::model::{
 };
 use crate::variant::value_string;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HealthTransitionKind {
+    Informational,
+    Progress,
+    Success,
+    ExpectedLifecycle,
+    Failure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HealthSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct NetworkHealthEvent {
     /// `device`, `connection`, or `vpn`.
@@ -30,6 +48,9 @@ pub(crate) struct NetworkHealthEvent {
     pub(crate) user_requested: bool,
     /// True when the transition was neither requested nor an ordinary step.
     pub(crate) unexpected: bool,
+    pub(crate) transition_kind: HealthTransitionKind,
+    pub(crate) notification_recommended: bool,
+    pub(crate) severity: HealthSeverity,
     /// Ready-to-render summary for unexpected transitions. Frontends should
     /// prefer this over translating NetworkManager's numeric state themselves.
     pub(crate) message: Option<String>,
@@ -48,6 +69,7 @@ pub(crate) struct NetworkHealthEvent {
 impl Nm {
     pub(crate) fn network_health_event(&self, signal: &HealthSignal) -> Result<NetworkHealthEvent> {
         let (state_name, previous_state_name, reason) = describe(signal);
+        let transition_kind = classify_transition(signal, reason);
         let mut event = NetworkHealthEvent {
             subject: signal.subject.as_str(),
             state: signal.state,
@@ -57,7 +79,10 @@ impl Nm {
             reason,
             user_requested: reason.expected() && reason.name == "user-requested"
                 || reason.name == "user-disconnected",
-            unexpected: transition_is_unexpected(signal, reason),
+            unexpected: transition_kind == HealthTransitionKind::Failure,
+            transition_kind,
+            notification_recommended: transition_kind == HealthTransitionKind::Failure,
+            severity: transition_severity(signal, transition_kind),
             message: None,
             suggested_actions: Vec::new(),
             device_path: None,
@@ -76,7 +101,7 @@ impl Nm {
                 self.describe_active_connection(&signal.path, &mut event)
             }
         }
-        if event.unexpected {
+        if event.notification_recommended {
             event.message = Some(health_message(&event));
             event.suggested_actions = suggested_actions(event.reason.category);
         }
@@ -150,38 +175,56 @@ impl Nm {
     }
 }
 
-fn transition_is_unexpected(signal: &HealthSignal, reason: TypedReason) -> bool {
-    let reason_expected = reason.expected() || benign_lifecycle_reason(reason.name);
+fn classify_transition(signal: &HealthSignal, reason: TypedReason) -> HealthTransitionKind {
+    let expected_lifecycle =
+        reason.category == ReasonCategory::UserRequested || benign_lifecycle_reason(reason.name);
+    let explicit_failure = !matches!(
+        reason.category,
+        ReasonCategory::None | ReasonCategory::Unknown | ReasonCategory::UserRequested
+    ) && !benign_lifecycle_reason(reason.name);
     match signal.subject {
         HealthSubject::Device => match signal.state {
-            // Preparation through activation are ordinary forward progress.
-            40..=100 => false,
-            // Deactivation is transitional; the following terminal device
-            // state carries the outcome and should own any notification.
-            110 => false,
-            // Failed is always significant unless NetworkManager says it was
-            // explicitly requested. Disconnected/unavailable/unmanaged are
-            // significant only when NetworkManager supplies a failure reason.
-            120 => !reason_expected,
-            10 | 20 | 30 => !reason_expected,
-            _ => !reason_expected,
+            40..=90 => HealthTransitionKind::Progress,
+            100 => HealthTransitionKind::Success,
+            110 => HealthTransitionKind::Progress,
+            120 if expected_lifecycle => HealthTransitionKind::ExpectedLifecycle,
+            120 => HealthTransitionKind::Failure,
+            10 | 20 | 30 if expected_lifecycle => HealthTransitionKind::ExpectedLifecycle,
+            10 | 20 | 30 if explicit_failure => HealthTransitionKind::Failure,
+            10 | 20 | 30 => HealthTransitionKind::Informational,
+            _ if explicit_failure => HealthTransitionKind::Failure,
+            _ => HealthTransitionKind::Informational,
         },
         HealthSubject::ActiveConnection => match signal.state {
-            // Activating, activated, and deactivating commonly carry reason 0
-            // (`unknown`) even during completely successful operation.
-            1..=3 => false,
-            // A deactivated active-connection event with reason 0 has no useful
-            // diagnosis; its device transition carries the actionable reason.
-            4 => !reason_expected && reason.category != ReasonCategory::Unknown,
-            _ => !reason_expected,
+            1 => HealthTransitionKind::Progress,
+            2 => HealthTransitionKind::Success,
+            3 => HealthTransitionKind::Progress,
+            4 if expected_lifecycle => HealthTransitionKind::ExpectedLifecycle,
+            4 if explicit_failure => HealthTransitionKind::Failure,
+            4 => HealthTransitionKind::Informational,
+            _ if explicit_failure => HealthTransitionKind::Failure,
+            _ => HealthTransitionKind::Informational,
         },
         HealthSubject::Vpn => match signal.state {
-            // prepare through activated
-            1..=5 => false,
-            // failed or unexpectedly disconnected
-            6 | 7 => !reason_expected,
-            _ => !reason_expected,
+            1..=4 => HealthTransitionKind::Progress,
+            5 => HealthTransitionKind::Success,
+            6 | 7 if expected_lifecycle => HealthTransitionKind::ExpectedLifecycle,
+            6 | 7 => HealthTransitionKind::Failure,
+            _ if explicit_failure => HealthTransitionKind::Failure,
+            _ => HealthTransitionKind::Informational,
         },
+    }
+}
+
+fn transition_severity(
+    signal: &HealthSignal,
+    transition_kind: HealthTransitionKind,
+) -> HealthSeverity {
+    match (transition_kind, signal.subject, signal.state) {
+        (HealthTransitionKind::Failure, HealthSubject::Device, 120)
+        | (HealthTransitionKind::Failure, HealthSubject::Vpn, 6) => HealthSeverity::Error,
+        (HealthTransitionKind::Failure, _, _) => HealthSeverity::Warning,
+        _ => HealthSeverity::Info,
     }
 }
 
@@ -267,7 +310,9 @@ fn describe(signal: &HealthSignal) -> (&'static str, Option<&'static str>, Typed
 
 #[cfg(test)]
 mod tests {
-    use super::{describe, transition_is_unexpected};
+    use super::{
+        HealthSeverity, HealthTransitionKind, classify_transition, describe, transition_severity,
+    };
     use crate::model::reason::ReasonCategory;
     use crate::nm::{HealthSignal, HealthSubject};
 
@@ -303,8 +348,26 @@ mod tests {
         for state in [1, 2, 3] {
             let signal = signal(HealthSubject::ActiveConnection, state, 0);
             let (_, _, reason) = describe(&signal);
-            assert!(!transition_is_unexpected(&signal, reason));
+            assert_ne!(
+                classify_transition(&signal, reason),
+                HealthTransitionKind::Failure
+            );
         }
+    }
+
+    #[test]
+    fn transitions_have_presentation_kind_and_severity() {
+        let activated = signal(HealthSubject::ActiveConnection, 2, 0);
+        let (_, _, reason) = describe(&activated);
+        let kind = classify_transition(&activated, reason);
+        assert_eq!(kind, HealthTransitionKind::Success);
+        assert_eq!(transition_severity(&activated, kind), HealthSeverity::Info);
+
+        let failed = signal(HealthSubject::Device, 120, 17);
+        let (_, _, reason) = describe(&failed);
+        let kind = classify_transition(&failed, reason);
+        assert_eq!(kind, HealthTransitionKind::Failure);
+        assert_eq!(transition_severity(&failed, kind), HealthSeverity::Error);
     }
 
     #[test]
@@ -312,27 +375,43 @@ mod tests {
         for (state, reason_code) in [(110, 37), (30, 37), (10, 73), (20, 2)] {
             let signal = signal(HealthSubject::Device, state, reason_code);
             let (_, _, reason) = describe(&signal);
-            assert!(!transition_is_unexpected(&signal, reason), "{reason:?}");
+            assert_ne!(
+                classify_transition(&signal, reason),
+                HealthTransitionKind::Failure,
+                "{reason:?}"
+            );
         }
 
         let removed = signal(HealthSubject::Device, 10, 36);
         let (_, _, reason) = describe(&removed);
-        assert!(transition_is_unexpected(&removed, reason));
+        assert_eq!(
+            classify_transition(&removed, reason),
+            HealthTransitionKind::Failure
+        );
     }
 
     #[test]
     fn terminal_states_still_use_their_failure_reason() {
         let device = signal(HealthSubject::Device, 120, 7);
         let (_, _, device_reason) = describe(&device);
-        assert!(transition_is_unexpected(&device, device_reason));
+        assert_eq!(
+            classify_transition(&device, device_reason),
+            HealthTransitionKind::Failure
+        );
 
         let vpn = signal(HealthSubject::Vpn, 6, 9);
         let (_, _, vpn_reason) = describe(&vpn);
-        assert!(transition_is_unexpected(&vpn, vpn_reason));
+        assert_eq!(
+            classify_transition(&vpn, vpn_reason),
+            HealthTransitionKind::Failure
+        );
 
         let connection = signal(HealthSubject::ActiveConnection, 4, 0);
         let (_, _, connection_reason) = describe(&connection);
-        assert!(!transition_is_unexpected(&connection, connection_reason));
+        assert_ne!(
+            classify_transition(&connection, connection_reason),
+            HealthTransitionKind::Failure
+        );
     }
 
     #[test]

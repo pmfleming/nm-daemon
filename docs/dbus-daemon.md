@@ -333,8 +333,9 @@ Each event carries `health` with:
 - `subject` — `device`, `connection`, or `vpn`, matching the event name.
 - `state`/`state_name` and `previous_state`/`previous_state_name`, using that subject's own vocabulary. Device states are NetworkManager's device states, active-connection states its activation states, and VPN states the plugin's.
 - `reason` — `{ code, name, category }`. The numeric code is NetworkManager's, the name is stable, and the category is one of `none`, `user-requested`, `authentication`, `configuration`, `hardware`, `carrier`, `address-assignment`, `service`, `dependency`, `lifecycle`, or `unknown`.
-- `user_requested` and `unexpected`, so a frontend can tell a deliberate disconnect from a failure without interpreting reason codes.
-- `message` and `suggested_actions`, populated for unexpected transitions so a frontend can show a useful toast or dialog without translating NetworkManager reason codes. Actions include values such as `check-credentials`, `retry`, `try-alternate-band`, `restart-access-point`, and `refresh-networks`.
+- `user_requested` and the compatibility boolean `unexpected`, so a frontend can tell a deliberate disconnect from a failure without interpreting reason codes.
+- `transition_kind` — `informational`, `progress`, `success`, `expected-lifecycle`, or `failure` — plus `severity` (`info`, `warning`, or `error`) and `notification_recommended`. These combine subject, state, and reason; a reason of `unknown` during normal activation is not treated as a failure.
+- `message` and `suggested_actions`, populated only when notification is recommended so a frontend can show a useful toast or dialog without translating NetworkManager reason codes. Actions include values such as `check-credentials`, `retry`, `try-alternate-band`, `restart-access-point`, and `refresh-networks`.
 - Identity: `device_path`, `device_iface`, `device_type`, `active_connection_path`, `profile_path`, `id`, `uuid`, and `connection_type`. Device events resolve the connection through the device's active connection, and connection events resolve the device through the active connection's device list, so both directions are populated where NetworkManager knows them.
 - `at_ms`.
 

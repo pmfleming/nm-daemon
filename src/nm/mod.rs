@@ -29,7 +29,7 @@ mod vpn;
 mod wifi_settings;
 
 pub(crate) use events::{HealthSignal, HealthSubject};
-pub(crate) use health::NetworkHealthEvent;
+pub(crate) use health::{HealthSeverity, HealthTransitionKind, NetworkHealthEvent};
 pub(crate) use hotspot::HotspotRequest;
 pub(crate) use inventory::{ActiveConnectionSelector, ProfileSelector};
 pub(crate) use statistics::{StatisticsDevice, statistics_rates};

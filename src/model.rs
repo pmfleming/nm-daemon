@@ -13,7 +13,7 @@ mod network;
 pub(crate) mod reason;
 mod wire_v1;
 
-pub(crate) use crate::nm::NetworkHealthEvent;
+pub(crate) use crate::nm::{HealthSeverity, HealthTransitionKind, NetworkHealthEvent};
 pub(crate) use identity::{Bssid, InterfaceName, NmObjectPath, Ssid};
 pub(crate) use network::{
     ActiveConnectionSummary, ConnectivityStatus, DeviceStatisticsSample, HotspotCapabilities,

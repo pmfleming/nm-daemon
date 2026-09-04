@@ -8,13 +8,14 @@ use crate::forget::{ForgetProfile, ForgetResult, ForgetStatus};
 use crate::model::{
     AccessPoint, ActiveConnectionSummary, ConnectEnginePath, ConnectFailureReason, ConnectPhase,
     ConnectResult, ConnectTargetIdentity, ConnectivityStatus, DeviceStatisticsSample,
-    DhcpLeaseStatus, DisconnectResult, HotspotCapabilities, HotspotDevice, HotspotSecurity,
-    HotspotShare, HotspotStartResult, HotspotStatus, HotspotStopResult, HotspotUnavailableReason,
-    Ip4Status, Ip6Status, IpAddressEntry, IpRouteEntry, LinkStateStatus, MeteredStatus,
-    NetworkConnectionSummary, NetworkDeactivateResult, NetworkDeviceSummary, NetworkEntry,
-    NetworkHealthEvent, NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource,
-    NetworkStateSummary, ProfileActivationResult, ProfileEnterpriseSettings, ProfileIpSettings,
-    ProfilePrivacy, RadioPowerResult, RadioStatus, SavedWifiConnection, SecretFlags, TypedReason,
+    DhcpLeaseStatus, DisconnectResult, HealthSeverity, HealthTransitionKind, HotspotCapabilities,
+    HotspotDevice, HotspotSecurity, HotspotShare, HotspotStartResult, HotspotStatus,
+    HotspotStopResult, HotspotUnavailableReason, Ip4Status, Ip6Status, IpAddressEntry,
+    IpRouteEntry, LinkStateStatus, MeteredStatus, NetworkConnectionSummary,
+    NetworkDeactivateResult, NetworkDeviceSummary, NetworkEntry, NetworkHealthEvent,
+    NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource, NetworkStateSummary,
+    ProfileActivationResult, ProfileEnterpriseSettings, ProfileIpSettings, ProfilePrivacy,
+    RadioPowerResult, RadioStatus, SavedWifiConnection, SecretFlags, TypedReason,
     VpnActivationResult, VpnActiveStatus, VpnDisconnectResult, VpnProfileSummary, VpnStatus,
     WifiBand, WifiBandSelectionResult, WifiBandStatus, WifiPowerResult, WifiProfileDetails,
     WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus,
@@ -1166,6 +1167,16 @@ fn contract_health_event(
     previous_state_name: Option<&'static str>,
     reason: TypedReason,
 ) -> NetworkHealthEvent {
+    let unexpected = !matches!(reason.name, "none" | "user-requested" | "user-disconnected");
+    let transition_kind = if unexpected {
+        HealthTransitionKind::Failure
+    } else if state_name == "activated" {
+        HealthTransitionKind::Success
+    } else if reason.name == "user-requested" || reason.name == "user-disconnected" {
+        HealthTransitionKind::ExpectedLifecycle
+    } else {
+        HealthTransitionKind::Informational
+    };
     NetworkHealthEvent {
         subject,
         state,
@@ -1174,15 +1185,19 @@ fn contract_health_event(
         previous_state_name,
         reason,
         user_requested: reason.name == "user-requested" || reason.name == "user-disconnected",
-        unexpected: !matches!(reason.name, "none" | "user-requested" | "user-disconnected"),
-        message: (!matches!(reason.name, "none" | "user-requested" | "user-disconnected"))
+        unexpected,
+        transition_kind,
+        notification_recommended: unexpected,
+        severity: if state_name == "failed" {
+            HealthSeverity::Error
+        } else if unexpected {
+            HealthSeverity::Warning
+        } else {
+            HealthSeverity::Info
+        },
+        message: unexpected
             .then(|| format!("Example changed to {state_name} because of {}", reason.name)),
-        suggested_actions: (!matches!(
-            reason.name,
-            "none" | "user-requested" | "user-disconnected"
-        ))
-        .then_some(vec!["retry"])
-        .unwrap_or_default(),
+        suggested_actions: unexpected.then_some(vec!["retry"]).unwrap_or_default(),
         device_path: Some("/org/freedesktop/NetworkManager/Devices/1".to_string()),
         device_iface: Some("wlan0".to_string()),
         device_type: Some(2),
@@ -1696,6 +1711,18 @@ mod tests {
         assert_eq!(
             value["network-health.stream"]["events"][1]["health"]["unexpected"],
             true
+        );
+        assert_eq!(
+            value["network-health.stream"]["events"][1]["health"]["transition_kind"],
+            "failure"
+        );
+        assert_eq!(
+            value["network-health.stream"]["events"][1]["health"]["notification_recommended"],
+            true
+        );
+        assert_eq!(
+            value["network-health.stream"]["events"][1]["health"]["severity"],
+            "error"
         );
         assert_eq!(
             value["network-health.stream"]["events"][2]["health"]["user_requested"],
