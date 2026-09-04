@@ -57,7 +57,7 @@ impl Nm {
             reason,
             user_requested: reason.expected() && reason.name == "user-requested"
                 || reason.name == "user-disconnected",
-            unexpected: !reason.expected(),
+            unexpected: transition_is_unexpected(signal, reason),
             message: None,
             suggested_actions: Vec::new(),
             device_path: None,
@@ -150,6 +150,40 @@ impl Nm {
     }
 }
 
+fn transition_is_unexpected(signal: &HealthSignal, reason: TypedReason) -> bool {
+    match signal.subject {
+        HealthSubject::Device => match signal.state {
+            // Preparation through activation are ordinary forward progress.
+            40..=100 => false,
+            // Deactivation is transitional; the following terminal device
+            // state carries the outcome and should own any notification.
+            110 => false,
+            // Failed is always significant unless NetworkManager says it was
+            // explicitly requested. Disconnected/unavailable/unmanaged are
+            // significant only when NetworkManager supplies a failure reason.
+            120 => !reason.expected(),
+            10 | 20 | 30 => !reason.expected(),
+            _ => !reason.expected(),
+        },
+        HealthSubject::ActiveConnection => match signal.state {
+            // Activating, activated, and deactivating commonly carry reason 0
+            // (`unknown`) even during completely successful operation.
+            1..=3 => false,
+            // A deactivated active-connection event with reason 0 has no useful
+            // diagnosis; its device transition carries the actionable reason.
+            4 => !reason.expected() && reason.category != ReasonCategory::Unknown,
+            _ => !reason.expected(),
+        },
+        HealthSubject::Vpn => match signal.state {
+            // prepare through activated
+            1..=5 => false,
+            // failed or unexpectedly disconnected
+            6 | 7 => !reason.expected(),
+            _ => !reason.expected(),
+        },
+    }
+}
+
 fn health_message(event: &NetworkHealthEvent) -> String {
     let subject = event
         .id
@@ -213,7 +247,7 @@ fn describe(signal: &HealthSignal) -> (&'static str, Option<&'static str>, Typed
 
 #[cfg(test)]
 mod tests {
-    use super::describe;
+    use super::{describe, transition_is_unexpected};
     use crate::model::reason::ReasonCategory;
     use crate::nm::{HealthSignal, HealthSubject};
 
@@ -242,6 +276,30 @@ mod tests {
         let (state, _, reason) = describe(&signal(HealthSubject::Vpn, 6, 9));
         assert_eq!(state, "failed");
         assert_eq!(reason.name, "no-secrets");
+    }
+
+    #[test]
+    fn ordinary_active_connection_progress_is_not_unexpected_with_reason_zero() {
+        for state in [1, 2, 3] {
+            let signal = signal(HealthSubject::ActiveConnection, state, 0);
+            let (_, _, reason) = describe(&signal);
+            assert!(!transition_is_unexpected(&signal, reason));
+        }
+    }
+
+    #[test]
+    fn terminal_states_still_use_their_failure_reason() {
+        let device = signal(HealthSubject::Device, 120, 7);
+        let (_, _, device_reason) = describe(&device);
+        assert!(transition_is_unexpected(&device, device_reason));
+
+        let vpn = signal(HealthSubject::Vpn, 6, 9);
+        let (_, _, vpn_reason) = describe(&vpn);
+        assert!(transition_is_unexpected(&vpn, vpn_reason));
+
+        let connection = signal(HealthSubject::ActiveConnection, 4, 0);
+        let (_, _, connection_reason) = describe(&connection);
+        assert!(!transition_is_unexpected(&connection, connection_reason));
     }
 
     #[test]
