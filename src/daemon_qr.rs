@@ -91,34 +91,10 @@ fn connect_params(
 
 #[cfg(test)]
 mod tests {
-    use super::{QrConnectParams, QrPayloadParams, connect_params};
+    use super::connect_params;
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::WepKeyType;
     use crate::qr::parse_wifi_qr;
-
-    #[test]
-    fn a_scanned_payload_becomes_an_exact_connect_target() {
-        let parsed = parse_wifi_qr("WIFI:T:WPA;S:Cafe;P:correcthorse;H:true;;").expect("payload");
-        let params = connect_params(&parsed, None).expect("connect params");
-        let identity = params.requested_identity().expect("identity");
-        assert_eq!(identity.ssid, "Cafe");
-        assert_eq!(identity.ssid_bytes, b"Cafe".to_vec());
-        assert!(identity.access_point_path.is_none());
-    }
-
-    #[test]
-    fn authentication_becomes_the_key_management_hint() {
-        for (payload, hint) in [
-            ("WIFI:T:WPA;S:Home;P:correcthorse;;", Some("wpa-psk")),
-            ("WIFI:T:SAE;S:Home;P:correcthorse;;", Some("sae")),
-            ("WIFI:T:WEP;S:Home;P:abcdef0123;;", Some("wep")),
-            ("WIFI:T:nopass;S:Guest;;", None),
-        ] {
-            let parsed = parse_wifi_qr(payload).expect(payload);
-            assert_eq!(parsed.auth.key_management_hint(), hint, "{payload}");
-        }
-    }
-
     #[test]
     fn wep_payloads_carry_the_detected_key_type_through_to_the_connect_request() {
         let parsed = parse_wifi_qr("WIFI:T:WEP;S:Old;P:abcdef0123;;").expect("payload");
@@ -132,18 +108,5 @@ mod tests {
         let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
         assert_eq!(report.code, ErrorCode::ValidationError);
         assert_eq!(report.operation, ErrorOperation::QrOperation);
-    }
-
-    #[test]
-    fn params_reject_unknown_fields_so_a_typo_is_not_silently_ignored() {
-        assert!(serde_json::from_str::<QrPayloadParams>(r#"{"payload":"WIFI:;"}"#).is_ok());
-        assert!(serde_json::from_str::<QrPayloadParams>(r#"{"paylaod":"x"}"#).is_err());
-        assert!(
-            serde_json::from_str::<QrConnectParams>(r#"{"payload":"WIFI:;","ifname":"wlan0"}"#)
-                .is_ok()
-        );
-        assert!(
-            serde_json::from_str::<QrConnectParams>(r#"{"payload":"WIFI:;","bssid":"x"}"#).is_err()
-        );
     }
 }

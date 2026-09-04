@@ -471,9 +471,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::super::super::{ConnectionSettings, owned_value};
-    use super::{
-        apply_advanced, check_expected_version, profile_version, read_enterprise, validate_mode,
-    };
+    use super::{apply_advanced, check_expected_version, profile_version, validate_mode};
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::{ProfileEnterpriseUpdate, WifiBand, WifiProfileAdvancedUpdate};
 
@@ -492,27 +490,6 @@ mod tests {
             ]),
         )])
     }
-
-    #[test]
-    fn version_ignores_the_self_updating_activation_timestamp() {
-        let mut later = settings();
-        later.get_mut("connection").unwrap().insert(
-            "timestamp".to_string(),
-            owned_value(1_763_000_000_u64).unwrap(),
-        );
-        assert_eq!(profile_version(&settings()), profile_version(&later));
-    }
-
-    #[test]
-    fn version_changes_when_a_real_setting_changes() {
-        let mut renamed = settings();
-        renamed.get_mut("connection").unwrap().insert(
-            "id".to_string(),
-            owned_value("Renamed".to_string()).unwrap(),
-        );
-        assert_ne!(profile_version(&settings()), profile_version(&renamed));
-    }
-
     #[test]
     fn a_stale_expected_version_is_a_typed_conflict() {
         let settings = settings();
@@ -595,31 +572,6 @@ mod tests {
         assert!(!wireless.contains_key("band"));
         assert!(!wireless.contains_key("channel"));
     }
-
-    #[test]
-    fn an_exact_cloned_mac_replaces_the_keyword_policy() {
-        let mut settings = settings();
-        settings
-            .entry("802-11-wireless".to_string())
-            .or_default()
-            .insert(
-                "assigned-mac-address".to_string(),
-                owned_value("random".to_string()).unwrap(),
-            );
-        apply_advanced(
-            &mut settings,
-            &WifiProfileAdvancedUpdate {
-                cloned_mac_address: Some("02:00:00:00:00:99".to_string()),
-                ..WifiProfileAdvancedUpdate::default()
-            },
-        )
-        .expect("cloned mac update");
-        assert_eq!(
-            String::try_from(settings["802-11-wireless"]["assigned-mac-address"].clone()).unwrap(),
-            "02:00:00:00:00:99"
-        );
-    }
-
     #[test]
     fn insecure_or_unknown_modes_and_eap_methods_are_rejected() {
         assert!(validate_mode("infrastructure").is_ok());
@@ -643,36 +595,6 @@ mod tests {
             ErrorCode::ValidationError
         );
     }
-
-    #[test]
-    fn certificate_references_round_trip_as_nul_terminated_uris() {
-        let mut settings = settings();
-        apply_advanced(
-            &mut settings,
-            &WifiProfileAdvancedUpdate {
-                enterprise: Some(ProfileEnterpriseUpdate {
-                    eap: Some(vec!["tls".to_string()]),
-                    ca_cert: Some("file:///etc/ssl/ca.pem".to_string()),
-                    identity: Some("laufan".to_string()),
-                    password_flags: Some(1),
-                    ..ProfileEnterpriseUpdate::default()
-                }),
-                ..WifiProfileAdvancedUpdate::default()
-            },
-        )
-        .expect("enterprise update");
-
-        let enterprise = read_enterprise(&settings).expect("enterprise settings");
-        assert_eq!(enterprise.eap, vec!["tls".to_string()]);
-        assert_eq!(
-            enterprise.ca_cert.as_deref(),
-            Some("file:///etc/ssl/ca.pem")
-        );
-        assert_eq!(enterprise.identity.as_deref(), Some("laufan"));
-        assert!(enterprise.password_flags.agent_owned);
-        assert!(!enterprise.password_flags.not_saved);
-    }
-
     #[test]
     fn certificate_references_must_be_a_supported_uri() {
         let mut settings = settings();

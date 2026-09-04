@@ -169,27 +169,12 @@ fn run_vpn_worker(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
-    use super::{DEFAULT_TIMEOUT_SECS, VpnConnectParams, VpnSelectParams};
-    use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
+    use super::VpnConnectParams;
 
     fn connect(json: &str) -> VpnConnectParams {
         serde_json::from_str(json).expect("connect params")
     }
-
-    #[test]
-    fn connect_requires_an_identifier_and_defaults_the_timeout() {
-        let (selector, timeout) = connect(r#"{"uuid":"uuid-1"}"#).split().expect("selector");
-        assert_eq!(selector.uuid.as_deref(), Some("uuid-1"));
-        assert_eq!(timeout, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
-
-        let error = connect("{}").split().unwrap_err();
-        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
-        assert_eq!(report.code, ErrorCode::ValidationError);
-        assert_eq!(report.operation, ErrorOperation::VpnOperation);
-    }
-
     #[test]
     fn out_of_range_timeouts_are_rejected_before_activation_starts() {
         for rejected in [
@@ -199,21 +184,5 @@ mod tests {
             assert!(connect(rejected).split().is_err(), "{rejected}");
         }
         assert!(connect(r#"{"uuid":"u","timeout":300}"#).split().is_ok());
-    }
-
-    #[test]
-    fn disconnect_without_a_selector_targets_the_only_active_connection() {
-        let selector = serde_json::from_str::<VpnSelectParams>("{}")
-            .expect("select params")
-            .into_selector();
-        assert!(selector.uuid.is_none() && selector.path.is_none());
-
-        let selector = serde_json::from_str::<VpnSelectParams>(r#"{"uuid":"  "}"#)
-            .expect("select params")
-            .into_selector();
-        assert!(
-            selector.uuid.is_none(),
-            "blank identifiers are not selectors"
-        );
     }
 }

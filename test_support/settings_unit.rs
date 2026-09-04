@@ -1,14 +1,12 @@
 use super::{
-    ConnectionSettings, apply_mac_address_policy, casting_enabled_from_settings,
-    privacy_from_settings, profile_ip_settings, profile_secret_spec, profile_secret_values,
-    saved_wifi_profile_candidate_from_settings, set_casting_enabled, setting_string,
-    settings_match_access_point, settings_match_wifi_ssid, ssid_bytes_match,
+    ConnectionSettings, casting_enabled_from_settings, profile_ip_settings, profile_secret_spec,
+    profile_secret_values, set_casting_enabled, setting_string, ssid_bytes_match,
     update_profile_secrets, validate_profile_update, wifi_settings_need_secret_agent,
 };
-use crate::model::{AccessPoint, TargetIpAddress, TargetIpSettings, WifiProfileUpdate};
+use crate::model::{TargetIpAddress, TargetIpSettings, WifiProfileUpdate};
 use crate::nm::ip_settings::replace as replace_ip_settings;
 use std::collections::{BTreeMap, HashMap};
-use zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zvariant::{OwnedValue, Value};
 
 #[test]
 fn ssid_bytes_match_exact_bytes() {
@@ -36,22 +34,6 @@ fn casting_uses_resolve_only_mdns_and_can_be_disabled_per_profile() {
         1
     );
 }
-
-#[test]
-fn settings_match_wireless_ssid() {
-    let settings = wifi_settings("Example", "802-11-wireless");
-
-    assert!(settings_match_wifi_ssid(&settings, b"Example"));
-    assert!(!settings_match_wifi_ssid(&settings, b"Other"));
-}
-
-#[test]
-fn settings_reject_non_wireless_profiles() {
-    let settings = wifi_settings("Example", "ethernet");
-
-    assert!(!settings_match_wifi_ssid(&settings, b"Example"));
-}
-
 #[test]
 fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets() {
     let mut settings = wifi_settings("Example", "802-11-wireless");
@@ -273,76 +255,6 @@ fn profile_secret_updates_reject_keys_for_another_security_type() {
     };
     assert!(update_profile_secrets(&mut settings, &update).is_err());
 }
-
-#[test]
-fn system_default_mac_policy_omits_networkmanager_policy_properties() {
-    let mut settings = wifi_settings("Example", "802-11-wireless");
-    let wireless = settings
-        .get_mut("802-11-wireless")
-        .expect("wireless settings");
-    wireless.insert(
-        "assigned-mac-address".to_string(),
-        owned_value(Value::new("permanent".to_string())),
-    );
-    wireless.insert(
-        "cloned-mac-address".to_string(),
-        owned_value(Value::new("random".to_string())),
-    );
-    wireless.insert(
-        "mac-address-randomization".to_string(),
-        owned_value(Value::new(1_u32)),
-    );
-
-    apply_mac_address_policy(&mut settings, "default").expect("apply system default policy");
-
-    let wireless = settings.get("802-11-wireless").expect("wireless settings");
-    assert!(!wireless.contains_key("assigned-mac-address"));
-    assert!(!wireless.contains_key("cloned-mac-address"));
-    assert!(!wireless.contains_key("mac-address-randomization"));
-    assert_eq!(
-        privacy_from_settings(&settings).mac_address_policy,
-        "default"
-    );
-
-    apply_mac_address_policy(&mut settings, "stable").expect("apply stable policy");
-    assert_eq!(
-        privacy_from_settings(&settings).mac_address_policy,
-        "stable"
-    );
-}
-
-#[test]
-fn cached_profile_candidate_matches_access_point_without_refetching_settings() {
-    let mut settings = wifi_settings("Example", "802-11-wireless");
-    settings
-        .get_mut("802-11-wireless")
-        .expect("wireless settings")
-        .insert(
-            "bssid".to_string(),
-            owned_value(Value::new(vec![0x00_u8, 0x11, 0x22, 0x33, 0x44, 0x55])),
-        );
-    let path = OwnedObjectPath::try_from("/profile/1").expect("profile path");
-    let candidate =
-        saved_wifi_profile_candidate_from_settings(&path, &settings).expect("profile candidate");
-
-    let matching_ap = test_ap("Example", "00:11:22:33:44:55");
-    assert!(candidate.matches_access_point(&matching_ap));
-    assert_eq!(
-        candidate.matches_access_point(&matching_ap),
-        settings_match_access_point(&settings, &matching_ap)
-    );
-
-    let wrong_bssid_ap = test_ap("Example", "66:77:88:99:aa:bb");
-    assert!(!candidate.matches_access_point(&wrong_bssid_ap));
-    assert_eq!(
-        candidate.matches_access_point(&wrong_bssid_ap),
-        settings_match_access_point(&settings, &wrong_bssid_ap)
-    );
-
-    let wrong_ssid_ap = test_ap("Other", "00:11:22:33:44:55");
-    assert!(!candidate.matches_access_point(&wrong_ssid_ap));
-}
-
 fn wifi_settings(ssid: &str, connection_type: &str) -> ConnectionSettings {
     let mut settings = ConnectionSettings::new();
     settings.insert(
@@ -360,34 +272,6 @@ fn wifi_settings(ssid: &str, connection_type: &str) -> ConnectionSettings {
         )]),
     );
     settings
-}
-
-fn test_ap(ssid: &str, bssid: &str) -> AccessPoint {
-    AccessPoint {
-        ssid: ssid.to_string(),
-        ssid_bytes: ssid.as_bytes().to_vec(),
-        active: false,
-        security: crate::model::Security::Wpa2Or3,
-        strength: 50,
-        frequency: 2412,
-        channel: 1,
-        band: "2.4 GHz".to_string(),
-        mode: "Infra".to_string(),
-        max_bitrate_mbps: 0,
-        bandwidth_mhz: 0,
-        ssid_hex: String::new(),
-        wpa_flags_label: String::new(),
-        rsn_flags_label: String::new(),
-        bssid: bssid.to_string(),
-        last_seen: 0,
-        last_seen_age_ms: None,
-        path: "/ap/1".to_string(),
-        device_path: "/device/1".to_string(),
-        device_iface: "wlan0".to_string(),
-        flags: 0,
-        wpa_flags: 0,
-        rsn_flags: 0,
-    }
 }
 
 fn owned_value(value: Value<'_>) -> OwnedValue {

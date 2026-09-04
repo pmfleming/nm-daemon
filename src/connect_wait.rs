@@ -134,7 +134,9 @@ impl ActivationWait {
             return Ok(());
         }
         latch_pending_failure(&mut self.pending_failure, status);
-        let pending = self.pending_failure.as_ref().expect("pending failure");
+        let Some(pending) = self.pending_failure.as_ref() else {
+            anyhow::bail!("failed to retain terminal NetworkManager activation status");
+        };
         if pending.since.elapsed() < ACTIVATION_FAILURE_GRACE {
             return Ok(());
         }

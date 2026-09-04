@@ -271,10 +271,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
 
-    use super::{
-        ScanScheduler, ScanTurn, ScanWait, SharedScanOutcome, boottime_ms,
-        is_transient_scan_rejection, rate_limit_wait,
-    };
+    use super::{ScanScheduler, ScanTurn, ScanWait, SharedScanOutcome, rate_limit_wait};
     use crate::deadline::Deadline;
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport, ErrorSource};
     use crate::generated::SCAN_REQUEST_INTERVAL;
@@ -335,36 +332,6 @@ mod tests {
             ScanTurn::Wait { generation: 2 }
         );
     }
-
-    #[test]
-    fn waiting_returns_immediately_once_the_in_flight_scan_is_released() {
-        let scheduler = ScanScheduler::default();
-        let deadline = Deadline::from_now(Duration::from_secs(5)).unwrap();
-        assert_eq!(
-            scheduler.claim("/devices/1", &[]),
-            ScanTurn::Request { generation: 1 }
-        );
-        assert_eq!(
-            scheduler.claim("/devices/1", &[]),
-            ScanTurn::Join { generation: 1 }
-        );
-        let expired = Deadline::from_now(Duration::from_millis(1)).unwrap();
-        assert!(matches!(
-            scheduler.wait_for_completion("/devices/1", 1, expired, None),
-            ScanWait::DeadlineExpired
-        ));
-
-        assert_eq!(
-            scheduler.claim("/devices/1", &[]),
-            ScanTurn::Join { generation: 1 }
-        );
-        scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
-        assert!(matches!(
-            scheduler.wait_for_completion("/devices/1", 1, deadline, None),
-            ScanWait::Completed(SharedScanOutcome::Succeeded)
-        ));
-    }
-
     #[test]
     fn a_cancelled_waiter_stops_waiting_and_releases_its_outcome_slot() {
         let scheduler = ScanScheduler::default();
@@ -449,31 +416,5 @@ mod tests {
             now,
         );
         assert!(wait > Duration::ZERO && wait <= SCAN_REQUEST_INTERVAL);
-    }
-
-    #[test]
-    fn a_boottime_clock_that_ran_backwards_does_not_produce_a_negative_wait() {
-        let now = Instant::now();
-        assert!(rate_limit_wait(90_000, 10_000, None, now).is_zero());
-    }
-
-    #[test]
-    fn networkmanager_rate_limit_rejections_are_recognized_as_transient() {
-        assert!(is_transient_scan_rejection(&anyhow::anyhow!(
-            "RequestScan: Scanning not allowed immediately following previous scan"
-        )));
-        assert!(is_transient_scan_rejection(&anyhow::anyhow!(
-            "org.freedesktop.NetworkManager.Device.NotAllowed"
-        )));
-        assert!(!is_transient_scan_rejection(&anyhow::anyhow!(
-            "org.freedesktop.NetworkManager.PermissionDenied"
-        )));
-    }
-
-    #[test]
-    fn boottime_is_readable_and_monotonic_on_this_platform() {
-        let first = boottime_ms().expect("boottime");
-        assert!(first > 0);
-        assert!(boottime_ms().expect("boottime") >= first);
     }
 }

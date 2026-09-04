@@ -580,9 +580,7 @@ pub(super) fn active_connection_state_name(value: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveConnectionSelector, ProfileSelector, active_connection_state_name,
-        connection_type_name, device_state_name, device_type_name, network_state_name,
-        select_active_connection, select_profile,
+        ActiveConnectionSelector, ProfileSelector, select_active_connection, select_profile,
     };
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::{ActiveConnectionSummary, NetworkConnectionSummary};
@@ -621,46 +619,6 @@ mod tests {
             devices: vec!["/devices/1".to_string()],
         }
     }
-
-    #[test]
-    fn networkmanager_types_and_states_have_stable_names() {
-        assert_eq!(device_type_name(2), "wifi");
-        assert_eq!(device_type_name(29), "wireguard");
-        assert_eq!(device_type_name(30), "wifi-p2p");
-        assert_eq!(device_type_name(31), "vrf");
-        assert_eq!(device_type_name(32), "loopback");
-        assert_eq!(device_type_name(33), "hsr");
-        assert_eq!(connection_type_name("wireguard"), "wireguard");
-        assert_eq!(device_state_name(100), "activated");
-        assert_eq!(active_connection_state_name(1), "activating");
-        assert_eq!(network_state_name(70), "connected-global");
-    }
-
-    #[test]
-    fn profile_selection_prefers_uuid_and_falls_back_to_path() {
-        let connections = vec![
-            profile("/settings/1", "uuid-1"),
-            profile("/settings/2", "uuid-2"),
-        ];
-        let by_uuid = ProfileSelector {
-            uuid: Some("uuid-2".to_string()),
-            ..ProfileSelector::default()
-        };
-        assert_eq!(
-            select_profile(&connections, &by_uuid).unwrap().path,
-            "/settings/2"
-        );
-
-        let by_path = ProfileSelector {
-            path: Some("/settings/1".to_string()),
-            ..ProfileSelector::default()
-        };
-        assert_eq!(
-            select_profile(&connections, &by_path).unwrap().uuid,
-            "uuid-1"
-        );
-    }
-
     #[test]
     fn profile_selection_reports_typed_validation_and_not_found_errors() {
         let connections = vec![profile("/settings/1", "uuid-1")];

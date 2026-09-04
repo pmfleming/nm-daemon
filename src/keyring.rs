@@ -578,7 +578,7 @@ mod tests {
             )
             .unwrap();
         let client = SecretServiceClient {
-            connection: peer.client.clone(),
+            connection: peer.client,
             destination: ":1.0".to_string(),
             session: object_path("/org/freedesktop/secrets/session/test"),
         };

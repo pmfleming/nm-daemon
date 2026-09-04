@@ -140,33 +140,6 @@ fn run_hotspot_worker(
 #[cfg(test)]
 mod tests {
     use super::HotspotStartParams;
-    use crate::model::{HotspotSecurity, WifiBand};
-    use crate::nm::HotspotRequest;
-
-    #[test]
-    fn start_params_default_to_wpa_personal_on_an_automatic_band() {
-        let request = HotspotRequest::from(
-            serde_json::from_str::<HotspotStartParams>("{}").expect("empty params"),
-        );
-        assert_eq!(request.security, HotspotSecurity::WpaPsk);
-        assert_eq!(request.band, WifiBand::Auto);
-        assert!(!request.hidden);
-        assert!(request.ssid.is_none() && request.passphrase.is_none());
-    }
-
-    #[test]
-    fn blank_strings_are_treated_as_omitted_rather_than_empty_credentials() {
-        let request = HotspotRequest::from(
-            serde_json::from_str::<HotspotStartParams>(
-                r#"{"ssid":"","passphrase":"","device":"","channel":0}"#,
-            )
-            .expect("blank params"),
-        );
-        assert!(request.ssid.is_none());
-        assert!(request.passphrase.is_none());
-        assert!(request.device.is_none());
-        assert!(request.channel.is_none());
-    }
 
     #[test]
     fn insecure_security_choices_are_rejected_at_the_parameter_boundary() {

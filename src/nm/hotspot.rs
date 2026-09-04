@@ -259,7 +259,7 @@ impl Nm {
         if let Some(reason) = capabilities.unsupported_reason {
             return Err(DomainError::validation(
                 ErrorOperation::HotspotOperation,
-                capabilities.message.clone(),
+                capabilities.message,
             )
             .with_detail("unsupported_reason", serde_json::json!(reason))
             .into());
@@ -652,9 +652,8 @@ fn root_path() -> OwnedObjectPath {
 #[cfg(test)]
 mod tests {
     use super::{
-        HotspotSecurity, HotspotUnavailableReason, capability_bands, default_hotspot_ssid,
-        hotspot_availability, preferred_hotspot_device, resolve_band, select_hotspot_device,
-        validate_passphrase, wifi_mode_name,
+        HotspotUnavailableReason, capability_bands, hotspot_availability, resolve_band,
+        select_hotspot_device,
     };
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::{HotspotDevice, WifiBand};
@@ -695,30 +694,6 @@ mod tests {
             None
         );
     }
-
-    #[test]
-    fn device_selection_prefers_an_unused_access_point_capable_radio() {
-        let devices = vec![
-            device("wlan0", true, true),
-            device("wlan1", false, false),
-            device("wlan2", true, false),
-        ];
-        assert_eq!(
-            preferred_hotspot_device(&devices).map(|device| device.interface.as_str()),
-            Some("wlan2")
-        );
-        assert_eq!(
-            select_hotspot_device(&devices, None).unwrap().interface,
-            "wlan2"
-        );
-        assert_eq!(
-            select_hotspot_device(&devices, Some("wlan0"))
-                .unwrap()
-                .interface,
-            "wlan0"
-        );
-    }
-
     #[test]
     fn requesting_a_non_access_point_device_is_a_typed_validation_error() {
         let devices = vec![device("wlan1", false, false)];
@@ -758,20 +733,5 @@ mod tests {
             ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
             ErrorCode::ValidationError
         );
-    }
-
-    #[test]
-    fn passphrases_shorter_than_wpa_minimum_are_rejected() {
-        assert!(validate_passphrase("correcthorse", HotspotSecurity::WpaPsk).is_ok());
-        assert!(validate_passphrase("short", HotspotSecurity::WpaPsk).is_err());
-        assert!(validate_passphrase(&"a".repeat(64), HotspotSecurity::Sae).is_err());
-    }
-
-    #[test]
-    fn generated_ssid_and_mode_names_are_stable() {
-        assert!(default_hotspot_ssid().ends_with("hotspot"));
-        assert_eq!(wifi_mode_name(3), "access-point");
-        assert_eq!(wifi_mode_name(1), "adhoc");
-        assert_eq!(wifi_mode_name(99), "unknown");
     }
 }

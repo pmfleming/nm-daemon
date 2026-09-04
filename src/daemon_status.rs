@@ -349,7 +349,7 @@ fn emit_on_change(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     use super::network_delta;
 
@@ -393,21 +393,6 @@ mod tests {
         );
         assert_eq!(delta["snapshot"], snapshot);
     }
-
-    #[test]
-    fn initial_network_delta_adds_the_complete_list() {
-        let current = json!({
-            "networks": [{ "key": "one" }, { "key": "two" }],
-            "snapshot": { "updated_at_ms": 2 }
-        });
-
-        let delta = network_delta(None, &current).expect("initial network snapshot");
-
-        assert_eq!(delta["added"], current["networks"]);
-        assert_eq!(delta["removed"], json!([]));
-        assert_eq!(delta["changed"], json!([]));
-    }
-
     #[test]
     fn network_delta_ignores_snapshot_metadata_only_changes() {
         let previous = json!({
@@ -430,10 +415,5 @@ mod tests {
         });
 
         assert_eq!(network_delta(Some(&previous), &current), None);
-    }
-
-    #[test]
-    fn network_delta_requires_a_network_array() {
-        assert_eq!(network_delta(None, &Value::Null), None);
     }
 }

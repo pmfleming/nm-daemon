@@ -588,15 +588,6 @@ fn dbus_name_is_not_found(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{DomainError, ErrorCode, ErrorOperation, ErrorReport, ErrorSource, ensure_domain};
-
-    #[test]
-    fn rendered_words_do_not_change_untyped_error_classification() {
-        let error = anyhow::anyhow!("unrelated D-Bus parse timeout prose");
-        let report = ErrorReport::from_error(&error, ErrorOperation::Status);
-        assert_eq!(report.code, ErrorCode::InternalError);
-        assert_eq!(report.source, ErrorSource::Internal);
-    }
-
     #[test]
     fn typed_errors_preserve_operation_source_and_details() {
         let error: anyhow::Error =

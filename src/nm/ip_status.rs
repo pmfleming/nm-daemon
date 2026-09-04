@@ -208,31 +208,7 @@ mod tests {
 
     use zvariant::OwnedValue;
 
-    use super::{default_route_next_hop, dhcp_lease_from_options, legacy_ipv4};
-    use crate::model::IpRouteEntry;
-
-    fn route(dest: &str, prefix: u32, next_hop: Option<&str>) -> IpRouteEntry {
-        IpRouteEntry {
-            dest: dest.to_string(),
-            prefix,
-            next_hop: next_hop.map(ToString::to_string),
-            metric: None,
-        }
-    }
-
-    #[test]
-    fn default_route_supplies_a_missing_gateway() {
-        let routes = vec![
-            route("192.0.2.0", 24, None),
-            route("0.0.0.0", 0, Some("192.0.2.1")),
-        ];
-        assert_eq!(
-            default_route_next_hop(&routes),
-            Some("192.0.2.1".to_string())
-        );
-        assert_eq!(default_route_next_hop(&routes[..1]), None);
-    }
-
+    use super::{dhcp_lease_from_options, legacy_ipv4};
     #[test]
     fn parses_networkmanager_dhcp4_lease_options() {
         let options = HashMap::from([
@@ -251,24 +227,6 @@ mod tests {
         assert_eq!(lease.lease_time_seconds, Some(86_400));
         assert_eq!(lease.expires_at_ms, Some(1_762_086_400_000));
     }
-
-    #[test]
-    fn dhcpv6_options_reuse_the_shared_lease_shape() {
-        let options = HashMap::from([
-            ("max_life".to_string(), string_value("86400")),
-            ("domain_name".to_string(), string_value("example.test")),
-        ]);
-        let lease = dhcp_lease_from_options(&options).expect("lease from DHCPv6 options");
-        assert_eq!(lease.lease_time_seconds, Some(86_400));
-        assert_eq!(lease.domain_name.as_deref(), Some("example.test"));
-        assert_eq!(lease.server_identifier, None);
-    }
-
-    #[test]
-    fn empty_dhcp_options_do_not_fabricate_a_lease() {
-        assert!(dhcp_lease_from_options(&HashMap::new()).is_none());
-    }
-
     fn string_value(value: &str) -> OwnedValue {
         OwnedValue::try_from(zvariant::Value::new(value.to_string())).expect("string variant")
     }

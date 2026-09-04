@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
@@ -374,113 +375,123 @@ impl<'a> Application<'a> {
         // A network-key request represents a roaming-compatible AP group. Try
         // at most one alternate candidate; explicit legacy BSSID/AP requests
         // remain strict and therefore contain no alternatives.
-        let candidates = request.candidates().into_iter().take(2).collect::<Vec<_>>();
-        let total = candidates.len();
-        let mut attempts = Vec::new();
-        for (index, candidate) in candidates.iter().enumerate() {
+        let primary = request.primary_candidate();
+        let alternative = request.alternatives.first();
+        let total = 1 + usize::from(alternative.is_some());
+        let mut attempts = Vec::with_capacity(total);
+        for (index, candidate) in std::iter::once(primary.as_ref())
+            .chain(alternative)
+            .enumerate()
+        {
             let attempt = index + 1;
             let candidate_info = candidate.info(attempt, total);
-            emit(&ConnectEvent::Progress {
-                phase: ConnectPhase::TryingAccessPoint,
-                target: target_identity.clone(),
-                message: candidate_message("trying", &candidate_info),
-                candidate: Some(candidate_info.clone()),
-                previous_reason: None,
-            })?;
-            let mut progress = |phase| {
-                emit(&ConnectEvent::Progress {
-                    phase,
-                    target: target_identity.clone(),
-                    message: connect_phase_message(phase).to_string(),
-                    candidate: Some(candidate_info.clone()),
-                    previous_reason: None,
-                })
-            };
+            emit_trying_candidate(&target_identity, &candidate_info, &mut emit)?;
             let started_at = Instant::now();
-            let result = if total > 1 {
-                connect::connect_target_candidate(
-                    self.nm,
-                    &candidate.target,
-                    request.password.as_deref(),
-                    request.wep_key_type,
-                    cancellation,
-                    &mut progress,
-                )
-            } else {
-                connect::connect_target_with_password(
-                    self.nm,
-                    &candidate.target,
-                    request.password.as_deref(),
-                    request.wep_key_type,
-                    cancellation,
-                    &mut progress,
-                )
-            };
+            let result = self.run_connect_candidate(
+                request,
+                candidate,
+                total == 1,
+                cancellation,
+                (&target_identity, &candidate_info),
+                &mut emit,
+            );
 
             if let Some(outcome) = finish_connect_cancellation(request, cancellation, &mut emit)? {
                 return Ok(outcome);
             }
             match result {
-                Ok(mut result) => {
-                    let actual = active_candidate_info(self.nm, attempt, total)
-                        .unwrap_or_else(|| candidate_info.clone());
-                    attempts.push(connect_attempt_summary(
-                        &actual,
-                        "connected",
-                        None,
+                Ok(result) => {
+                    let outcome = self.successful_connect_outcome(
+                        result,
+                        candidate_info,
+                        attempt,
+                        total,
                         started_at,
-                        result.message.clone(),
-                    ));
-                    result.fallback_used = attempt > 1;
-                    result.attempts = attempts;
-                    if result.fallback_used {
-                        result.message = recovery_message(&result.ssid, &result.attempts);
-                        best_effort("failed to cache recovered Wi-Fi status", || {
-                            cache::write_status("connected", &result.message)
-                        });
-                    }
-                    let outcome = ConnectOutcome::Succeeded(result);
+                        attempts,
+                    );
                     emit_finished_connect(request, &outcome, &mut emit)?;
                     return Ok(outcome);
                 }
                 Err(error) => {
-                    let report = ErrorReport::from_error(&error, ErrorOperation::Connect);
-                    let reason = report
-                        .code
-                        .connect_reason()
-                        .unwrap_or(ConnectFailureReason::Unknown);
-                    attempts.push(connect_attempt_summary(
-                        &candidate_info,
-                        "failed",
-                        Some(reason),
-                        started_at,
-                        report.message.clone(),
-                    ));
-                    if index + 1 < total && retryable_candidate_failure(reason) {
-                        let next = candidates[index + 1].info(attempt + 1, total);
-                        emit(&ConnectEvent::Progress {
-                            phase: ConnectPhase::RetryingAlternative,
-                            target: target_identity.clone(),
-                            message: retry_message(&candidate_info, &next, reason),
-                            candidate: Some(next),
-                            previous_reason: Some(reason),
-                        })?;
+                    let reason =
+                        record_failed_attempt(&mut attempts, &candidate_info, started_at, &error);
+                    if let Some(next) = alternative.filter(|_| index == 0)
+                        && retryable_candidate_failure(reason)
+                    {
+                        emit_retry(
+                            &target_identity,
+                            &candidate_info,
+                            next.info(2, total),
+                            reason,
+                            &mut emit,
+                        )?;
                         continue;
                     }
-                    if total > 1 {
-                        connect::publish_final_connect_failure(&request.target, &error);
-                    }
-                    let mut outcome = failed_connect_outcome(&request.target, &error);
-                    if let ConnectOutcome::Failed { result, .. } = &mut outcome {
-                        result.fallback_used = attempts.len() > 1;
-                        result.attempts = attempts;
-                    }
+                    let outcome = final_failed_connect_outcome(request, error, attempts, total > 1);
                     emit_finished_connect(request, &outcome, &mut emit)?;
                     return Ok(outcome);
                 }
             }
         }
         unreachable!("connect request always has a primary candidate")
+    }
+
+    fn run_connect_candidate(
+        &self,
+        request: &ConnectRequest,
+        candidate: &ConnectCandidate,
+        publish_failure: bool,
+        cancellation: Option<&AtomicBool>,
+        progress_context: (&ConnectTargetIdentity, &ConnectCandidateInfo),
+        emit: &mut impl FnMut(&ConnectEvent) -> Result<()>,
+    ) -> Result<ConnectResult> {
+        let (target, candidate_info) = progress_context;
+        let mut progress = |phase| {
+            emit(&ConnectEvent::Progress {
+                phase,
+                target: target.clone(),
+                message: connect_phase_message(phase).to_string(),
+                candidate: Some(candidate_info.clone()),
+                previous_reason: None,
+            })
+        };
+        connect::connect_target(
+            self.nm,
+            &candidate.target,
+            request.password.as_deref(),
+            request.wep_key_type,
+            cancellation,
+            &mut progress,
+            publish_failure,
+        )
+    }
+
+    fn successful_connect_outcome(
+        &self,
+        mut result: ConnectResult,
+        candidate: ConnectCandidateInfo,
+        attempt: usize,
+        total: usize,
+        started_at: Instant,
+        mut attempts: Vec<ConnectAttemptSummary>,
+    ) -> ConnectOutcome {
+        let actual = active_candidate_info(self.nm, attempt, total).unwrap_or(candidate);
+        attempts.push(connect_attempt_summary(
+            &actual,
+            "connected",
+            None,
+            started_at,
+            result.message.clone(),
+        ));
+        result.fallback_used = attempt > 1;
+        result.attempts = attempts;
+        if result.fallback_used {
+            result.message = recovery_message(&result.ssid, &result.attempts);
+            best_effort("failed to cache recovered Wi-Fi status", || {
+                cache::write_status("connected", &result.message)
+            });
+        }
+        ConnectOutcome::Succeeded(result)
     }
 
     pub(crate) fn saved_profiles(&self) -> Result<Vec<SavedWifiConnection>> {
@@ -877,15 +888,11 @@ impl ConnectRequest {
         }
     }
 
-    fn candidates(&self) -> Vec<ConnectCandidate> {
-        let mut candidates = Vec::with_capacity(1 + self.alternatives.len());
-        candidates.push(
-            self.candidate
-                .clone()
-                .unwrap_or_else(|| ConnectCandidate::from_target(self.target.clone())),
-        );
-        candidates.extend(self.alternatives.clone());
-        candidates
+    fn primary_candidate(&self) -> Cow<'_, ConnectCandidate> {
+        self.candidate.as_ref().map_or_else(
+            || Cow::Owned(ConnectCandidate::from_target(self.target.clone())),
+            Cow::Borrowed,
+        )
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
@@ -1057,7 +1064,7 @@ fn start_connect(
         ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref());
     emit(&ConnectEvent::Started {
         phase: ConnectPhase::Starting,
-        target: target.clone(),
+        target,
         message: "starting Wi-Fi connection".to_string(),
     })?;
     if cancellation_requested(cancellation) {
@@ -1081,6 +1088,20 @@ fn connect_phase_message(phase: ConnectPhase) -> &'static str {
         ConnectPhase::Failed => "Wi-Fi connection failed",
         ConnectPhase::Cancelled => "Wi-Fi connection cancelled",
     }
+}
+
+fn emit_trying_candidate(
+    target: &ConnectTargetIdentity,
+    candidate: &ConnectCandidateInfo,
+    emit: &mut impl FnMut(&ConnectEvent) -> Result<()>,
+) -> Result<()> {
+    emit(&ConnectEvent::Progress {
+        phase: ConnectPhase::TryingAccessPoint,
+        target: target.clone(),
+        message: candidate_message("trying", candidate),
+        candidate: Some(candidate.clone()),
+        previous_reason: None,
+    })
 }
 
 fn candidate_message(action: &str, candidate: &ConnectCandidateInfo) -> String {
@@ -1116,6 +1137,22 @@ fn retry_message(
     format!("{previous_band} access point {failure}; trying {next_band}")
 }
 
+fn emit_retry(
+    target: &ConnectTargetIdentity,
+    previous: &ConnectCandidateInfo,
+    next: ConnectCandidateInfo,
+    reason: ConnectFailureReason,
+    emit: &mut impl FnMut(&ConnectEvent) -> Result<()>,
+) -> Result<()> {
+    emit(&ConnectEvent::Progress {
+        phase: ConnectPhase::RetryingAlternative,
+        target: target.clone(),
+        message: retry_message(previous, &next, reason),
+        candidate: Some(next),
+        previous_reason: Some(reason),
+    })
+}
+
 fn retryable_candidate_failure(reason: ConnectFailureReason) -> bool {
     matches!(
         reason,
@@ -1143,6 +1180,44 @@ fn connect_attempt_summary(
         duration_ms: started_at.elapsed().as_millis(),
         message,
     }
+}
+
+fn record_failed_attempt(
+    attempts: &mut Vec<ConnectAttemptSummary>,
+    candidate: &ConnectCandidateInfo,
+    started_at: Instant,
+    error: &anyhow::Error,
+) -> ConnectFailureReason {
+    let report = ErrorReport::from_error(error, ErrorOperation::Connect);
+    let reason = report
+        .code
+        .connect_reason()
+        .unwrap_or(ConnectFailureReason::Unknown);
+    attempts.push(connect_attempt_summary(
+        candidate,
+        "failed",
+        Some(reason),
+        started_at,
+        report.message,
+    ));
+    reason
+}
+
+fn final_failed_connect_outcome(
+    request: &ConnectRequest,
+    error: anyhow::Error,
+    attempts: Vec<ConnectAttemptSummary>,
+    publish_failure: bool,
+) -> ConnectOutcome {
+    if publish_failure {
+        connect::publish_final_connect_failure(&request.target, &error);
+    }
+    let mut outcome = failed_connect_outcome(&request.target, &error);
+    if let ConnectOutcome::Failed { result, .. } = &mut outcome {
+        result.fallback_used = attempts.len() > 1;
+        result.attempts = attempts;
+    }
+    outcome
 }
 
 fn active_candidate_info(nm: &Nm, attempt: usize, total: usize) -> Option<ConnectCandidateInfo> {

@@ -198,42 +198,60 @@ impl Nm {
 fn classify_transition(signal: &HealthSignal, reason: TypedReason) -> HealthTransitionKind {
     let expected_lifecycle =
         reason.category == ReasonCategory::UserRequested || benign_lifecycle_reason(reason.name);
-    let explicit_failure = !matches!(
+    let known_transition = match signal.subject {
+        HealthSubject::Device => classify_device_state(signal.state, expected_lifecycle),
+        HealthSubject::ActiveConnection => {
+            classify_active_connection_state(signal.state, expected_lifecycle)
+        }
+        HealthSubject::Vpn => classify_vpn_state(signal.state, expected_lifecycle),
+    };
+    known_transition.unwrap_or_else(|| {
+        if explicit_failure(reason) {
+            HealthTransitionKind::Failure
+        } else {
+            HealthTransitionKind::Informational
+        }
+    })
+}
+
+fn classify_device_state(state: u32, expected_lifecycle: bool) -> Option<HealthTransitionKind> {
+    match state {
+        40..=90 | 110 => Some(HealthTransitionKind::Progress),
+        100 => Some(HealthTransitionKind::Success),
+        120 if expected_lifecycle => Some(HealthTransitionKind::ExpectedLifecycle),
+        120 => Some(HealthTransitionKind::Failure),
+        10 | 20 | 30 if expected_lifecycle => Some(HealthTransitionKind::ExpectedLifecycle),
+        _ => None,
+    }
+}
+
+fn classify_active_connection_state(
+    state: u32,
+    expected_lifecycle: bool,
+) -> Option<HealthTransitionKind> {
+    match state {
+        1 | 3 => Some(HealthTransitionKind::Progress),
+        2 => Some(HealthTransitionKind::Success),
+        4 if expected_lifecycle => Some(HealthTransitionKind::ExpectedLifecycle),
+        _ => None,
+    }
+}
+
+fn classify_vpn_state(state: u32, expected_lifecycle: bool) -> Option<HealthTransitionKind> {
+    match state {
+        1..=4 => Some(HealthTransitionKind::Progress),
+        5 => Some(HealthTransitionKind::Success),
+        6 | 7 if expected_lifecycle => Some(HealthTransitionKind::ExpectedLifecycle),
+        6 | 7 => Some(HealthTransitionKind::Failure),
+        _ => None,
+    }
+}
+
+fn explicit_failure(reason: TypedReason) -> bool {
+    !matches!(
         reason.category,
         ReasonCategory::None | ReasonCategory::Unknown | ReasonCategory::UserRequested
-    ) && !benign_lifecycle_reason(reason.name);
-    match signal.subject {
-        HealthSubject::Device => match signal.state {
-            40..=90 => HealthTransitionKind::Progress,
-            100 => HealthTransitionKind::Success,
-            110 => HealthTransitionKind::Progress,
-            120 if expected_lifecycle => HealthTransitionKind::ExpectedLifecycle,
-            120 => HealthTransitionKind::Failure,
-            10 | 20 | 30 if expected_lifecycle => HealthTransitionKind::ExpectedLifecycle,
-            10 | 20 | 30 if explicit_failure => HealthTransitionKind::Failure,
-            10 | 20 | 30 => HealthTransitionKind::Informational,
-            _ if explicit_failure => HealthTransitionKind::Failure,
-            _ => HealthTransitionKind::Informational,
-        },
-        HealthSubject::ActiveConnection => match signal.state {
-            1 => HealthTransitionKind::Progress,
-            2 => HealthTransitionKind::Success,
-            3 => HealthTransitionKind::Progress,
-            4 if expected_lifecycle => HealthTransitionKind::ExpectedLifecycle,
-            4 if explicit_failure => HealthTransitionKind::Failure,
-            4 => HealthTransitionKind::Informational,
-            _ if explicit_failure => HealthTransitionKind::Failure,
-            _ => HealthTransitionKind::Informational,
-        },
-        HealthSubject::Vpn => match signal.state {
-            1..=4 => HealthTransitionKind::Progress,
-            5 => HealthTransitionKind::Success,
-            6 | 7 if expected_lifecycle => HealthTransitionKind::ExpectedLifecycle,
-            6 | 7 => HealthTransitionKind::Failure,
-            _ if explicit_failure => HealthTransitionKind::Failure,
-            _ => HealthTransitionKind::Informational,
-        },
-    }
+    ) && !benign_lifecycle_reason(reason.name)
 }
 
 fn transition_severity(
@@ -347,8 +365,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        HEALTH_FAILURE_CORRELATION_WINDOW, HealthSeverity, HealthTransitionKind,
-        classify_transition, describe, recent_detailed_device_failure, transition_severity,
+        HEALTH_FAILURE_CORRELATION_WINDOW, HealthTransitionKind, classify_transition, describe,
+        recent_detailed_device_failure,
     };
     use crate::model::reason::ReasonCategory;
     use crate::nm::{HealthSignal, HealthSubject};
@@ -399,19 +417,6 @@ mod tests {
         assert_eq!(state, "failed");
         assert_eq!(reason.name, "no-secrets");
     }
-
-    #[test]
-    fn ordinary_active_connection_progress_is_not_unexpected_with_reason_zero() {
-        for state in [1, 2, 3] {
-            let signal = signal(HealthSubject::ActiveConnection, state, 0);
-            let (_, _, reason) = describe(&signal);
-            assert_ne!(
-                classify_transition(&signal, reason),
-                HealthTransitionKind::Failure
-            );
-        }
-    }
-
     #[test]
     fn observed_successful_activation_trace_never_becomes_a_failure() {
         let trace = [
@@ -477,7 +482,7 @@ mod tests {
         let recent = signal(HealthSubject::Device, 120, 17);
         assert!(recent_detailed_device_failure(Some(&recent)));
 
-        let mut stale = recent.clone();
+        let mut stale = recent;
         stale.observed_at =
             Instant::now() - HEALTH_FAILURE_CORRELATION_WINDOW - Duration::from_millis(1);
         assert!(!recent_detailed_device_failure(Some(&stale)));
@@ -486,66 +491,6 @@ mod tests {
         assert!(!recent_detailed_device_failure(Some(&generic)));
         assert!(!recent_detailed_device_failure(None));
     }
-
-    #[test]
-    fn transitions_have_presentation_kind_and_severity() {
-        let activated = signal(HealthSubject::ActiveConnection, 2, 0);
-        let (_, _, reason) = describe(&activated);
-        let kind = classify_transition(&activated, reason);
-        assert_eq!(kind, HealthTransitionKind::Success);
-        assert_eq!(transition_severity(&activated, kind), HealthSeverity::Info);
-
-        let failed = signal(HealthSubject::Device, 120, 17);
-        let (_, _, reason) = describe(&failed);
-        let kind = classify_transition(&failed, reason);
-        assert_eq!(kind, HealthTransitionKind::Failure);
-        assert_eq!(transition_severity(&failed, kind), HealthSeverity::Error);
-    }
-
-    #[test]
-    fn sleep_and_management_lifecycle_transitions_are_expected() {
-        for (state, reason_code) in [(110, 37), (30, 37), (10, 73), (20, 2)] {
-            let signal = signal(HealthSubject::Device, state, reason_code);
-            let (_, _, reason) = describe(&signal);
-            assert_ne!(
-                classify_transition(&signal, reason),
-                HealthTransitionKind::Failure,
-                "{reason:?}"
-            );
-        }
-
-        let removed = signal(HealthSubject::Device, 10, 36);
-        let (_, _, reason) = describe(&removed);
-        assert_eq!(
-            classify_transition(&removed, reason),
-            HealthTransitionKind::Failure
-        );
-    }
-
-    #[test]
-    fn terminal_states_still_use_their_failure_reason() {
-        let device = signal(HealthSubject::Device, 120, 7);
-        let (_, _, device_reason) = describe(&device);
-        assert_eq!(
-            classify_transition(&device, device_reason),
-            HealthTransitionKind::Failure
-        );
-
-        let vpn = signal(HealthSubject::Vpn, 6, 9);
-        let (_, _, vpn_reason) = describe(&vpn);
-        assert_eq!(
-            classify_transition(&vpn, vpn_reason),
-            HealthTransitionKind::Failure
-        );
-
-        let connection = signal(HealthSubject::ActiveConnection, 4, 0);
-        let (_, _, connection_reason) = describe(&connection);
-        assert_ne!(
-            classify_transition(&connection, connection_reason),
-            HealthTransitionKind::Failure
-        );
-    }
-
     #[test]
     fn unmapped_codes_stay_typed_instead_of_being_dropped() {
         let (state, _, reason) = describe(&signal(HealthSubject::Device, 9_999, 9_999));

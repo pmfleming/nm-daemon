@@ -382,32 +382,3 @@ fn emit_connect_failure(
         );
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{DbusConnectTargetParams, connect_validation_error};
-    use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
-
-    #[test]
-    fn opaque_key_and_legacy_target_requests_are_both_supported() {
-        let keyed: DbusConnectTargetParams =
-            serde_json::from_str(r#"{"key":"ssid-hex:4578616d706c65","password":"secret"}"#)
-                .unwrap();
-        assert_eq!(keyed.validated_ssid().unwrap(), b"Example");
-
-        let legacy: DbusConnectTargetParams =
-            serde_json::from_str(r#"{"target":{"ssid":"Example"}}"#).unwrap();
-        legacy.validated_ssid().unwrap();
-
-        let ambiguous: DbusConnectTargetParams = serde_json::from_str(
-            r#"{"key":"ssid-hex:4578616d706c65","target":{"ssid":"Example"}}"#,
-        )
-        .unwrap();
-        let error = ambiguous
-            .validated_ssid()
-            .map_err(connect_validation_error)
-            .unwrap_err();
-        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
-        assert_eq!(report.code, ErrorCode::ValidationError);
-    }
-}

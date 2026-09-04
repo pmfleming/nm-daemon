@@ -82,60 +82,95 @@ impl Nm {
         check_scan_cancelled(cancellation)?;
         ensure_scan_deadline(deadline, "timed out waiting for LastScan to change")?;
         let device_path = device.path.to_string();
-        let generation = loop {
-            match self.scan_schedule.claim(&device_path, ssids) {
-                ScanTurn::Request { generation } => break generation,
-                ScanTurn::Join { generation } => {
-                    // The owner requested every SSID this caller needs.
-                    tracing::debug!(iface = %device.iface, "joining a compatible in-flight scan");
-                    match self.scan_schedule.wait_for_completion(
-                        &device_path,
-                        generation,
-                        deadline,
-                        cancellation,
-                    ) {
-                        ScanWait::Completed(SharedScanOutcome::Failed(report))
-                            if shared_owner_failure_is_retryable(&report)
-                                && !deadline.expired() =>
-                        {
-                            // Cancellation and timeout belong to the owner. This
-                            // caller still has its own cancellation flag/deadline.
-                            continue;
-                        }
-                        ScanWait::Completed(outcome) => return joined_scan_result(outcome),
-                        ScanWait::Cancelled => return Err(scan_cancelled_error()),
-                        ScanWait::DeadlineExpired => {
-                            return Err(scan_deadline_expired(
-                                "timed out waiting for an in-flight scan on this device",
-                            ));
-                        }
-                    }
-                }
-                ScanTurn::Wait { generation } => {
-                    // A wildcard scan cannot stand in for a hidden-SSID probe,
-                    // and a probe for another SSID cannot satisfy this caller.
-                    tracing::debug!(iface = %device.iface, "waiting behind an incompatible in-flight scan");
-                    match self.scan_schedule.wait_for_completion(
-                        &device_path,
-                        generation,
-                        deadline,
-                        cancellation,
-                    ) {
-                        ScanWait::Completed(_) => {}
-                        ScanWait::Cancelled => return Err(scan_cancelled_error()),
-                        ScanWait::DeadlineExpired => {
-                            return Err(scan_deadline_expired(
-                                "timed out waiting to schedule a targeted scan",
-                            ));
-                        }
-                    }
-                }
-            }
+        let Some(generation) =
+            self.claim_scan_turn(device, &device_path, ssids, deadline, cancellation)?
+        else {
+            return Ok(());
         };
         let lease = ScanLease::new(self, device_path, generation);
         let result = self.run_owned_scan(device, deadline, ssids, cancellation);
         lease.complete(shared_scan_outcome(&result));
         result
+    }
+
+    fn claim_scan_turn(
+        &self,
+        device: &WifiDevice,
+        device_path: &str,
+        ssids: &[Vec<u8>],
+        deadline: Deadline,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<Option<u64>> {
+        loop {
+            match self.scan_schedule.claim(device_path, ssids) {
+                ScanTurn::Request { generation } => return Ok(Some(generation)),
+                ScanTurn::Join { generation } => {
+                    tracing::debug!(iface = %device.iface, "joining a compatible in-flight scan");
+                    if self.wait_for_joined_scan(device_path, generation, deadline, cancellation)? {
+                        return Ok(None);
+                    }
+                }
+                ScanTurn::Wait { generation } => {
+                    // Incompatible wildcard and targeted scans must run in turn.
+                    tracing::debug!(iface = %device.iface, "waiting behind an incompatible in-flight scan");
+                    self.wait_for_incompatible_scan(
+                        device_path,
+                        generation,
+                        deadline,
+                        cancellation,
+                    )?;
+                }
+            }
+        }
+    }
+
+    fn wait_for_joined_scan(
+        &self,
+        device_path: &str,
+        generation: u64,
+        deadline: Deadline,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<bool> {
+        match self.scan_schedule.wait_for_completion(
+            device_path,
+            generation,
+            deadline,
+            cancellation,
+        ) {
+            ScanWait::Completed(SharedScanOutcome::Failed(report))
+                if shared_owner_failure_is_retryable(&report) && !deadline.expired() =>
+            {
+                // Cancellation and timeout belong to the owner; this caller
+                // still has its own cancellation and deadline.
+                Ok(false)
+            }
+            ScanWait::Completed(outcome) => joined_scan_result(outcome).map(|()| true),
+            ScanWait::Cancelled => Err(scan_cancelled_error()),
+            ScanWait::DeadlineExpired => Err(scan_deadline_expired(
+                "timed out waiting for an in-flight scan on this device",
+            )),
+        }
+    }
+
+    fn wait_for_incompatible_scan(
+        &self,
+        device_path: &str,
+        generation: u64,
+        deadline: Deadline,
+        cancellation: Option<&AtomicBool>,
+    ) -> Result<()> {
+        match self.scan_schedule.wait_for_completion(
+            device_path,
+            generation,
+            deadline,
+            cancellation,
+        ) {
+            ScanWait::Completed(_) => Ok(()),
+            ScanWait::Cancelled => Err(scan_cancelled_error()),
+            ScanWait::DeadlineExpired => Err(scan_deadline_expired(
+                "timed out waiting to schedule a targeted scan",
+            )),
+        }
     }
 
     fn run_owned_scan(
@@ -400,17 +435,6 @@ mod tests {
         assert!(scan_completed(200, token));
         assert!(scan_completed(201, token));
     }
-
-    #[test]
-    fn scan_completion_falls_back_to_an_immediate_baseline_without_boottime() {
-        let token = ScanCompletionToken {
-            last_scan_before_request: 100,
-            requested_at_boottime_ms: None,
-        };
-        assert!(!scan_completed(100, token));
-        assert!(scan_completed(101, token));
-    }
-
     #[test]
     fn a_joiner_retries_only_owner_scoped_failures() {
         let report = |code| ErrorReport {

@@ -51,7 +51,7 @@ pub(crate) fn start_watch(
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
     let interval_ms = params.interval_ms()?;
-    let requested = params.device.clone();
+    let requested = params.device;
     let device = runtime.call(ErrorOperation::Statistics, move |nm| {
         nm.statistics_device(requested.as_deref())
     })?;

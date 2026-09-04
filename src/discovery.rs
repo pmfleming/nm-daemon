@@ -191,28 +191,52 @@ fn browse(proxy: &Proxy<'_>, query: &ServiceQuery) -> Result<DiscoverySnapshot> 
         Err(error) => return Err(ensure_domain(ErrorOperation::Discovery, error.into())),
     };
 
-    let (records, mut response_flags) = reply;
+    let (records, response_flags) = reply;
+    let (instances, mut warnings) = browse_instances(records, &query.service_type);
+    let (services, response_flags) =
+        resolve_instances(proxy, query, instances, response_flags, &mut warnings);
+    Ok(DiscoverySnapshot {
+        services,
+        warnings,
+        ..empty_snapshot(query, response_flags)
+    })
+}
+
+fn browse_instances(
+    records: Vec<ResolvedRecord>,
+    service_type: &str,
+) -> (Vec<String>, Vec<String>) {
     let mut instances = Vec::new();
     let mut warnings = Vec::new();
     for (_, class, record_type, bytes) in records {
         if class != DNS_CLASS_IN || record_type != DNS_TYPE_PTR {
             continue;
         }
-        match ptr_instance(&bytes, &query.service_type, MDNS_DOMAIN) {
-            Some(instance) if !instances.contains(&instance) => {
-                if instances.len() == MAX_DISCOVERY_INSTANCES {
-                    warnings.push(format!(
-                        "limited DNS-SD resolution to {MAX_DISCOVERY_INSTANCES} instances"
-                    ));
-                    break;
-                }
-                instances.push(instance);
-            }
-            Some(_) => {}
-            None => warnings.push("ignored one malformed DNS-SD PTR record".to_string()),
+        let Some(instance) = ptr_instance(&bytes, service_type, MDNS_DOMAIN) else {
+            warnings.push("ignored one malformed DNS-SD PTR record".to_string());
+            continue;
+        };
+        if instances.contains(&instance) {
+            continue;
         }
+        if instances.len() == MAX_DISCOVERY_INSTANCES {
+            warnings.push(format!(
+                "limited DNS-SD resolution to {MAX_DISCOVERY_INSTANCES} instances"
+            ));
+            break;
+        }
+        instances.push(instance);
     }
+    (instances, warnings)
+}
 
+fn resolve_instances(
+    proxy: &Proxy<'_>,
+    query: &ServiceQuery,
+    instances: Vec<String>,
+    mut response_flags: u64,
+    warnings: &mut Vec<String>,
+) -> (Vec<DiscoveredService>, u64) {
     let mut services = Vec::new();
     for instance in instances {
         match resolve_one(proxy, query, &instance) {
@@ -226,10 +250,7 @@ fn browse(proxy: &Proxy<'_>, query: &ServiceQuery) -> Result<DiscoverySnapshot> 
             )),
         }
     }
-    let mut snapshot = empty_snapshot(query, response_flags);
-    snapshot.services = services;
-    snapshot.warnings = warnings;
-    Ok(snapshot)
+    (services, response_flags)
 }
 
 fn empty_snapshot(query: &ServiceQuery, response_flags: u64) -> DiscoverySnapshot {
@@ -289,10 +310,10 @@ fn empty_browse_error(error: &zbus::Error) -> bool {
 fn ptr_instance(record: &[u8], service_type: &str, domain: &str) -> Option<String> {
     let mut offset = 0;
     dns_labels(record, &mut offset)?;
-    let record_type = take_u16(record, &mut offset)?;
-    let record_class = take_u16(record, &mut offset)?;
-    take_u32(record, &mut offset)?;
-    let data_length = usize::from(take_u16(record, &mut offset)?);
+    let record_type = u16::from_be_bytes(take_bytes(record, &mut offset)?);
+    let record_class = u16::from_be_bytes(take_bytes(record, &mut offset)?);
+    take_bytes::<4>(record, &mut offset)?;
+    let data_length = usize::from(u16::from_be_bytes(take_bytes(record, &mut offset)?));
     let data_end = offset.checked_add(data_length)?;
     if record_type != DNS_TYPE_PTR || record_class != DNS_CLASS_IN || data_end != record.len() {
         return None;
@@ -335,16 +356,9 @@ fn dns_labels(bytes: &[u8], offset: &mut usize) -> Option<Vec<Vec<u8>>> {
     }
 }
 
-fn take_u16(bytes: &[u8], offset: &mut usize) -> Option<u16> {
-    let end = offset.checked_add(2)?;
-    let value = u16::from_be_bytes(bytes.get(*offset..end)?.try_into().ok()?);
-    *offset = end;
-    Some(value)
-}
-
-fn take_u32(bytes: &[u8], offset: &mut usize) -> Option<u32> {
-    let end = offset.checked_add(4)?;
-    let value = u32::from_be_bytes(bytes.get(*offset..end)?.try_into().ok()?);
+fn take_bytes<const N: usize>(bytes: &[u8], offset: &mut usize) -> Option<[u8; N]> {
+    let end = offset.checked_add(N)?;
+    let value = bytes.get(*offset..end)?.try_into().ok()?;
     *offset = end;
     Some(value)
 }

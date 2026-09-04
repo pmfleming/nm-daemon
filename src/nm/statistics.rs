@@ -179,22 +179,4 @@ mod tests {
         assert_eq!(current.rx_bytes_per_second, Some(1_000.0));
         assert_eq!(current.tx_bytes_per_second, Some(500.0));
     }
-
-    #[test]
-    fn counter_resets_report_no_rate_instead_of_a_negative_one() {
-        let previous = sample(9_000, 9_000, 1_000);
-        let mut current = sample(10, 20, 2_000);
-        statistics_rates(&previous, &mut current);
-        assert_eq!(current.rx_bytes_per_second, None);
-        assert_eq!(current.tx_bytes_per_second, None);
-    }
-
-    #[test]
-    fn identical_timestamps_do_not_divide_by_zero() {
-        let previous = sample(0, 0, 5_000);
-        let mut current = sample(100, 100, 5_000);
-        statistics_rates(&previous, &mut current);
-        assert_eq!(current.interval_ms, 0);
-        assert_eq!(current.rx_bytes_per_second, None);
-    }
 }

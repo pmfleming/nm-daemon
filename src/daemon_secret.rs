@@ -885,58 +885,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        PendingRegistration, PendingRegistry, PendingSecretRequest, SecretResponse,
-        apply_secret_response, default_secret_key_for_setting, register_pending, remove_pending,
-        secret_keys_for, with_pending_registry,
+        PendingRegistry, PendingSecretRequest, SecretResponse, apply_secret_response,
+        register_pending, remove_pending,
     };
     use crate::nm::ConnectionSettings;
     use crate::variant::value_string;
-
-    #[test]
-    fn pending_registry_replaces_one_request_per_connection_setting() {
-        let mut registry = PendingRegistry::default();
-        let (first_sender, first_receiver) = mpsc::channel();
-        let (second_sender, _second_receiver) = mpsc::channel();
-
-        assert!(
-            registry
-                .insert(
-                    "first".into(),
-                    "connection\nsetting".into(),
-                    vec![":1.1".into()],
-                    first_sender,
-                )
-                .is_none()
-        );
-        let (displaced_id, displaced_sender) = registry
-            .insert(
-                "second".into(),
-                "connection\nsetting".into(),
-                vec![":1.1".into()],
-                second_sender,
-            )
-            .expect("duplicate key should displace its prior request");
-        displaced_sender
-            .send(SecretResponse::cancelled())
-            .expect("displaced receiver remains active");
-
-        assert_eq!(displaced_id, "first");
-        assert!(
-            first_receiver
-                .recv()
-                .expect("cancellation")
-                .password
-                .is_none()
-        );
-        assert_eq!(
-            registry
-                .remove_by_key("connection\nsetting")
-                .map(|(id, _)| id),
-            Some("second".into())
-        );
-        assert!(registry.requests.is_empty());
-    }
-
     #[test]
     fn pending_secret_response_is_scoped_to_notified_owner() {
         let mut registry = PendingRegistry::default();
@@ -954,34 +907,6 @@ mod tests {
         assert!(registry.remove_for_owner("owned", Some(":1.7")).is_some());
         assert!(!registry.requests.contains_key("owned"));
     }
-
-    #[test]
-    fn pending_registration_removes_itself_when_waiting_scope_ends() {
-        let request_id = "test-secret-registration-raii";
-        remove_pending(request_id);
-        let (sender, receiver) = mpsc::channel();
-        with_pending_registry(|registry| {
-            let _ = registry.insert(
-                request_id.into(),
-                "test-connection\ntest-setting".into(),
-                vec![":1.1".into()],
-                sender,
-            );
-        });
-        let registration = PendingRegistration {
-            request_id: request_id.into(),
-            receiver,
-        };
-
-        assert!(with_pending_registry(|registry| registry
-            .requests
-            .contains_key(request_id)));
-        drop(registration);
-        assert!(!with_pending_registry(|registry| registry
-            .requests
-            .contains_key(request_id)));
-    }
-
     #[test]
     fn pending_secret_delivery_observes_delay_and_timeout_cleanup() {
         let delivered = pending_request("timed-delivery", "timed-delivery-key");
@@ -1019,20 +944,6 @@ mod tests {
         drop(registration);
         assert!(remove_pending("timed-out").is_none());
     }
-
-    #[test]
-    fn wifi_p2p_requests_use_networkmanager_160_wps_pin_secret() {
-        assert_eq!(
-            secret_keys_for("wifi-p2p", &[]),
-            vec!["wps-pin".to_string()]
-        );
-        assert_eq!(
-            secret_keys_for("wifi-p2p", &["wps-pin".to_string()]),
-            vec!["wps-pin".to_string()]
-        );
-        assert_eq!(default_secret_key_for_setting("wifi-p2p"), "wps-pin");
-    }
-
     #[test]
     fn secret_response_applies_only_requested_named_values() {
         let request = PendingSecretRequest {

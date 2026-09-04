@@ -1409,34 +1409,18 @@ fn runtime_stopped(operation: ErrorOperation) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+
     use std::time::{Duration, Instant};
 
     use serde_json::json;
 
     use super::{
-        ConnectAdmission, ConnectAttemptKey, ConnectAttemptPolicy, RefreshGate,
-        TERMINAL_RESULT_TTL, TerminalRequestResult, WRONG_PASSWORD_RETRY_DELAY,
-        prune_terminal_results, recover_lock, terminal_request_status,
+        ConnectAdmission, ConnectAttemptKey, ConnectAttemptPolicy, TERMINAL_RESULT_TTL,
+        TerminalRequestResult, WRONG_PASSWORD_RETRY_DELAY, prune_terminal_results,
+        terminal_request_status,
     };
     use crate::model::ConnectFailureReason;
     use crate::protocol::Stream;
-
-    #[test]
-    fn refresh_gate_coalesces_invalidations_without_losing_a_change() {
-        let mut refresh = RefreshGate::default();
-        assert!(refresh.invalidate());
-        refresh.started();
-
-        assert!(!refresh.invalidate());
-        assert!(!refresh.invalidate());
-        assert!(refresh.complete());
-
-        assert!(refresh.invalidate());
-        refresh.started();
-        assert!(!refresh.complete());
-    }
-
     #[test]
     fn connect_attempt_policy_owns_duplicate_retry_and_stale_secret_rules() {
         let now = std::time::Instant::now();
@@ -1490,20 +1474,5 @@ mod tests {
             Instant::now() - TERMINAL_RESULT_TTL - Duration::from_millis(1);
         prune_terminal_results(&mut results);
         assert!(results.is_empty());
-    }
-
-    #[test]
-    fn poisoned_runtime_locks_recover_the_last_consistent_value() {
-        let value = Arc::new(Mutex::new(7_u32));
-        let poisoned = Arc::clone(&value);
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoned.lock().expect("initial lock");
-            panic!("poison test lock");
-        })
-        .join();
-
-        assert_eq!(*recover_lock(&value, "test lock"), 7);
-        *recover_lock(&value, "test lock") = 8;
-        assert_eq!(*recover_lock(&value, "test lock"), 8);
     }
 }

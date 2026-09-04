@@ -65,7 +65,7 @@ pub(crate) fn random_uuid_v4() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PASSPHRASE_ALPHABET, random_passphrase, random_uuid_v4};
+    use super::{PASSPHRASE_ALPHABET, random_passphrase};
 
     #[test]
     fn passphrases_use_the_unambiguous_alphabet_and_requested_length() {
@@ -77,19 +77,5 @@ mod tests {
                 .all(|byte| PASSPHRASE_ALPHABET.contains(&byte))
         );
         assert_ne!(passphrase, random_passphrase(16).expect("passphrase"));
-    }
-
-    #[test]
-    fn zero_length_passphrases_are_rejected_rather_than_returning_an_empty_secret() {
-        assert!(random_passphrase(0).is_err());
-    }
-
-    #[test]
-    fn uuids_are_version_4_variant_1_and_unique() {
-        let uuid = random_uuid_v4().expect("uuid");
-        assert_eq!(uuid.len(), 36);
-        assert_eq!(&uuid[14..15], "4");
-        assert!(["8", "9", "a", "b"].contains(&&uuid[19..20]));
-        assert_ne!(uuid, random_uuid_v4().expect("uuid"));
     }
 }

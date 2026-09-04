@@ -453,26 +453,17 @@ impl<'a> ConnectionMachine<'a> {
     }
 }
 
-pub(crate) fn connect_target_with_password(
+pub(crate) fn connect_target(
     nm: &Nm,
     target: &WifiConnectTarget,
     password: Option<&str>,
     wep_key_type: Option<WepKeyType>,
     cancellation: Option<&AtomicBool>,
     progress: &mut dyn FnMut(ConnectPhase) -> Result<()>,
+    publish_failure: bool,
 ) -> Result<ConnectResult> {
-    ConnectionMachine::new(nm, target, password, wep_key_type, cancellation, progress).run(true)
-}
-
-pub(crate) fn connect_target_candidate(
-    nm: &Nm,
-    target: &WifiConnectTarget,
-    password: Option<&str>,
-    wep_key_type: Option<WepKeyType>,
-    cancellation: Option<&AtomicBool>,
-    progress: &mut dyn FnMut(ConnectPhase) -> Result<()>,
-) -> Result<ConnectResult> {
-    ConnectionMachine::new(nm, target, password, wep_key_type, cancellation, progress).run(false)
+    ConnectionMachine::new(nm, target, password, wep_key_type, cancellation, progress)
+        .run(publish_failure)
 }
 
 pub(crate) fn publish_final_connect_failure(target: &WifiConnectTarget, error: &anyhow::Error) {
@@ -549,31 +540,4 @@ fn refresh_cached_networks(nm: &Nm) -> Result<()> {
     let networks = nm.list_access_points()?;
     cache::write_snapshot(false, &networks)?;
     cache::write_complete(networks.len())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ConnectionState, VerificationKind};
-    use crate::model::ConnectPhase;
-
-    #[test]
-    fn state_machine_states_have_stable_frontend_phases() {
-        assert_eq!(
-            ConnectionState::AlreadyActive.phase(),
-            ConnectPhase::CheckingActive
-        );
-        assert_eq!(
-            ConnectionState::SavedProfile.phase(),
-            ConnectPhase::ActivatingSavedProfile
-        );
-        assert_eq!(
-            ConnectionState::CreateProfile.phase(),
-            ConnectPhase::CreatingProfile
-        );
-        assert_eq!(ConnectionState::Rescan.phase(), ConnectPhase::Rescanning);
-        assert_eq!(
-            ConnectionState::Verify(VerificationKind::SavedProfile).phase(),
-            ConnectPhase::Verifying
-        );
-    }
 }

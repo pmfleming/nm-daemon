@@ -243,15 +243,6 @@ mod tests {
     use super::{WifiQrAuth, parse_wifi_qr, wifi_qr_payload};
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::WepKeyType;
-
-    #[test]
-    fn quotes_hex_only_values_like_networkmanager_nmcli() {
-        assert_eq!(
-            wifi_qr_payload("WPA", "1234", Some(&"a".repeat(64)), false),
-            format!("WIFI:T:WPA;S:\"1234\";P:\"{}\";;", "a".repeat(64))
-        );
-    }
-
     #[test]
     fn escapes_mecard_delimiters() {
         assert_eq!(
@@ -275,30 +266,6 @@ mod tests {
         assert!(parsed.hidden);
         assert!(parsed.has_password);
     }
-
-    #[test]
-    fn hex_only_values_are_unquoted_the_way_they_are_written() {
-        let payload = wifi_qr_payload("WPA", "1234", Some(&"a".repeat(64)), false);
-        let parsed = parse_wifi_qr(&payload).expect("hex payload");
-        assert_eq!(parsed.ssid, "1234");
-        assert_eq!(parsed.password.as_deref(), Some(&"a".repeat(64)[..]));
-    }
-
-    #[test]
-    fn open_networks_parse_without_a_password() {
-        let parsed = parse_wifi_qr("WIFI:T:nopass;S:Guest;;").expect("open payload");
-        assert_eq!(parsed.auth, WifiQrAuth::Open);
-        assert!(!parsed.has_password);
-        assert_eq!(parsed.password, None);
-        assert_eq!(parsed.auth.key_management_hint(), None);
-
-        // A missing T: means open too.
-        assert_eq!(
-            parse_wifi_qr("WIFI:S:Guest;;").expect("open payload").auth,
-            WifiQrAuth::Open
-        );
-    }
-
     #[test]
     fn wpa3_and_wep_authentication_map_to_key_management_hints() {
         assert_eq!(

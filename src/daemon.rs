@@ -326,7 +326,7 @@ mod tests {
             )
             .unwrap();
         let nm = Nm::with_connection_runner_destination_and_telemetry(
-            networkmanager.client.clone(),
+            networkmanager.client,
             Arc::new(SystemCommandRunner),
             ":1.0",
             Arc::new(UnavailableWirelessTelemetry),

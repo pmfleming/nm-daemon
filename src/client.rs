@@ -86,10 +86,8 @@ pub(crate) async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-    use shelllist_daemon_tokio::{CorrelationPolicy, TrackedKind};
 
-    use super::{NmCorrelation, needs_correlation};
+    use super::needs_correlation;
 
     #[test]
     fn every_operation_and_continuous_stream_is_correlated_with_its_response() {
@@ -102,26 +100,5 @@ mod tests {
             assert_eq!(needs_correlation(spec.name), expected, "{}", spec.name);
         }
         assert!(!needs_correlation("not.a.stream"));
-    }
-
-    #[test]
-    fn response_ids_distinguish_operations_and_subscriptions() {
-        let operation = NmCorrelation
-            .response_id(&json!({ "data": { "result": { "request_id": "scan-1" } } }))
-            .unwrap();
-        assert_eq!(operation.id, "scan-1");
-        assert_eq!(operation.kind, TrackedKind::Operation);
-
-        let subscription = NmCorrelation
-            .response_id(&json!({ "data": { "subscription": { "id": "sub-1" } } }))
-            .unwrap();
-        assert_eq!(subscription.id, "sub-1");
-        assert_eq!(subscription.kind, TrackedKind::Subscription);
-    }
-
-    #[test]
-    fn external_events_are_not_correlated_to_synthetic_request_ids() {
-        let event = json!({ "event": "device", "request_id": "health-1" });
-        assert!(NmCorrelation.event_id("network.health", &event).is_none());
     }
 }

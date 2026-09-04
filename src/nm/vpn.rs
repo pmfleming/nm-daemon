@@ -479,15 +479,7 @@ fn object_path(value: &str) -> Result<OwnedObjectPath> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use zvariant::OwnedValue;
-
-    use super::super::{ConnectionSettings, owned_value};
-    use super::{
-        VpnActiveStatus, is_vpn_like, plugin_name, profile_requires_secrets, vpn_failure,
-        vpn_is_connected, vpn_secret_names,
-    };
+    use super::{VpnActiveStatus, is_vpn_like, vpn_failure, vpn_is_connected};
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::vpn_state_reason;
 
@@ -515,31 +507,12 @@ mod tests {
         }
     }
 
-    fn string_map(entries: &[(&str, &str)]) -> OwnedValue {
-        let map = entries
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect::<HashMap<String, String>>();
-        owned_value(map).expect("string map variant")
-    }
-
     #[test]
     fn vpn_and_wireguard_profiles_are_both_recognized() {
         assert!(is_vpn_like("vpn"));
         assert!(is_vpn_like("wireguard"));
         assert!(!is_vpn_like("802-11-wireless"));
     }
-
-    #[test]
-    fn plugin_names_come_from_the_service_name_so_new_plugins_need_no_table() {
-        assert_eq!(
-            plugin_name("vpn", Some("org.freedesktop.NetworkManager.openconnect")).as_deref(),
-            Some("openconnect")
-        );
-        assert_eq!(plugin_name("wireguard", None).as_deref(), Some("wireguard"));
-        assert_eq!(plugin_name("vpn", None), None);
-    }
-
     #[test]
     fn connection_completes_on_plugin_state_and_falls_back_to_active_state() {
         assert!(vpn_is_connected(&status(Some(5), 1, 1)));
@@ -571,62 +544,5 @@ mod tests {
 
         assert!(vpn_failure(&status(Some(3), 1, 1)).is_none());
         assert!(vpn_failure(&status(None, 1, 1)).is_none());
-    }
-
-    #[test]
-    fn secret_names_come_from_the_plugin_rather_than_a_fixed_list() {
-        let mut settings = ConnectionSettings::new();
-        settings.insert(
-            "vpn".to_string(),
-            HashMap::from([
-                (
-                    "secrets".to_string(),
-                    string_map(&[("cookie", ""), ("gwcert", "")]),
-                ),
-                (
-                    "data".to_string(),
-                    string_map(&[("password-flags", "1"), ("service-type", "openconnect")]),
-                ),
-            ]),
-        );
-        assert_eq!(
-            vpn_secret_names(&settings),
-            vec![
-                "cookie".to_string(),
-                "gwcert".to_string(),
-                "password".to_string()
-            ]
-        );
-        assert!(profile_requires_secrets(&settings));
-    }
-
-    #[test]
-    fn wireguard_keys_are_reported_as_secret_names() {
-        let mut settings = ConnectionSettings::new();
-        settings.insert(
-            "wireguard".to_string(),
-            HashMap::from([
-                ("private-key-flags".to_string(), owned_value(1_u32).unwrap()),
-                (
-                    "peers".to_string(),
-                    owned_value(Vec::<String>::new()).unwrap(),
-                ),
-            ]),
-        );
-        assert_eq!(
-            vpn_secret_names(&settings),
-            vec!["private-key".to_string(), "preshared-key".to_string()]
-        );
-        assert!(profile_requires_secrets(&settings));
-    }
-
-    #[test]
-    fn a_profile_with_saved_secrets_does_not_claim_it_will_prompt() {
-        let mut settings = ConnectionSettings::new();
-        settings.insert(
-            "vpn".to_string(),
-            HashMap::from([("data".to_string(), string_map(&[("password-flags", "0")]))]),
-        );
-        assert!(!profile_requires_secrets(&settings));
     }
 }

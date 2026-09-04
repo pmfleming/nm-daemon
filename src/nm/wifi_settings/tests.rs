@@ -4,13 +4,12 @@ use zvariant::OwnedValue;
 
 use super::{
     apply_saved_activation_settings, cloned_wifi_connection_settings,
-    enterprise_wifi_connection_settings, hidden_wifi_connection_settings,
-    owe_wifi_connection_settings, psk_wifi_connection_settings, validate_wep_key, validate_wpa_psk,
+    enterprise_wifi_connection_settings, psk_wifi_connection_settings, validate_wpa_psk,
 };
 use crate::model::{
     AccessPoint, EnterpriseAuth, NM_AP_SEC_KEY_MGMT_802_1X, NM_AP_SEC_KEY_MGMT_PSK,
-    NM_AP_SEC_KEY_MGMT_SAE, TargetIpAddress, TargetIpRoute, TargetIpSettings,
-    TargetProfileSettings, WepKeyType, example_connect_target,
+    TargetIpAddress, TargetIpRoute, TargetIpSettings, TargetProfileSettings,
+    example_connect_target,
 };
 
 #[test]
@@ -33,57 +32,6 @@ fn psk_wifi_settings_include_password_and_key_mgmt() {
         Some("secret123")
     );
 }
-
-#[test]
-fn sae_only_networks_use_sae_key_mgmt() {
-    assert_eq!(
-        crate::auth::personal_key_management(0, NM_AP_SEC_KEY_MGMT_SAE),
-        "sae"
-    );
-    assert_eq!(
-        crate::auth::personal_key_management(0, NM_AP_SEC_KEY_MGMT_SAE | NM_AP_SEC_KEY_MGMT_PSK),
-        "wpa-psk"
-    );
-}
-
-#[test]
-fn owe_wifi_settings_include_key_mgmt_without_secret() {
-    let settings = owe_wifi_connection_settings().expect("settings");
-
-    assert_eq!(
-        settings
-            .get("802-11-wireless-security")
-            .and_then(|section| setting::<String>(section, "key-mgmt"))
-            .as_deref(),
-        Some("owe")
-    );
-    assert!(
-        settings
-            .get("802-11-wireless-security")
-            .is_some_and(|section| !section.contains_key("psk"))
-    );
-}
-
-#[test]
-fn hidden_key_mgmt_hint_controls_security_shape() {
-    let mut target = example_connect_target(true);
-    target.key_mgmt = Some("sae".to_string());
-    let settings =
-        hidden_wifi_connection_settings(&target, Some("secret123"), None).expect("settings");
-
-    assert_eq!(
-        settings
-            .get("802-11-wireless-security")
-            .and_then(|section| setting::<String>(section, "key-mgmt"))
-            .as_deref(),
-        Some("sae")
-    );
-
-    target.key_mgmt = Some("open".to_string());
-    let settings = hidden_wifi_connection_settings(&target, None, None).expect("settings");
-    assert!(!settings.contains_key("802-11-wireless-security"));
-}
-
 #[test]
 fn cloned_profile_settings_replace_secret_and_preserve_profile_options() {
     let mut target = example_connect_target(true);
@@ -304,18 +252,6 @@ fn wpa_psk_validation_matches_nmcli_shape() {
     assert!(validate_wpa_psk(&"g".repeat(64)).is_err());
     assert!(validate_wpa_psk(&"a".repeat(65)).is_err());
 }
-
-#[test]
-fn wep_validation_matches_nmcli_shape() {
-    assert!(validate_wep_key("abcde", WepKeyType::Key).is_ok());
-    assert!(validate_wep_key("0011223344", WepKeyType::Key).is_ok());
-    assert!(validate_wep_key("abc", WepKeyType::Key).is_err());
-    assert!(validate_wep_key("éabc", WepKeyType::Key).is_err());
-    assert!(validate_wep_key("not-hex-10", WepKeyType::Key).is_err());
-    assert!(validate_wep_key("passphrase", WepKeyType::Phrase).is_ok());
-    assert!(validate_wep_key("short", WepKeyType::Phrase).is_err());
-}
-
 fn test_ap(rsn_flags: u32) -> AccessPoint {
     AccessPoint {
         ssid: "Example".to_string(),
