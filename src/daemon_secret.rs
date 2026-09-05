@@ -24,6 +24,10 @@ const AGENT_MANAGER_PATH: &str = "/org/freedesktop/NetworkManager/AgentManager";
 const AGENT_MANAGER_IFACE: &str = "org.freedesktop.NetworkManager.AgentManager";
 const SECRET_AGENT_ID: &str = "nm-daemon";
 
+// NM_SECRET_AGENT_GET_SECRETS_FLAG_*
+const ALLOW_INTERACTION: u32 = 0x1;
+const REQUEST_NEW: u32 = 0x2;
+
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 static PENDING: OnceLock<Mutex<PendingRegistry>> = OnceLock::new();
 
@@ -85,17 +89,19 @@ fn register_with_capabilities(manager: &Proxy<'_>) -> Result<bool> {
 impl SecretAgentInterface {
     fn get_secrets(
         &self,
-        mut connection: ConnectionSettings,
+        connection: ConnectionSettings,
         connection_path: OwnedObjectPath,
         setting_name: &str,
         hints: Vec<String>,
         flags: u32,
     ) -> zbus::fdo::Result<ConnectionSettings> {
         let request = PendingSecretRequest::new(connection_path, setting_name, hints, flags);
-        if apply_stored_secret(&request, &mut connection)? {
-            return Ok(connection);
-        }
-        wait_for_secret_response(&self.runtime, request, connection)
+        resolve_secret_request(
+            request,
+            connection,
+            apply_stored_secret,
+            |request, connection| wait_for_secret_response(&self.runtime, request, connection),
+        )
     }
 
     fn cancel_get_secrets(&self, connection_path: OwnedObjectPath, setting_name: &str) {
@@ -114,6 +120,28 @@ impl SecretAgentInterface {
     fn delete_secrets(&self, connection: ConnectionSettings, connection_path: OwnedObjectPath) {
         delete_connection_secrets(&connection_path, &connection);
     }
+}
+
+fn resolve_secret_request(
+    request: PendingSecretRequest,
+    mut connection: ConnectionSettings,
+    stored: impl FnOnce(&PendingSecretRequest, &mut ConnectionSettings) -> zbus::fdo::Result<bool>,
+    interact: impl FnOnce(
+        PendingSecretRequest,
+        ConnectionSettings,
+    ) -> zbus::fdo::Result<ConnectionSettings>,
+) -> zbus::fdo::Result<ConnectionSettings> {
+    // A fresh request must not reuse a password NetworkManager already rejected.
+    if request.flags & REQUEST_NEW == 0 && stored(&request, &mut connection)? {
+        return Ok(connection);
+    }
+    // Fail before registering a pending request or emitting a frontend event.
+    if request.flags & ALLOW_INTERACTION == 0 {
+        return Err(zbus::fdo::Error::Failed(
+            "no usable stored secret and interaction is prohibited".to_string(),
+        ));
+    }
+    interact(request, connection)
 }
 
 fn apply_stored_secret(
@@ -314,8 +342,8 @@ fn emit_secret_requested(runtime: &Weak<DaemonRuntime>, request: &PendingSecretR
 /// secret that must not be offered for saving.
 fn secret_flag_details(flags: u32) -> Value {
     json!({
-        "allow_interaction": flags & 0x1 != 0,
-        "request_new": flags & 0x2 != 0,
+        "allow_interaction": flags & ALLOW_INTERACTION != 0,
+        "request_new": flags & REQUEST_NEW != 0,
         "user_requested": flags & 0x4 != 0,
         "wps_pbc": flags & 0x8 != 0,
         "only_system": flags & 0x80000000_u32 != 0,
@@ -890,6 +918,57 @@ mod tests {
     };
     use crate::nm::ConnectionSettings;
     use crate::variant::value_string;
+    #[test]
+    fn secret_request_respects_flags_before_lookup_or_interaction() {
+        for flags in 0..=7 {
+            for stored_available in [false, true] {
+                let mut request = pending_request("flag-policy", "flag-policy-key");
+                request.flags = flags;
+                let mut looked_up = false;
+                let mut prompted = false;
+                let result = super::resolve_secret_request(
+                    request,
+                    ConnectionSettings::new(),
+                    |request, connection| {
+                        looked_up = true;
+                        if stored_available {
+                            super::apply_password(
+                                connection,
+                                &request.setting_name,
+                                "psk",
+                                "stored".into(),
+                            )?;
+                        }
+                        Ok(stored_available)
+                    },
+                    |request, mut connection| {
+                        prompted = true;
+                        super::apply_password(
+                            &mut connection,
+                            &request.setting_name,
+                            "psk",
+                            "fresh".into(),
+                        )?;
+                        Ok(connection)
+                    },
+                );
+                let use_stored = flags & super::REQUEST_NEW == 0 && stored_available;
+                let should_prompt = !use_stored && flags & super::ALLOW_INTERACTION != 0;
+                assert_eq!(looked_up, flags & super::REQUEST_NEW == 0);
+                assert_eq!(prompted, should_prompt);
+                if use_stored || should_prompt {
+                    let connection = result.unwrap();
+                    assert_eq!(
+                        value_string(&connection["802-11-wireless-security"]["psk"]).as_deref(),
+                        Some(if use_stored { "stored" } else { "fresh" }),
+                    );
+                } else {
+                    assert!(matches!(result, Err(zbus::fdo::Error::Failed(_))));
+                }
+            }
+        }
+    }
+
     #[test]
     fn pending_secret_response_is_scoped_to_notified_owner() {
         let mut registry = PendingRegistry::default();
