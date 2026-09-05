@@ -589,44 +589,44 @@ fn dbus_name_is_not_found(name: &str) -> bool {
 mod tests {
     use super::{DomainError, ErrorCode, ErrorOperation, ErrorReport, ErrorSource, ensure_domain};
     #[test]
-    fn typed_errors_preserve_operation_source_and_details() {
-        let error: anyhow::Error =
-            DomainError::validation(ErrorOperation::ParseRequest, "missing field `target`")
-                .with_detail("field", "target")
-                .into();
-        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
-        assert_eq!(report.code, ErrorCode::ValidationError);
-        assert_eq!(report.operation, ErrorOperation::ParseRequest);
-        assert_eq!(report.source, ErrorSource::Validation);
-        assert_eq!(report.details["field"], "target");
-    }
-
-    #[test]
-    fn concrete_io_errors_are_classified_without_message_searching() {
-        let error = ensure_domain(
-            ErrorOperation::Networks,
-            std::io::Error::new(std::io::ErrorKind::TimedOut, "arbitrary").into(),
-        );
-        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
-        assert_eq!(report.code, ErrorCode::Timeout);
-        assert_eq!(report.source, ErrorSource::Io);
-    }
-
-    #[test]
-    fn dbus_source_is_only_networkmanager_unavailable_for_networkmanager_operations() {
-        let status_error = ensure_domain(
-            ErrorOperation::Status,
-            zbus::Error::Failure("arbitrary".to_string()).into(),
-        );
-        let status_report = ErrorReport::from_error(&status_error, ErrorOperation::Unknown);
-        assert_eq!(status_report.code, ErrorCode::NetworkmanagerUnavailable);
-
-        let event_error = ensure_domain(
-            ErrorOperation::EmitEvent,
-            zbus::Error::Failure("NetworkManager D-Bus timeout".to_string()).into(),
-        );
-        let event_report = ErrorReport::from_error(&event_error, ErrorOperation::Unknown);
-        assert_eq!(event_report.code, ErrorCode::InternalError);
-        assert_eq!(event_report.source, ErrorSource::Dbus);
+    fn reports_preserve_typed_errors_and_classify_sources_in_operation_context() {
+        let cases: [(ErrorOperation, anyhow::Error, ErrorCode, ErrorSource); 4] = [
+            (
+                ErrorOperation::ParseRequest,
+                DomainError::validation(ErrorOperation::ParseRequest, "missing field `target`")
+                    .with_detail("field", "target")
+                    .into(),
+                ErrorCode::ValidationError,
+                ErrorSource::Validation,
+            ),
+            (
+                ErrorOperation::Networks,
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "arbitrary").into(),
+                ErrorCode::Timeout,
+                ErrorSource::Io,
+            ),
+            (
+                ErrorOperation::Status,
+                zbus::Error::Failure("arbitrary".into()).into(),
+                ErrorCode::NetworkmanagerUnavailable,
+                ErrorSource::Dbus,
+            ),
+            (
+                ErrorOperation::EmitEvent,
+                zbus::Error::Failure("NetworkManager D-Bus timeout".into()).into(),
+                ErrorCode::InternalError,
+                ErrorSource::Dbus,
+            ),
+        ];
+        for (operation, error, code, source) in cases {
+            let report =
+                ErrorReport::from_error(&ensure_domain(operation, error), ErrorOperation::Unknown);
+            assert_eq!(report.code, code, "{operation:?}");
+            assert_eq!(report.operation, operation);
+            assert_eq!(report.source, source);
+            if operation == ErrorOperation::ParseRequest {
+                assert_eq!(report.details["field"], "target");
+            }
+        }
     }
 }

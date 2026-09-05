@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn advanced_updates_write_only_the_fields_that_were_sent() {
+    fn advanced_updates_preserve_unsent_fields_and_can_clear_restrictions() {
         let mut settings = settings();
         let update = WifiProfileAdvancedUpdate {
             autoconnect_priority: Some(30),
@@ -542,21 +542,7 @@ mod tests {
             i32::try_from(settings["ipv6"]["ip6-privacy"].clone()).unwrap(),
             2
         );
-    }
 
-    #[test]
-    fn empty_strings_clear_a_restriction_and_automatic_band_clears_the_channel() {
-        let mut settings = settings();
-        apply_advanced(
-            &mut settings,
-            &WifiProfileAdvancedUpdate {
-                bssid: Some("00:11:22:33:44:55".to_string()),
-                band: Some(WifiBand::Ghz5),
-                channel: Some(36),
-                ..WifiProfileAdvancedUpdate::default()
-            },
-        )
-        .expect("initial update");
         apply_advanced(
             &mut settings,
             &WifiProfileAdvancedUpdate {
@@ -573,45 +559,33 @@ mod tests {
         assert!(!wireless.contains_key("channel"));
     }
     #[test]
-    fn insecure_or_unknown_modes_and_eap_methods_are_rejected() {
+    fn rejects_insecure_modes_unknown_eap_methods_and_unsupported_certificate_uris() {
         assert!(validate_mode("infrastructure").is_ok());
         assert!(validate_mode("ap").is_ok());
         assert!(validate_mode("adhoc").is_err());
 
-        let mut settings = settings();
-        let error = apply_advanced(
-            &mut settings,
-            &WifiProfileAdvancedUpdate {
-                enterprise: Some(ProfileEnterpriseUpdate {
-                    eap: Some(vec!["tls".to_string(), "not-a-method".to_string()]),
-                    ..ProfileEnterpriseUpdate::default()
-                }),
-                ..WifiProfileAdvancedUpdate::default()
+        for enterprise in [
+            ProfileEnterpriseUpdate {
+                eap: Some(vec!["tls".into(), "not-a-method".into()]),
+                ..Default::default()
             },
-        )
-        .unwrap_err();
-        assert_eq!(
-            ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
-            ErrorCode::ValidationError
-        );
-    }
-    #[test]
-    fn certificate_references_must_be_a_supported_uri() {
-        let mut settings = settings();
-        let error = apply_advanced(
-            &mut settings,
-            &WifiProfileAdvancedUpdate {
-                enterprise: Some(ProfileEnterpriseUpdate {
-                    ca_cert: Some("/etc/ssl/ca.pem".to_string()),
-                    ..ProfileEnterpriseUpdate::default()
-                }),
-                ..WifiProfileAdvancedUpdate::default()
+            ProfileEnterpriseUpdate {
+                ca_cert: Some("/etc/ssl/ca.pem".into()),
+                ..Default::default()
             },
-        )
-        .unwrap_err();
-        assert_eq!(
-            ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
-            ErrorCode::ValidationError
-        );
+        ] {
+            let error = apply_advanced(
+                &mut settings(),
+                &WifiProfileAdvancedUpdate {
+                    enterprise: Some(enterprise),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
+                ErrorCode::ValidationError
+            );
+        }
     }
 }

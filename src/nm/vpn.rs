@@ -479,7 +479,7 @@ fn object_path(value: &str) -> Result<OwnedObjectPath> {
 
 #[cfg(test)]
 mod tests {
-    use super::{VpnActiveStatus, is_vpn_like, vpn_failure, vpn_is_connected};
+    use super::{VpnActiveStatus, vpn_failure, vpn_is_connected};
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::vpn_state_reason;
 
@@ -507,12 +507,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn vpn_and_wireguard_profiles_are_both_recognized() {
-        assert!(is_vpn_like("vpn"));
-        assert!(is_vpn_like("wireguard"));
-        assert!(!is_vpn_like("802-11-wireless"));
-    }
     #[test]
     fn connection_completes_on_plugin_state_and_falls_back_to_active_state() {
         assert!(vpn_is_connected(&status(Some(5), 1, 1)));

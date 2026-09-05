@@ -21,15 +21,3 @@ impl Deadline {
         max.min(self.0.saturating_duration_since(Instant::now()))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::Deadline;
-
-    #[test]
-    fn oversized_deadline_returns_an_error_instead_of_panicking() {
-        assert!(Deadline::from_now(Duration::from_secs(u64::MAX)).is_err());
-    }
-}

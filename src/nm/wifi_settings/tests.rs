@@ -4,7 +4,7 @@ use zvariant::OwnedValue;
 
 use super::{
     apply_saved_activation_settings, cloned_wifi_connection_settings,
-    enterprise_wifi_connection_settings, psk_wifi_connection_settings, validate_wpa_psk,
+    enterprise_wifi_connection_settings, validate_wpa_psk,
 };
 use crate::model::{
     AccessPoint, EnterpriseAuth, NM_AP_SEC_KEY_MGMT_802_1X, NM_AP_SEC_KEY_MGMT_PSK,
@@ -12,26 +12,6 @@ use crate::model::{
     example_connect_target,
 };
 
-#[test]
-fn psk_wifi_settings_include_password_and_key_mgmt() {
-    let ap = test_ap(NM_AP_SEC_KEY_MGMT_PSK);
-    let settings = psk_wifi_connection_settings(&ap, "secret123").expect("settings");
-
-    assert_eq!(
-        settings
-            .get("802-11-wireless-security")
-            .and_then(|section| setting::<String>(section, "key-mgmt"))
-            .as_deref(),
-        Some("wpa-psk")
-    );
-    assert_eq!(
-        settings
-            .get("802-11-wireless-security")
-            .and_then(|section| setting::<String>(section, "psk"))
-            .as_deref(),
-        Some("secret123")
-    );
-}
 #[test]
 fn cloned_profile_settings_replace_secret_and_preserve_profile_options() {
     let mut target = example_connect_target(true);

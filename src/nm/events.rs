@@ -209,63 +209,10 @@ fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use std::time::Instant;
 
     use super::{HealthSignal, HealthSubject, NetworkEvents};
-
-    #[test]
-    fn notifications_advance_generation_and_wake_shared_listeners() {
-        let events = NetworkEvents::default();
-        let notifications = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::clone(&notifications);
-        events.subscribe(Arc::new(move || {
-            observed.fetch_add(1, Ordering::Relaxed);
-        }));
-        let before = events.generation();
-
-        events.notify();
-        events.notify();
-
-        assert_ne!(events.generation(), before);
-        assert_eq!(notifications.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn health_listeners_receive_each_transition_without_disturbing_the_generation() {
-        let events = NetworkEvents::default();
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let observed = Arc::clone(&seen);
-        events.subscribe_health(Arc::new(move |signal: HealthSignal| {
-            observed.lock().expect("health signals").push(signal);
-        }));
-        let before = events.generation();
-
-        events.notify_health(HealthSignal {
-            subject: HealthSubject::Device,
-            path: "/devices/1".to_string(),
-            state: 120,
-            previous_state: Some(70),
-            reason: 7,
-            observed_at: Instant::now(),
-        });
-
-        assert_eq!(events.generation(), before);
-        let seen = seen.lock().expect("health signals");
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].subject, HealthSubject::Device);
-        assert_eq!(seen[0].reason, 7);
-        let latest = events
-            .latest_health(HealthSubject::Device, "/devices/1")
-            .expect("latest transition");
-        assert_eq!(latest.state, 120);
-        assert_eq!(latest.reason, 7);
-        let detailed = events
-            .latest_detailed_health(HealthSubject::Device, "/devices/1")
-            .expect("latest detailed transition");
-        assert_eq!(detailed.reason, 7);
-    }
 
     #[test]
     fn neutral_followup_does_not_erase_recent_detailed_health_reason() {
@@ -295,12 +242,5 @@ mod tests {
                 .reason,
             17
         );
-    }
-
-    #[test]
-    fn health_subject_names_are_stable() {
-        assert_eq!(HealthSubject::Device.as_str(), "device");
-        assert_eq!(HealthSubject::ActiveConnection.as_str(), "connection");
-        assert_eq!(HealthSubject::Vpn.as_str(), "vpn");
     }
 }

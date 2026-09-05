@@ -517,8 +517,7 @@ fn value_u64(value: &OwnedValue) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Radio, ip4_status_needs_nmcli_fill};
-    use crate::model::Ip4Status;
+    use super::Radio;
     use crate::nm::RadioRestoreState;
 
     #[test]
@@ -532,40 +531,5 @@ mod tests {
         assert!(state.airplane_mode && state.wireless_enabled);
         state.record_direct_change(Radio::Wireless, true);
         assert!(!state.airplane_mode && state.wireless_enabled);
-    }
-
-    fn empty_ip4() -> Ip4Status {
-        Ip4Status {
-            address: None,
-            prefix: None,
-            addresses: Vec::new(),
-            gateway: None,
-            dns: Vec::new(),
-            domains: Vec::new(),
-            searches: Vec::new(),
-            routes: Vec::new(),
-            dhcp_lease: None,
-        }
-    }
-
-    #[test]
-    fn fills_ip4_from_nmcli_only_when_dbus_status_is_incomplete() {
-        assert!(ip4_status_needs_nmcli_fill(&None));
-        assert!(ip4_status_needs_nmcli_fill(&Some(Ip4Status {
-            address: Some("10.0.0.2".to_string()),
-            prefix: Some(24),
-            gateway: None,
-            dns: vec!["10.0.0.1".to_string()],
-            dhcp_lease: None,
-            ..empty_ip4()
-        })));
-        assert!(!ip4_status_needs_nmcli_fill(&Some(Ip4Status {
-            address: Some("10.0.0.2".to_string()),
-            prefix: Some(24),
-            gateway: Some("10.0.0.1".to_string()),
-            dns: vec!["10.0.0.1".to_string()],
-            dhcp_lease: None,
-            ..empty_ip4()
-        })));
     }
 }

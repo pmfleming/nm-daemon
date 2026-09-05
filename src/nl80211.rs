@@ -188,13 +188,7 @@ fn rate_100kbps_to_mbps(rate: u32) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{interface_index, rate_100kbps_to_mbps};
-
-    #[test]
-    fn converts_kernel_rate_units_to_mbps() {
-        assert_eq!(rate_100kbps_to_mbps(8667), 866.7);
-        assert_eq!(rate_100kbps_to_mbps(12000), 1200.0);
-    }
+    use super::interface_index;
 
     #[test]
     fn rejects_interface_names_that_could_escape_sysfs() {

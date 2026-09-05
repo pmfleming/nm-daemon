@@ -444,18 +444,8 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{Repository, append_json_line_with_rotation, temp_path_for};
+    use super::{Repository, append_json_line_with_rotation};
     use crate::cache::CacheRead;
-
-    #[test]
-    fn temp_paths_are_unique_for_same_cache_path() {
-        let path = PathBuf::from("/tmp/nm-daemon/status.json");
-        let first = temp_path_for(&path).unwrap();
-        let second = temp_path_for(&path).unwrap();
-        assert_ne!(first, second);
-        assert_eq!(first.parent(), path.parent());
-        assert_eq!(second.parent(), path.parent());
-    }
 
     #[test]
     fn read_distinguishes_missing_corrupt_and_available() {

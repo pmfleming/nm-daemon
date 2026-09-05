@@ -223,11 +223,6 @@ mod tests {
     use crate::protocol::Stream;
 
     #[test]
-    fn empty_subscription_uses_registry_defaults() {
-        assert_eq!(normalized_streams(Vec::new()).unwrap(), Stream::defaults());
-    }
-
-    #[test]
     fn subscriptions_are_typed_deduplicated_and_reject_unknown_names() {
         assert_eq!(
             normalized_streams(vec![

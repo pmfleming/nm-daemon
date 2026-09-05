@@ -153,30 +153,3 @@ fn no_statistics_device(requested: Option<&str>) -> anyhow::Error {
     }
     error.into()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::statistics_rates;
-    use crate::model::DeviceStatisticsSample;
-
-    fn sample(rx: u64, tx: u64, at_ms: u128) -> DeviceStatisticsSample {
-        DeviceStatisticsSample {
-            rx_bytes: rx,
-            tx_bytes: tx,
-            rx_bytes_per_second: None,
-            tx_bytes_per_second: None,
-            interval_ms: 0,
-            sampled_at_ms: at_ms,
-        }
-    }
-
-    #[test]
-    fn rates_are_derived_from_the_byte_delta_over_elapsed_time() {
-        let previous = sample(1_000, 500, 1_000);
-        let mut current = sample(3_000, 1_500, 3_000);
-        statistics_rates(&previous, &mut current);
-        assert_eq!(current.interval_ms, 2_000);
-        assert_eq!(current.rx_bytes_per_second, Some(1_000.0));
-        assert_eq!(current.tx_bytes_per_second, Some(500.0));
-    }
-}

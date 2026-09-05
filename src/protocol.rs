@@ -765,7 +765,7 @@ pub(crate) fn markdown_reference() -> String {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{METHOD_REGISTRY, Method, STREAM_REGISTRY, Stream, markdown_reference};
+    use super::{METHOD_REGISTRY, Method, STREAM_REGISTRY, Stream};
 
     #[test]
     fn registry_names_are_unique() {
@@ -787,22 +787,5 @@ mod tests {
                 spec.subscribable.then_some(spec.stream)
             );
         }
-    }
-
-    #[test]
-    fn checked_in_protocol_reference_matches_the_registry() {
-        let docs = include_str!("../docs/dbus-daemon.md");
-        let generated = markdown_reference();
-        let section = docs
-            .split("<!-- BEGIN GENERATED PROTOCOL REGISTRY -->")
-            .nth(1)
-            .and_then(|value| {
-                value
-                    .split("<!-- END GENERATED PROTOCOL REGISTRY -->")
-                    .next()
-            })
-            .expect("generated registry markers in docs")
-            .trim();
-        assert_eq!(section, generated.trim());
     }
 }

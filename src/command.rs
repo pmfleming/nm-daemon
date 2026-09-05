@@ -477,48 +477,11 @@ fn decode_output(output: Vec<u8>) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
-    use super::{
-        CommandFailure, CommandFailureKind, CommandOutput, CommandRequest, CommandRunner,
-        SystemCommandRunner,
-    };
+    use super::{CommandFailureKind, CommandRequest, CommandRunner, SystemCommandRunner};
     use crate::error::ErrorOperation;
-
-    pub(crate) struct FakeRunner {
-        responses: Mutex<VecDeque<Result<CommandOutput, CommandFailure>>>,
-        requests: Mutex<Vec<CommandRequest>>,
-    }
-
-    impl FakeRunner {
-        pub(crate) fn success(stdout: &str) -> Self {
-            Self {
-                responses: Mutex::new(VecDeque::from([Ok(CommandOutput {
-                    stdout: stdout.to_string(),
-                    stderr: String::new(),
-                })])),
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl CommandRunner for FakeRunner {
-        fn run(
-            &self,
-            request: &CommandRequest,
-            _: Option<&AtomicBool>,
-        ) -> Result<CommandOutput, CommandFailure> {
-            self.requests.lock().unwrap().push(request.clone());
-            self.responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("fake command response")
-        }
-    }
 
     #[test]
     fn runner_returns_typed_nonzero_exit_with_captured_output() {

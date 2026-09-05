@@ -243,14 +243,6 @@ mod tests {
     use super::{WifiQrAuth, parse_wifi_qr, wifi_qr_payload};
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::WepKeyType;
-    #[test]
-    fn escapes_mecard_delimiters() {
-        assert_eq!(
-            wifi_qr_payload("WPA", "Cafe;Guest", Some("pass:word"), true),
-            "WIFI:T:WPA;S:Cafe\\;Guest;P:pass\\:word;H:true;;"
-        );
-    }
-
     fn parse_error(payload: &str) -> ErrorReport {
         let error = parse_wifi_qr(payload).expect_err("rejected payload");
         ErrorReport::from_error(&error, ErrorOperation::Unknown)

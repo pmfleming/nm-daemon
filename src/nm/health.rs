@@ -418,63 +418,53 @@ mod tests {
         assert_eq!(reason.name, "no-secrets");
     }
     #[test]
-    fn observed_successful_activation_trace_never_becomes_a_failure() {
-        let trace = [
-            signal_from(HealthSubject::ActiveConnection, 1, None, 0),
-            signal_from(HealthSubject::Device, 40, Some(30), 0),
-            signal_from(HealthSubject::Device, 50, Some(40), 0),
-            signal_from(HealthSubject::Device, 60, Some(50), 0),
-            signal_from(HealthSubject::Device, 70, Some(50), 0),
-            signal_from(HealthSubject::Device, 80, Some(70), 0),
-            signal_from(HealthSubject::Device, 90, Some(80), 0),
-            signal_from(HealthSubject::Device, 100, Some(90), 0),
-            signal_from(HealthSubject::ActiveConnection, 2, None, 0),
-        ];
-        assert_eq!(
-            classify_trace(&trace),
-            vec![
-                HealthTransitionKind::Progress,
-                HealthTransitionKind::Progress,
-                HealthTransitionKind::Progress,
-                HealthTransitionKind::Progress,
-                HealthTransitionKind::Progress,
-                HealthTransitionKind::Progress,
-                HealthTransitionKind::Progress,
-                HealthTransitionKind::Success,
-                HealthTransitionKind::Success,
-            ]
-        );
-    }
+    fn observed_traces_distinguish_success_sleep_and_actionable_failures() {
+        use HealthSubject::{ActiveConnection, Device, Vpn};
+        use HealthTransitionKind::{ExpectedLifecycle, Failure, Progress, Success};
 
-    #[test]
-    fn observed_sleep_trace_is_expected_lifecycle_not_failure() {
-        let trace = [
-            signal_from(HealthSubject::Device, 110, Some(100), 37),
-            signal_from(HealthSubject::ActiveConnection, 3, None, 0),
-            signal_from(HealthSubject::Device, 30, Some(110), 37),
-            signal_from(HealthSubject::Device, 10, Some(30), 73),
+        let cases = [
+            (
+                "activation",
+                vec![
+                    (ActiveConnection, 1, None, 0, Progress),
+                    (Device, 40, Some(30), 0, Progress),
+                    (Device, 50, Some(40), 0, Progress),
+                    (Device, 60, Some(50), 0, Progress),
+                    (Device, 70, Some(50), 0, Progress),
+                    (Device, 80, Some(70), 0, Progress),
+                    (Device, 90, Some(80), 0, Progress),
+                    (Device, 100, Some(90), 0, Success),
+                    (ActiveConnection, 2, None, 0, Success),
+                ],
+            ),
+            (
+                "sleep",
+                vec![
+                    (Device, 110, Some(100), 37, Progress),
+                    (ActiveConnection, 3, None, 0, Progress),
+                    (Device, 30, Some(110), 37, ExpectedLifecycle),
+                    (Device, 10, Some(30), 73, ExpectedLifecycle),
+                ],
+            ),
+            (
+                "terminal failures",
+                vec![
+                    (Device, 120, Some(70), 5, Failure),
+                    (Device, 120, Some(60), 7, Failure),
+                    (Device, 30, Some(100), 8, Failure),
+                    (Vpn, 6, None, 0, Failure),
+                ],
+            ),
         ];
-        assert_eq!(
-            classify_trace(&trace),
-            vec![
-                HealthTransitionKind::Progress,
-                HealthTransitionKind::Progress,
-                HealthTransitionKind::ExpectedLifecycle,
-                HealthTransitionKind::ExpectedLifecycle,
-            ]
-        );
-    }
-
-    #[test]
-    fn observed_terminal_failure_traces_remain_actionable() {
-        let dhcp = signal_from(HealthSubject::Device, 120, Some(70), 5);
-        let no_secrets = signal_from(HealthSubject::Device, 120, Some(60), 7);
-        let link_loss = signal_from(HealthSubject::Device, 30, Some(100), 8);
-        let vpn_unknown = signal_from(HealthSubject::Vpn, 6, None, 0);
-        assert_eq!(
-            classify_trace(&[dhcp, no_secrets, link_loss, vpn_unknown]),
-            vec![HealthTransitionKind::Failure; 4]
-        );
+        for (name, steps) in cases {
+            let (signals, expected): (Vec<_>, Vec<_>) = steps
+                .into_iter()
+                .map(|(subject, state, previous, reason, kind)| {
+                    (signal_from(subject, state, previous, reason), kind)
+                })
+                .unzip();
+            assert_eq!(classify_trace(&signals), expected, "{name}");
+        }
     }
 
     #[test]

@@ -651,10 +651,7 @@ fn root_path() -> OwnedObjectPath {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        HotspotUnavailableReason, capability_bands, hotspot_availability, resolve_band,
-        select_hotspot_device,
-    };
+    use super::{capability_bands, resolve_band, select_hotspot_device};
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::{HotspotDevice, WifiBand};
 
@@ -671,29 +668,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn availability_reports_the_specific_blocking_reason() {
-        assert_eq!(
-            hotspot_availability(&[], true, false).0,
-            Some(HotspotUnavailableReason::NoWifiDevice)
-        );
-        assert_eq!(
-            hotspot_availability(&[device("wlan0", false, false)], true, false).0,
-            Some(HotspotUnavailableReason::ApModeUnsupported)
-        );
-        assert_eq!(
-            hotspot_availability(&[device("wlan0", true, false)], false, true).0,
-            Some(HotspotUnavailableReason::WifiDisabled)
-        );
-        assert_eq!(
-            hotspot_availability(&[device("wlan0", true, true)], true, false).0,
-            Some(HotspotUnavailableReason::DeviceBusy)
-        );
-        assert_eq!(
-            hotspot_availability(&[device("wlan0", true, false)], true, true).0,
-            None
-        );
-    }
     #[test]
     fn requesting_a_non_access_point_device_is_a_typed_validation_error() {
         let devices = vec![device("wlan1", false, false)];

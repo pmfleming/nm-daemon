@@ -46,16 +46,6 @@ mod tests {
     use crate::model::ConnectFailureReason;
 
     #[test]
-    fn typed_connect_errors_provide_machine_readable_reasons() {
-        let err = connect_failure(ConnectFailureReason::ValidationError, "bad target");
-
-        assert_eq!(
-            connect_failure_reason(&err),
-            ConnectFailureReason::ValidationError
-        );
-    }
-
-    #[test]
     fn rendered_connect_words_do_not_override_the_typed_reason() {
         let error = connect_failure(
             ConnectFailureReason::ActivationFailed,

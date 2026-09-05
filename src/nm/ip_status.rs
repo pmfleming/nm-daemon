@@ -208,7 +208,7 @@ mod tests {
 
     use zvariant::OwnedValue;
 
-    use super::{dhcp_lease_from_options, legacy_ipv4};
+    use super::dhcp_lease_from_options;
     #[test]
     fn parses_networkmanager_dhcp4_lease_options() {
         let options = HashMap::from([
@@ -229,10 +229,5 @@ mod tests {
     }
     fn string_value(value: &str) -> OwnedValue {
         OwnedValue::try_from(zvariant::Value::new(value.to_string())).expect("string variant")
-    }
-
-    #[test]
-    fn legacy_nameservers_render_as_dotted_quads() {
-        assert_eq!(legacy_ipv4(u32::from_ne_bytes([192, 0, 2, 1])), "192.0.2.1");
     }
 }

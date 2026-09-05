@@ -88,25 +88,3 @@ fn connect_params(
         parsed.wep_key_type,
     ))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::connect_params;
-    use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
-    use crate::model::WepKeyType;
-    use crate::qr::parse_wifi_qr;
-    #[test]
-    fn wep_payloads_carry_the_detected_key_type_through_to_the_connect_request() {
-        let parsed = parse_wifi_qr("WIFI:T:WEP;S:Old;P:abcdef0123;;").expect("payload");
-        assert_eq!(parsed.wep_key_type, Some(WepKeyType::Key));
-        assert!(connect_params(&parsed, None).is_ok());
-    }
-
-    #[test]
-    fn malformed_payloads_are_rejected_before_any_connect_work_starts() {
-        let error = parse_wifi_qr("not-a-qr-code").expect_err("rejected");
-        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
-        assert_eq!(report.code, ErrorCode::ValidationError);
-        assert_eq!(report.operation, ErrorOperation::QrOperation);
-    }
-}

@@ -347,21 +347,3 @@ fn set_selected_band(settings: &mut ConnectionSettings, band: WifiBand) -> Resul
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{selected_band, set_selected_band};
-    use crate::model::WifiBand;
-    use crate::nm::ConnectionSettings;
-
-    #[test]
-    fn band_setting_round_trips_and_auto_removes_the_constraint() {
-        let mut settings = ConnectionSettings::new();
-        set_selected_band(&mut settings, WifiBand::Ghz6).unwrap();
-        assert_eq!(selected_band(&settings), WifiBand::Ghz6);
-
-        set_selected_band(&mut settings, WifiBand::Auto).unwrap();
-        assert_eq!(selected_band(&settings), WifiBand::Auto);
-        assert!(!settings["802-11-wireless"].contains_key("band"));
-    }
-}

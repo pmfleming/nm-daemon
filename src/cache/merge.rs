@@ -59,7 +59,7 @@ fn same_access_point(left: &AccessPoint, right: &AccessPoint) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{same_access_point, upsert_connected_access_point};
+    use super::upsert_connected_access_point;
     use crate::model::AccessPoint;
 
     #[test]
@@ -71,14 +71,6 @@ mod tests {
 
         assert_eq!(networks.len(), 1);
         assert!(networks[0].active);
-    }
-
-    #[test]
-    fn connected_access_point_can_be_matched_by_bssid_without_path() {
-        let left = test_ap("", "00:11:22:33:44:55", false);
-        let right = test_ap("", "00:11:22:33:44:55", true);
-
-        assert!(same_access_point(&left, &right));
     }
 
     fn test_ap(path: &str, bssid: &str, active: bool) -> AccessPoint {

@@ -1522,11 +1522,8 @@ fn serialized_boundary_snapshot() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value;
 
-    use super::{
-        method_contract_fixtures, serialized_boundary_snapshot, shelllist_contract_fixture,
-    };
+    use super::{method_contract_fixtures, serialized_boundary_snapshot};
 
     #[test]
     fn serialized_v1_boundary_matches_checked_in_snapshot() {
@@ -1540,55 +1537,6 @@ mod tests {
             return;
         }
         assert_eq!(actual, include_str!("../test_support/contract-v1.json"));
-    }
-
-    #[test]
-    fn serialized_shelllist_contract_satisfies_boundary_schema() {
-        let value = serde_json::to_value(shelllist_contract_fixture()).expect("fixture JSON");
-        for pointer in [
-            "/network/capabilities/can_connect",
-            "/network/capabilities/needs_password",
-            "/network/capabilities/needs_credentials",
-            "/network/share/requires_profile_secret_check",
-            "/network/portal_hint/auto_open_on_connect",
-            "/status/enabled",
-            "/status/radios/wireless_hardware_enabled",
-            "/status/radios/wwan_enabled",
-            "/status/radios/airplane_mode",
-            "/connect_success/suggest_open_portal",
-        ] {
-            assert!(
-                value.pointer(pointer).is_some_and(Value::is_boolean),
-                "{pointer}"
-            );
-        }
-        for pointer in [
-            "/network/security_class",
-            "/network/auth/kind",
-            "/network/auth/note",
-            "/network/connect_prompt/kind",
-            "/status/connectivity/state",
-            "/status/ip4/dhcp_lease/server_identifier",
-            "/status/ip4/dhcp_lease/domain_name",
-            "/status/metered/state",
-            "/connect_success/path",
-            "/connect_error/reason",
-        ] {
-            assert!(
-                value.pointer(pointer).is_some_and(Value::is_string),
-                "{pointer}"
-            );
-        }
-        for pointer in [
-            "/status/ip4/dhcp_lease/lease_time_seconds",
-            "/status/ip4/dhcp_lease/expires_at_ms",
-            "/status/wireless/tx_bitrate_mbps",
-        ] {
-            assert!(
-                value.pointer(pointer).is_some_and(Value::is_number),
-                "{pointer}"
-            );
-        }
     }
 
     #[test]

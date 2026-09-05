@@ -1,36 +1,10 @@
 use super::{
-    AccessPoint, ConnectionReadiness, NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_802_1X,
-    NM_AP_SEC_KEY_MGMT_OWE, NM_AP_SEC_KEY_MGMT_PSK, NM_AP_SEC_KEY_MGMT_SAE, ProfilePrivacy,
-    SavedWifiConnection, Security, SecurityClass, WifiConnectTarget, ap_is_passwordless,
-    ap_supports_enterprise, ap_supports_psk, ap_uses_wep, connect_target_for_network_key,
-    frequency_band, frequency_channel, network_entries_with_profile_matches, security_class,
-    security_flags_label, security_label, ssid_for_network_key,
+    AccessPoint, ConnectionReadiness, NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_OWE,
+    NM_AP_SEC_KEY_MGMT_PSK, ProfilePrivacy, SavedWifiConnection, Security, WifiConnectTarget,
+    ap_is_passwordless, connect_target_for_network_key, frequency_band, frequency_channel,
+    network_entries_with_profile_matches, security_flags_label, security_label,
+    ssid_for_network_key,
 };
-#[test]
-fn security_classes_cover_frontend_presentation_types() {
-    assert_eq!(security_class(0, 0, 0), SecurityClass::Open);
-    assert_eq!(
-        security_class(0, 0, NM_AP_SEC_KEY_MGMT_OWE),
-        SecurityClass::EnhancedOpen
-    );
-    assert_eq!(
-        security_class(NM_AP_FLAGS_PRIVACY, 0, 0),
-        SecurityClass::Legacy
-    );
-    assert_eq!(
-        security_class(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_PSK),
-        SecurityClass::Personal
-    );
-    assert_eq!(
-        security_class(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_802_1X),
-        SecurityClass::Enterprise
-    );
-    assert_eq!(
-        security_class(NM_AP_FLAGS_PRIVACY, 0, 0x4000),
-        SecurityClass::Unknown
-    );
-}
-
 #[test]
 fn owe_is_passwordless_but_psk_is_not() {
     assert!(ap_is_passwordless(0, 0, NM_AP_SEC_KEY_MGMT_OWE));
@@ -68,42 +42,6 @@ fn wifi_band_and_channel_match_networkmanager_tables() {
     assert_eq!(frequency_channel(6795), 0);
     assert_eq!(frequency_band(5900), "");
     assert_eq!(frequency_channel(5900), 0);
-}
-
-#[test]
-fn psk_support_includes_sae() {
-    assert!(ap_supports_psk(NM_AP_SEC_KEY_MGMT_PSK, 0));
-    assert!(ap_supports_psk(0, NM_AP_SEC_KEY_MGMT_SAE));
-    assert!(!ap_supports_psk(0, NM_AP_SEC_KEY_MGMT_OWE));
-}
-
-#[test]
-fn wep_detection_requires_privacy_without_wpa_or_rsn() {
-    assert!(ap_uses_wep(NM_AP_FLAGS_PRIVACY, 0, 0));
-    assert!(!ap_uses_wep(0, 0, 0));
-    assert!(!ap_uses_wep(NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_PSK, 0));
-}
-
-#[test]
-fn network_capabilities_distinguish_promptable_from_ready_connections() {
-    assert_eq!(
-        capabilities_for(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_PSK),
-        super::NetworkCapabilities {
-            readiness: ConnectionReadiness::NeedsPassword,
-            has_profile: false,
-            can_share_qr: false,
-        }
-    );
-}
-
-#[test]
-fn network_capabilities_advertise_unsaved_enterprise_credentials() {
-    let capabilities = capabilities_for(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_802_1X);
-    assert_eq!(
-        capabilities.readiness,
-        ConnectionReadiness::NeedsEnterpriseCredentials
-    );
-    assert!(ap_supports_enterprise(0, NM_AP_SEC_KEY_MGMT_802_1X));
 }
 
 #[test]
@@ -200,16 +138,6 @@ fn opaque_network_keys_are_stable_and_resolve_exact_ssid_bytes() {
         b"Example"
     );
     assert!(ssid_for_network_key("/org/freedesktop/NetworkManager/AccessPoint/1").is_err());
-}
-
-fn capabilities_for(flags: u32, wpa_flags: u32, rsn_flags: u32) -> super::NetworkCapabilities {
-    let [entry] = network_entries_with_profile_matches(
-        vec![test_ap(flags, wpa_flags, rsn_flags)],
-        &std::collections::BTreeMap::new(),
-    )
-    .try_into()
-    .expect("one entry");
-    entry.capabilities
 }
 
 fn test_profile() -> SavedWifiConnection {

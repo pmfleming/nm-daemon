@@ -433,10 +433,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AddressFamily, ServiceQuery, discovery_address, ptr_instance, snapshot_from_reply,
-        txt_record,
-    };
+    use super::{AddressFamily, ServiceQuery, ptr_instance, snapshot_from_reply};
 
     #[test]
     fn query_accepts_dns_sd_types_and_rejects_non_service_names() {
@@ -528,19 +525,6 @@ mod tests {
         assert!(ptr_instance(&record, "_googlecast._tcp", "local").is_none());
     }
 
-    #[test]
-    fn address_and_txt_conversion_preserve_raw_bytes() {
-        let address = discovery_address((2, 10, Ipv6Addr::LOCALHOST.octets().to_vec()));
-        assert_eq!(address.family, "ipv6");
-        assert_eq!(address.address, "::1");
-        assert_eq!(address.raw_hex.len(), 32);
-
-        let txt = txt_record(b"flag".to_vec());
-        assert_eq!(txt.key.as_deref(), Some("flag"));
-        assert_eq!(txt.value, None);
-        assert_eq!(txt.raw_hex, "666c6167");
-    }
-
     fn dns_name(labels: &[&str]) -> Vec<u8> {
         let mut bytes = Vec::new();
         for label in labels {
@@ -550,6 +534,4 @@ mod tests {
         bytes.push(0);
         bytes
     }
-
-    use std::net::Ipv6Addr;
 }

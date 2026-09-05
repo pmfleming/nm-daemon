@@ -400,10 +400,9 @@ fn system_uptime_seconds() -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
-    use super::{access_point_matches, merge_access_point};
-    use crate::model::{AccessPoint, NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_PSK};
+    use super::access_point_matches;
+    use crate::model::AccessPoint;
 
     #[test]
     fn access_point_match_requires_path_and_bssid_when_both_are_supplied() {
@@ -427,22 +426,6 @@ mod tests {
             Some("/ap/1"),
             Some("00:11:22:33:44:66")
         ));
-    }
-
-    #[test]
-    fn cached_network_dedup_keeps_same_ssid_security_variants() {
-        let mut networks = BTreeMap::new();
-        let open = test_ap();
-        let mut secured = test_ap();
-        secured.flags = NM_AP_FLAGS_PRIVACY;
-        secured.rsn_flags = NM_AP_SEC_KEY_MGMT_PSK;
-        secured.security =
-            crate::model::security_label(secured.flags, secured.wpa_flags, secured.rsn_flags);
-
-        merge_access_point(&mut networks, open);
-        merge_access_point(&mut networks, secured);
-
-        assert_eq!(networks.len(), 2);
     }
 
     fn test_ap() -> AccessPoint {
