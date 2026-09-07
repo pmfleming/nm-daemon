@@ -10,7 +10,8 @@ pub(in crate::nm) fn apply_target_connection_metadata(
     target: &WifiConnectTarget,
 ) -> Result<()> {
     apply_connection_name(settings, target.connection_name.as_deref())?;
-    apply_private_connection(settings, target.private)
+    apply_private_connection(settings, target.private)?;
+    crate::nm::profile_policy::validate_private_ca_paths(settings, ErrorOperation::Connect)
 }
 
 fn apply_connection_name(settings: &mut ConnectionSettings, name: Option<&str>) -> Result<()> {

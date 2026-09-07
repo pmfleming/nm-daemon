@@ -398,7 +398,7 @@ The underlying connection workflow is the canonical `AlreadyActive → SavedProf
 - Radio: `mtu`, `mode`, `band`, and `channel`.
 - Access and integration: `permissions`, `firewall_zone`, `secondaries` (typically a VPN started with this profile), and `casting_enabled`.
 - IPv4/IPv6: `ignore_auto_routes`, `never_default`, `may_fail`, `dhcp_hostname`, plus IPv4 `dhcp_client_id` and `dad_timeout`, and IPv6 `ip6_privacy`.
-- `enterprise`: the complete existing 802.1X configuration — EAP methods, identities, certificate and key references, `ca_path`/`system_ca_certs`, domain/subject/altsubject constraints, phase-1 and phase-2 settings, `pac_file`, and every secret flag rendered as `{ code, agent_owned, not_saved, not_required }`.
+- `enterprise`: the complete existing 802.1X configuration — EAP methods, identities, certificate and key references, `ca_path`/`phase2_ca_path`/`system_ca_certs`, domain/subject/altsubject constraints, phase-1 and phase-2 settings, `pac_file`, and every secret flag rendered as `{ code, agent_owned, not_saved, not_required }`.
 
 Secret *values* never appear in `details`; use `operation: "reveal-secret"` for those. Certificate properties are reported as their `file://` or `pkcs11:` URI; a stored DER blob reports `blob:<n> bytes` rather than mangled text.
 

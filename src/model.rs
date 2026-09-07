@@ -677,6 +677,8 @@ pub(crate) struct ProfileEnterpriseSettings {
     pub(crate) altsubject_matches: Vec<String>,
     pub(crate) ca_cert: Option<String>,
     pub(crate) ca_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) phase2_ca_path: Option<String>,
     pub(crate) system_ca_certs: bool,
     pub(crate) client_cert: Option<String>,
     pub(crate) private_key: Option<String>,
@@ -817,6 +819,7 @@ pub(crate) struct ProfileEnterpriseUpdate {
     pub(crate) altsubject_matches: Option<Vec<String>>,
     pub(crate) ca_cert: Option<String>,
     pub(crate) ca_path: Option<String>,
+    pub(crate) phase2_ca_path: Option<String>,
     pub(crate) system_ca_certs: Option<bool>,
     pub(crate) client_cert: Option<String>,
     pub(crate) private_key: Option<String>,

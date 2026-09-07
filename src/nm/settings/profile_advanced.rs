@@ -92,6 +92,7 @@ pub(super) fn read_enterprise(settings: &ConnectionSettings) -> Option<ProfileEn
         altsubject_matches: strings(section, "altsubject-matches"),
         ca_cert: blob(section, "ca-cert"),
         ca_path: text(section, "ca-path"),
+        phase2_ca_path: text(section, "phase2-ca-path"),
         system_ca_certs: flag(section, "system-ca-certs"),
         client_cert: blob(section, "client-cert"),
         private_key: blob(section, "private-key"),
@@ -127,10 +128,10 @@ pub(super) fn apply_advanced(
     apply_connection_fields(settings, update)?;
     apply_wireless_fields(settings, update)?;
     apply_ip_fields(settings, update)?;
-    match &update.enterprise {
-        Some(enterprise) => apply_enterprise(settings, enterprise),
-        None => Ok(()),
+    if let Some(enterprise) = &update.enterprise {
+        apply_enterprise(settings, enterprise)?;
     }
+    crate::nm::profile_policy::validate_private_ca_paths(settings, ErrorOperation::ProfileOperation)
 }
 
 fn apply_connection_fields(
@@ -281,6 +282,7 @@ fn apply_enterprise(
         ("domain-match", &update.domain_match),
         ("subject-match", &update.subject_match),
         ("ca-path", &update.ca_path),
+        ("phase2-ca-path", &update.phase2_ca_path),
         ("phase1-peapver", &update.phase1_peapver),
         ("phase1-peaplabel", &update.phase1_peaplabel),
         ("phase1-fast-provisioning", &update.phase1_fast_provisioning),
@@ -336,25 +338,12 @@ fn set_certificate(
     key: &str,
     value: Option<&str>,
 ) -> Result<()> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.is_empty() {
-        section.remove(key);
-        return Ok(());
-    }
-    if !(value.starts_with("file://") || value.starts_with("pkcs11:")) {
-        return Err(DomainError::validation(
-            ErrorOperation::ProfileOperation,
-            "certificate references must be a file:// or pkcs11: URI",
-        )
-        .with_detail("field", format!("advanced.enterprise.{key}"))
-        .into());
-    }
-    let mut bytes = value.as_bytes().to_vec();
-    bytes.push(0);
-    section.insert(key.to_string(), owned_value(bytes)?);
-    Ok(())
+    crate::nm::profile_policy::set_certificate_reference(
+        section,
+        key,
+        value,
+        ErrorOperation::ProfileOperation,
+    )
 }
 
 fn validate_mode(mode: &str) -> Result<()> {
@@ -490,6 +479,57 @@ mod tests {
             ]),
         )])
     }
+    #[test]
+    fn private_ca_directories_are_rejected_and_can_be_explicitly_repaired() {
+        for (nm_key, api_key) in [("ca-path", "ca_path"), ("phase2-ca-path", "phase2_ca_path")] {
+            let mut original = settings();
+            original.insert(
+                "802-1x".into(),
+                HashMap::from([(
+                    nm_key.into(),
+                    owned_value("/home/user/custom-ca".to_string()).unwrap(),
+                )]),
+            );
+            apply_advanced(&mut original, &WifiProfileAdvancedUpdate::default()).unwrap();
+            let permissions = vec!["user:alice:".to_string()];
+            let private = WifiProfileAdvancedUpdate {
+                permissions: Some(permissions.clone()),
+                ..Default::default()
+            };
+            let mut changed = original.clone();
+            let error = apply_advanced(&mut changed, &private).unwrap_err();
+            let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
+            assert_eq!(report.code, ErrorCode::ValidationError);
+            assert_eq!(report.details["field"], format!("802-1x.{nm_key}"));
+
+            // Turning on system CA trust alone is not a portable directory
+            // override: NM can be built with a CA bundle instead of a directory.
+            changed
+                .get_mut("802-1x")
+                .unwrap()
+                .insert("system-ca-certs".into(), owned_value(true).unwrap());
+            assert!(apply_advanced(&mut changed, &WifiProfileAdvancedUpdate::default()).is_err());
+            assert!(
+                crate::nm::wifi_settings::apply_target_connection_metadata(
+                    &mut changed,
+                    &crate::model::example_connect_target(false),
+                )
+                .is_err(),
+                "activation validates effective saved privacy too"
+            );
+
+            let update: WifiProfileAdvancedUpdate = serde_json::from_value(serde_json::json!({
+                "permissions": permissions,
+                "enterprise": { (api_key): "", "system_ca_certs": true }
+            }))
+            .unwrap();
+            apply_advanced(&mut original, &update).unwrap();
+            let enterprise = super::read_enterprise(&original).unwrap();
+            assert!(enterprise.ca_path.is_none() && enterprise.phase2_ca_path.is_none());
+            assert!(enterprise.system_ca_certs);
+        }
+    }
+
     #[test]
     fn a_stale_expected_version_is_a_typed_conflict() {
         let settings = settings();

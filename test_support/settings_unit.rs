@@ -9,6 +9,46 @@ use std::collections::{BTreeMap, HashMap};
 use zvariant::{OwnedValue, Value};
 
 #[test]
+fn profile_matching_requires_both_band_and_channel_and_handles_unknown_frequency() {
+    for (band, channel, frequency, expected) in [
+        (Some("a"), 36, 5180, true),
+        (Some("a"), 36, 5200, false),
+        (Some("a"), 0, 2412, false),
+        (Some("a"), 0, 0, false),
+        (None, 1, 0, false),
+        (None, 0, 0, true),
+        (Some("6GHz"), 1, 5955, true),
+    ] {
+        let mut settings = wifi_settings("Example", "802-11-wireless");
+        let wireless = settings.get_mut("802-11-wireless").unwrap();
+        if let Some(band) = band {
+            wireless.insert(
+                "band".into(),
+                crate::nm::owned_value(band.to_string()).unwrap(),
+            );
+        }
+        wireless.insert(
+            "channel".into(),
+            crate::nm::owned_value(channel as u32).unwrap(),
+        );
+        let ap = crate::model::AccessPoint {
+            ssid: "Example".into(),
+            frequency,
+            ..Default::default()
+        };
+        assert_eq!(super::settings_match_access_point(&settings, &ap), expected);
+        let path = zvariant::OwnedObjectPath::try_from("/settings/1").unwrap();
+        let candidate =
+            super::saved_wifi_profile_candidate_from_settings(&path, &settings).unwrap();
+        assert_eq!(
+            candidate.matches_access_point(&ap),
+            expected,
+            "inventory and activation must agree"
+        );
+    }
+}
+
+#[test]
 fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets() {
     let mut settings = wifi_settings("Example", "802-11-wireless");
     settings.insert(

@@ -205,12 +205,15 @@ fn saved_profile_password_update_preserves_security_options() {
 
 #[test]
 fn enterprise_wifi_settings_include_8021x_credentials() {
-    let auth = EnterpriseAuth {
+    let mut auth = EnterpriseAuth {
         eap: vec!["peap".to_string()],
         identity: Some("laufan".to_string()),
         anonymous_identity: None,
         password: None,
         phase2_auth: Some("mschapv2".to_string()),
+        ca_cert: Some("file:///etc/ssl/certs/company.pem".into()),
+        client_cert: Some("file:///home/user/client.pem".into()),
+        private_key: Some("pkcs11:object=client-key".into()),
         ..Default::default()
     };
     let settings = enterprise_wifi_connection_settings(
@@ -248,6 +251,29 @@ fn enterprise_wifi_settings_include_8021x_credentials() {
             .as_deref(),
         Some("mschapv2")
     );
+    for (key, uri) in [
+        ("ca-cert", auth.ca_cert.as_deref().unwrap()),
+        ("client-cert", auth.client_cert.as_deref().unwrap()),
+        ("private-key", auth.private_key.as_deref().unwrap()),
+    ] {
+        let bytes = setting::<Vec<u8>>(&settings["802-1x"], key).unwrap();
+        assert_eq!(
+            bytes,
+            [uri.as_bytes(), &[0]].concat(),
+            "NM requires ay for {key}"
+        );
+    }
+    for invalid in ["https://example.test/ca.pem", "file:///safe.pem\0ignored"] {
+        auth.ca_cert = Some(invalid.into());
+        assert!(
+            enterprise_wifi_connection_settings(
+                &test_ap(NM_AP_SEC_KEY_MGMT_802_1X),
+                &auth,
+                Some("secret123"),
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]

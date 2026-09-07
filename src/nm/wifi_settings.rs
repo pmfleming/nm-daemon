@@ -300,7 +300,6 @@ fn enterprise_dot1x_section(
             ),
             ("password", enterprise.password.as_deref().or(password)),
             ("phase2-auth", enterprise.phase2_auth.as_deref()),
-            ("ca-cert", enterprise.ca_cert.as_deref()),
             ("ca-path", enterprise.ca_path.as_deref()),
             (
                 "domain-suffix-match",
@@ -337,11 +336,21 @@ fn insert_enterprise_certificate_settings(
             owned_value(enterprise.altsubject_matches.clone())?,
         );
     }
+    for (key, value) in [
+        ("ca-cert", enterprise.ca_cert.as_deref()),
+        ("client-cert", enterprise.client_cert.as_deref()),
+        ("private-key", enterprise.private_key.as_deref()),
+    ] {
+        super::profile_policy::set_certificate_reference(
+            dot1x,
+            key,
+            value,
+            ErrorOperation::Connect,
+        )?;
+    }
     insert_optional_strings(
         dot1x,
         &[
-            ("client-cert", enterprise.client_cert.as_deref()),
-            ("private-key", enterprise.private_key.as_deref()),
             (
                 "private-key-password",
                 enterprise.private_key_password.as_deref(),

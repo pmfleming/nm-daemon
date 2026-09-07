@@ -42,7 +42,24 @@ just connect-parity-probe --execute --order alternate --skip-needs-secret
 
 ## NetworkManager 1.58/1.60 review
 
-The local NetworkManager source was updated and reviewed through commit `4f92885b8a` (`meson.build`: `1.59.2-dev`, the 1.60 development cycle). Relevant alignment points:
+Latest review: GitHub `main` through [`8835a2f61f`](https://github.com/NetworkManager/NetworkManager/commit/8835a2f61faa41782b7e46428c43e4076a84f20e), fetched September 7, 2026 (`1.59.2-dev`, the 1.60 development cycle). The delta from the previous baseline `4f92885b8a` contains no changes to public D-Bus introspection or libnm public headers.
+
+### September 7 alignment
+
+- **Private 802.1X trust directories** ([`a8e87381a3`](https://github.com/NetworkManager/NetworkManager/commit/a8e87381a3e70060abd721d9a347f42b2ba68e6e), CVE-2026-19685): effective private profiles with `ca-path` or `phase2-ca-path` are rejected before advanced saves and the supported Wi-Fi/generic profile activation paths. The advanced API now reads and edits `phase2_ca_path`, including explicit empty-string clearing, so existing profiles can be repaired. Validation considers the merged settings, including simultaneous permissions changes, not just submitted certificate fields. It never silently changes trust or makes a profile public.
+- Clear both directories and use `ca_cert` / `phase2_ca_cert` or `system_ca_certs`. Upstream permits an uncleared directory with `system-ca-certs` only when NetworkManager's compiled-in system CA store is itself a directory. Since that is not exposed by the public API and some distributions use a bundle file, nm-daemon conservatively requires explicit directory clearing even with that flag enabled.
+- The certificate migration review also found that the connect builder emitted CA/client certificate and private-key references as D-Bus strings. It now shares the advanced editor's NUL-terminated byte-array encoding for `file://` and `pkcs11:` URIs, rejects embedded NULs, and leaves passwords as strings. This is required for the supported replacement for CA directories to work.
+- **Band/channel matching** ([`99bb1a7809`](https://github.com/NetworkManager/NetworkManager/commit/99bb1a780939806d038588d9a4ac47b69be870b5)): an unknown-frequency hidden AP cannot satisfy an explicit band/channel constraint. Both inventory matching and saved-profile activation filtering now check channel even after band matches. Device-wide `AvailableConnections` remains the authority for security/device compatibility, but it does not imply that a saved profile matches every AP on that device.
+- **Volatile initrd profiles** ([`d1dad523c8`](https://github.com/NetworkManager/NetworkManager/commit/d1dad523c89544f31cec49b7094552cc467e62e0)): profile enumeration tolerates disappearance between `ListConnections` and `GetSettings`, confirming removal with a fresh list. It still reports authorization/transport errors for profiles that remain present; explicit lookups of deleted profiles still fail. nm-daemon does not enable `initrd-connections=volatile` or delete boot profiles itself.
+- **DHCP Router-option logging** (`5802110055`): core-owned. Gateway reporting continues to use NetworkManager's effective IP configuration/routes, not the raw DHCP Router option, which may be ignored when classless routes are supplied.
+- **Configuration precedence** (`d719485ade`): `conf.d` filenames are compared byte-by-byte, not numerically; later files override earlier values. See [mDNS discovery](mdns-discovery.md) for checking the effective default rather than assuming a snippet wins.
+- Bluetooth NAP normalization/DUN lifetime fixes, the `initrd`/eBPF build-option changes, PPC64 BPF ABI handling, GLib shadow-variable fixes, and contributor/security-policy tooling are NetworkManager-owned. nm-daemon does not build NetworkManager or reimplement those internals.
+
+These adapter changes are **not a substitute for upgrading the system NetworkManager package**, particularly for the security and crash fixes. Tests use fake D-Bus peers and settings fixtures; they do not certify a running host's NetworkManager version. The `nm-api` v1 contract remains unchanged except for the optional `enterprise.phase2_ca_path` detail/update field (omitted from details when absent).
+
+### Earlier 1.58/1.60 alignment
+
+The prior review covered changes through `4f92885b8a`:
 
 - nmcli's new AP `BAND` field is queried by `debug diagnose`; nm-daemon generates NetworkManager-compatible 2.4/5/6 GHz bounds and channel tables from `data/wifi-channels.csv` at build time.
 - OWE transition-mode BSSes are reported as `OWE-TM` but treated as the open half of a transition network; only a real OWE BSS creates an `owe` profile.

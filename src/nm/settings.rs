@@ -7,6 +7,8 @@ use super::{ConnectionSettings, DEVICE_IFACE, Nm, SETTINGS_CONNECTION_IFACE, own
 
 mod casting;
 mod profile_advanced;
+#[cfg(test)]
+mod profile_listing_tests;
 mod profile_secrets;
 
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
@@ -360,7 +362,9 @@ impl Nm {
     pub(crate) fn saved_wifi_connections(&self) -> Result<Vec<SavedWifiConnection>> {
         let mut connections = Vec::new();
         for path in self.saved_connections()? {
-            let settings = self.connection_settings(&path)?;
+            let Some(settings) = self.connection_settings_if_present(&path)? else {
+                continue;
+            };
             if let Some(connection) = saved_wifi_connection_from_settings(&path, &settings) {
                 connections.push(connection);
             }
@@ -443,7 +447,9 @@ impl Nm {
     ) -> Result<HashMap<String, SavedWifiProfileCandidate>> {
         let mut candidates = HashMap::new();
         for path in self.saved_connections()? {
-            let settings = self.connection_settings(&path)?;
+            let Some(settings) = self.connection_settings_if_present(&path)? else {
+                continue;
+            };
             if let Some(candidate) = saved_wifi_profile_candidate_from_settings(&path, &settings) {
                 candidates.insert(candidate.profile.path.clone(), candidate);
             }
@@ -566,6 +572,25 @@ impl Nm {
             .with_context(|| format!("GetSettings for {path}"))
     }
 
+    /// Enumeration is not atomic: NM can now remove volatile initrd profiles
+    /// automatically after takeover. Confirm disappearance with a fresh list;
+    /// never hide authorization/transport errors for profiles that still exist.
+    pub(super) fn connection_settings_if_present(
+        &self,
+        path: &OwnedObjectPath,
+    ) -> Result<Option<ConnectionSettings>> {
+        match self.connection_settings(path) {
+            Ok(settings) => Ok(Some(settings)),
+            Err(error) => {
+                if self.saved_connections()?.contains(path) {
+                    Err(error)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
     fn connection_secrets(
         &self,
         path: &OwnedObjectPath,
@@ -589,6 +614,8 @@ struct SavedWifiProfileCandidate {
     profile: SavedWifiConnection,
     ssid_bytes: Vec<u8>,
     bssid_bytes: Option<Vec<u8>>,
+    band: Option<String>,
+    channel: u32,
 }
 
 impl SavedWifiProfileCandidate {
@@ -598,6 +625,7 @@ impl SavedWifiProfileCandidate {
                 .bssid_bytes
                 .as_deref()
                 .is_none_or(|saved_bssid| bssid_bytes_match(saved_bssid, &ap.bssid))
+            && ap_matches_band_channel(ap, self.band.as_deref(), self.channel)
     }
 }
 
@@ -613,6 +641,8 @@ fn saved_wifi_profile_candidate_from_settings(
         profile,
         ssid_bytes,
         bssid_bytes,
+        band: setting_string(wireless, "band").filter(|band| !band.is_empty()),
+        channel: wireless.get("channel").and_then(setting_u32).unwrap_or(0),
     })
 }
 
@@ -1172,6 +1202,24 @@ fn settings_match_access_point(settings: &ConnectionSettings, ap: &AccessPoint) 
         .get("bssid")
         .and_then(setting_bytes)
         .is_none_or(|saved_bssid| bssid_bytes_match(&saved_bssid, &ap.bssid))
+        && ap_matches_band_channel(
+            ap,
+            setting_string(wireless, "band")
+                .as_deref()
+                .filter(|band| !band.is_empty()),
+            wireless.get("channel").and_then(setting_u32).unwrap_or(0),
+        )
+}
+
+fn ap_matches_band_channel(ap: &AccessPoint, band: Option<&str>, channel: u32) -> bool {
+    let actual_band =
+        crate::model::WifiBand::from_frequency_label(crate::model::frequency_band(ap.frequency))
+            .and_then(crate::model::WifiBand::nm_value);
+    // AvailableConnections is device-wide, not AP-specific. A match on band
+    // must not skip channel validation; unknown-frequency hidden APs cannot
+    // satisfy an explicit band/channel constraint (upstream 99bb1a7809).
+    band.is_none_or(|band| Some(band) == actual_band)
+        && (channel == 0 || crate::model::frequency_channel(ap.frequency) == channel)
 }
 
 fn wifi_settings_section(settings: &ConnectionSettings) -> Option<&HashMap<String, OwnedValue>> {

@@ -20,6 +20,7 @@ mod hotspot;
 mod inventory;
 mod ip_settings;
 mod ip_status;
+mod profile_policy;
 mod scan;
 mod scan_schedule;
 mod settings;

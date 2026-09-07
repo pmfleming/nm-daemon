@@ -49,7 +49,10 @@ The global resolved setting is a ceiling: `no` would veto a per-link enable;
 `resolve` permits resolution but not hostname advertising. NetworkManager's
 per-link default remains **off**. Explicit per-profile settings override that
 default. Do not install competing NetworkManager `[connection-*]` overrides that
-enable mDNS for inherited Wi-Fi profiles.
+enable mDNS for inherited Wi-Fi profiles. Within a `conf.d` directory, filenames
+are merged in bytewise (ASCII) order and later values win: `10-a.conf` sorts before
+`9-a.conf`, not after it. Inspect `NetworkManager --print-config` rather than
+assuming a numeric-looking filename guarantees precedence.
 
 Use `programs.shelllist.discovery.enable = false` to manage this stack yourself;
 use `discovery.openFirewall = false` to supply interface-specific firewall rules.

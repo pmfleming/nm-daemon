@@ -130,6 +130,10 @@ impl Nm {
         let profile = select_profile(&connections, selector)?;
         let device = activation_device(profile, &devices, selector)?;
         let profile_path = object_path(&profile.path)?;
+        super::profile_policy::validate_private_ca_paths(
+            &self.connection_settings(&profile_path)?,
+            ErrorOperation::Connect,
+        )?;
         let device_path = object_path(device.as_deref().unwrap_or("/"))?;
         let specific_object = object_path("/")?;
         tracing::info!(
@@ -296,7 +300,9 @@ impl Nm {
         available_by_profile: &HashMap<String, Vec<String>>,
         active_by_profile: &HashMap<&str, &str>,
     ) -> Result<Option<NetworkConnectionSummary>> {
-        let settings = self.connection_settings(path)?;
+        let Some(settings) = self.connection_settings_if_present(path)? else {
+            return Ok(None);
+        };
         let Some(connection) = settings.get("connection") else {
             return Ok(None);
         };

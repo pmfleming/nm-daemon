@@ -72,6 +72,10 @@ impl Nm {
             tracing::info!(ssid = %target.ssid, connection = %connection_path, "updating compatible saved profile before activation");
             return self.update_connection_settings_for_activation(connection_path, settings);
         }
+        super::profile_policy::validate_private_ca_paths(
+            &self.connection_settings(connection_path)?,
+            crate::error::ErrorOperation::Connect,
+        )?;
         if !self.saved_wifi_connection_needs_secret_agent(connection_path, None)? {
             return Ok(());
         }

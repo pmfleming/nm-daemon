@@ -44,7 +44,7 @@ Failures use typed errors:
 }
 ```
 
-See [the architecture guide](./docs/architecture.md) for component ownership, state transitions, cache/command/runtime guarantees, and test boundaries. For real hotspot validation and latency attribution, use the [captive-portal field-test checklist](./docs/captive-portal-field-test.md).
+See [the architecture guide](./docs/architecture.md) for component ownership, state transitions, cache/command/runtime guarantees, and test boundaries. The [upstream compatibility review](docs/nmcli-parity.md#networkmanager-158160-review) tracks NetworkManager GitHub `main` through `8835a2f61f` (September 7, 2026), including private 802.1X CA-directory restrictions and volatile-profile handling. For real hotspot validation and latency attribution, use the [captive-portal field-test checklist](./docs/captive-portal-field-test.md).
 
 ## D-Bus service
 
