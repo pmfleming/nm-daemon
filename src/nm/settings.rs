@@ -5,10 +5,11 @@ use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{ConnectionSettings, DEVICE_IFACE, Nm, SETTINGS_CONNECTION_IFACE, owned_value};
 
+mod casting;
 mod profile_advanced;
 mod profile_secrets;
 
-use crate::error::{DomainError, ErrorOperation};
+use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
 use crate::model::{
     AccessPoint, NetworkEntry, ProfileIpSettings, ProfilePrivacy, SavedWifiConnection,
     SecurityClass, TargetIpAddress, TargetIpRoute, TargetIpSettings, WifiConnectTarget, WifiDevice,
@@ -25,10 +26,7 @@ const NM_SECRET_FLAG_AGENT_OWNED: u32 = 0x1;
 const NM_SECRET_FLAG_NOT_SAVED: u32 = 0x2;
 const NM_SECRET_FLAG_NOT_REQUIRED: u32 = 0x4;
 
-// NMSettingConnectionMdns values. Cast discovery only needs resolve access;
-// enabling hostname registration would expose more than this toggle promises.
-const NM_MDNS_DISABLED: i32 = 0;
-const NM_MDNS_RESOLVE: i32 = 1;
+use casting::{casting_enabled_from_settings, set_casting_enabled};
 
 type ActivationTarget = (OwnedObjectPath, OwnedObjectPath, OwnedObjectPath);
 
@@ -112,9 +110,12 @@ impl Nm {
     }
 
     pub(crate) fn set_connection_casting_by_path(&self, path: &str, enabled: bool) -> Result<()> {
-        self.mutate_connection_settings(path, "Cast discovery", |settings| {
-            set_casting_enabled(settings, enabled)
-        })
+        self.mutate_connection_settings_with_casting(
+            path,
+            "Cast discovery",
+            Some(enabled),
+            |settings| set_casting_enabled(settings, enabled),
+        )
     }
 
     pub(crate) fn set_connection_mac_randomization_by_path(
@@ -245,26 +246,31 @@ impl Nm {
         update: &WifiProfileUpdate,
     ) -> Result<()> {
         validate_profile_update(update)?;
-        self.mutate_connection_settings(path, "advanced Wi-Fi profile", |settings| {
-            check_expected_version(settings, update.expected_version.as_deref())?;
-            let connection = settings.entry("connection".to_string()).or_default();
-            connection.insert("autoconnect".to_string(), owned_value(update.autoconnect)?);
-            connection.insert(
-                "metered".to_string(),
-                owned_value(metered_code(&update.metered)?)?,
-            );
-            settings
-                .entry("802-11-wireless".to_string())
-                .or_default()
-                .insert("hidden".to_string(), owned_value(update.hidden)?);
-            apply_mac_address_policy(settings, &update.mac_address_policy)?;
-            super::ip_settings::set_send_hostname(settings, "ipv4", update.send_hostname)?;
-            super::ip_settings::set_send_hostname(settings, "ipv6", update.send_hostname)?;
-            super::ip_settings::replace(settings, "ipv4", &update.ipv4)?;
-            super::ip_settings::replace(settings, "ipv6", &update.ipv6)?;
-            apply_advanced(settings, &update.advanced)?;
-            update_profile_secrets(settings, update)
-        })
+        self.mutate_connection_settings_with_casting(
+            path,
+            "advanced Wi-Fi profile",
+            update.advanced.casting_enabled,
+            |settings| {
+                check_expected_version(settings, update.expected_version.as_deref())?;
+                let connection = settings.entry("connection".to_string()).or_default();
+                connection.insert("autoconnect".to_string(), owned_value(update.autoconnect)?);
+                connection.insert(
+                    "metered".to_string(),
+                    owned_value(metered_code(&update.metered)?)?,
+                );
+                settings
+                    .entry("802-11-wireless".to_string())
+                    .or_default()
+                    .insert("hidden".to_string(), owned_value(update.hidden)?);
+                apply_mac_address_policy(settings, &update.mac_address_policy)?;
+                super::ip_settings::set_send_hostname(settings, "ipv4", update.send_hostname)?;
+                super::ip_settings::set_send_hostname(settings, "ipv6", update.send_hostname)?;
+                super::ip_settings::replace(settings, "ipv4", &update.ipv4)?;
+                super::ip_settings::replace(settings, "ipv6", &update.ipv6)?;
+                apply_advanced(settings, &update.advanced)?;
+                update_profile_secrets(settings, update)
+            },
+        )
     }
 
     fn mutate_connection_settings(
@@ -273,11 +279,41 @@ impl Nm {
         action: &str,
         mutate: impl FnOnce(&mut ConnectionSettings) -> Result<()>,
     ) -> Result<()> {
+        self.mutate_connection_settings_with_casting(path, action, None, mutate)
+    }
+
+    fn mutate_connection_settings_with_casting(
+        &self,
+        path: &str,
+        action: &str,
+        casting: Option<bool>,
+        mutate: impl FnOnce(&mut ConnectionSettings) -> Result<()>,
+    ) -> Result<()> {
         let _transaction = self.begin_profile_transaction();
         let path = OwnedObjectPath::try_from(path).context("parse connection path")?;
         let mut settings = self.connection_settings(&path)?;
+        if casting.is_some() && saved_wifi_connection_from_settings(&path, &settings).is_none() {
+            return Err(DomainError::validation(
+                ErrorOperation::ProfileOperation,
+                "Cast discovery requires a saved Wi-Fi profile",
+            )
+            .into());
+        }
         mutate(&mut settings)?;
-        self.update_connection_settings(&path, settings, action)
+        self.update_connection_settings(&path, settings, action)?;
+        if let Some(enabled) = casting {
+            self.reapply_casting(&path, enabled).map_err(|error| {
+                DomainError::new(
+                    ErrorCode::ActivationFailed,
+                    ErrorOperation::ProfileOperation,
+                    ErrorSource::NetworkManager,
+                    format!("Profile saved, but live Cast discovery update failed; retry the toggle or reconnect to apply: {error:#}"),
+                ).with_detail("profile_saved", true)
+                    .with_detail("live_applied", false)
+                    .with_cause(error)
+            })?;
+        }
+        Ok(())
     }
 
     pub(super) fn update_connection_settings(
@@ -613,27 +649,6 @@ fn saved_wifi_connection_from_settings(
         casting_enabled: casting_enabled_from_settings(settings),
         privacy,
     })
-}
-
-fn casting_enabled_from_settings(settings: &ConnectionSettings) -> bool {
-    settings
-        .get("connection")
-        .and_then(|connection| connection.get("mdns"))
-        .and_then(|value| value.try_clone().ok()?.try_into().ok())
-        .is_some_and(|value: i32| value > NM_MDNS_DISABLED)
-}
-
-fn set_casting_enabled(settings: &mut ConnectionSettings, enabled: bool) -> Result<()> {
-    let value = if enabled {
-        NM_MDNS_RESOLVE
-    } else {
-        NM_MDNS_DISABLED
-    };
-    settings
-        .entry("connection".to_string())
-        .or_default()
-        .insert("mdns".to_string(), owned_value(value)?);
-    Ok(())
 }
 
 fn wifi_share_payload_for_settings(

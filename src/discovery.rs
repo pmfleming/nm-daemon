@@ -1,8 +1,12 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
+
+use tokio::time::{Instant, timeout_at};
 
 use anyhow::Result;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use zbus::blocking::{Connection, Proxy};
+use zbus::{Connection, Proxy};
 
 use crate::error::{DomainError, ErrorOperation, ensure_domain};
 
@@ -30,6 +34,12 @@ type ResolveRecordReply = (Vec<ResolvedRecord>, u64);
 const DNS_CLASS_IN: u16 = 1;
 const DNS_TYPE_PTR: u16 = 12;
 const MAX_DISCOVERY_INSTANCES: usize = 128;
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+const INSTANCE_TIMEOUT: Duration = Duration::from_secs(2);
+// SD_RESOLVED_MDNS_IPV4 / SD_RESOLVED_MDNS_IPV6: never fall back to
+// unicast DNS or LLMNR for this local-discovery API.
+const MDNS_IPV4: u64 = 1 << 3;
+const MDNS_IPV6: u64 = 1 << 4;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceQuery {
@@ -47,13 +57,13 @@ impl ServiceQuery {
         family: AddressFamily,
     ) -> Result<Self> {
         validate_service_type(&service_type)?;
-        let name = name
-            .map(|name| name.trim().to_string())
-            .filter(|name| !name.is_empty());
-        if name.as_ref().is_some_and(|name| name.len() > 255) {
+        // An instance is one DNS label. Spaces (including leading/trailing
+        // spaces) are meaningful and must not be trimmed.
+        let name = name.filter(|name| !name.is_empty());
+        if name.as_ref().is_some_and(|name| name.len() > 63) {
             return Err(DomainError::validation(
                 ErrorOperation::Discovery,
-                "DNS-SD service instance names must not exceed 255 bytes",
+                "DNS-SD service instance names must not exceed 63 bytes",
             )
             .into());
         }
@@ -84,6 +94,14 @@ pub(crate) enum AddressFamily {
 }
 
 impl AddressFamily {
+    fn mdns_flags(self) -> u64 {
+        match self {
+            Self::Any => MDNS_IPV4 | MDNS_IPV6,
+            Self::Ipv4 => MDNS_IPV4,
+            Self::Ipv6 => MDNS_IPV6,
+        }
+    }
+
     fn resolved_value(self) -> i32 {
         match self {
             Self::Any => AF_UNSPEC,
@@ -135,32 +153,48 @@ pub(crate) struct DiscoveryTxtRecord {
     pub(crate) raw_hex: String,
 }
 
-pub(crate) fn resolve_services(
+pub(crate) async fn resolve_services(
     conn: Connection,
     query: &ServiceQuery,
 ) -> Result<DiscoverySnapshot> {
-    let proxy = Proxy::new(
-        &conn,
-        RESOLVED_DESTINATION,
-        RESOLVED_PATH,
-        RESOLVED_INTERFACE,
+    let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+    let proxy = timeout_at(
+        deadline,
+        Proxy::new(
+            &conn,
+            RESOLVED_DESTINATION,
+            RESOLVED_PATH,
+            RESOLVED_INTERFACE,
+        ),
     )
+    .await
+    .map_err(|_| discovery_timeout())?
     .map_err(|error| ensure_domain(ErrorOperation::Discovery, error.into()))?;
+    resolve_with_proxy(&proxy, query, deadline).await
+}
+
+async fn resolve_with_proxy(
+    proxy: &Proxy<'_>,
+    query: &ServiceQuery,
+    deadline: Instant,
+) -> Result<DiscoverySnapshot> {
     match query.name.as_deref() {
-        Some(instance) => {
-            resolve_one(&proxy, query, instance).map(|reply| snapshot_from_reply(query, reply))
-        }
-        None => browse(&proxy, query),
+        Some(instance) => resolve_one(proxy, query, instance, deadline)
+            .await
+            .map(|reply| snapshot_from_reply(query, reply)),
+        None => browse(proxy, query, deadline).await,
     }
 }
 
-fn resolve_one(
+async fn resolve_one(
     proxy: &Proxy<'_>,
     query: &ServiceQuery,
     instance: &str,
+    deadline: Instant,
 ) -> Result<ResolveServiceReply> {
-    proxy
-        .call(
+    timeout_at(
+        deadline,
+        proxy.call(
             "ResolveService",
             &(
                 query.interface_index,
@@ -168,33 +202,61 @@ fn resolve_one(
                 query.service_type.as_str(),
                 MDNS_DOMAIN,
                 query.family.resolved_value(),
-                0_u64,
+                query.family.mdns_flags(),
             ),
-        )
-        .map_err(|error| ensure_domain(ErrorOperation::Discovery, error.into()))
+        ),
+    )
+    .await
+    .map_err(|_| discovery_timeout())?
+    .map_err(|error| ensure_domain(ErrorOperation::Discovery, error.into()))
 }
 
-fn browse(proxy: &Proxy<'_>, query: &ServiceQuery) -> Result<DiscoverySnapshot> {
+fn discovery_timeout() -> anyhow::Error {
+    DomainError::timeout(
+        ErrorOperation::Discovery,
+        "mDNS discovery deadline exceeded",
+    )
+    .into()
+}
+
+async fn browse(
+    proxy: &Proxy<'_>,
+    query: &ServiceQuery,
+    deadline: Instant,
+) -> Result<DiscoverySnapshot> {
     let record_name = format!("{}.{}", query.service_type, MDNS_DOMAIN);
-    let reply: ResolveRecordReply = match proxy.call(
-        "ResolveRecord",
-        &(
-            query.interface_index,
-            record_name.as_str(),
-            DNS_CLASS_IN,
-            DNS_TYPE_PTR,
-            0_u64,
+    let reply: ResolveRecordReply = match timeout_at(
+        deadline,
+        proxy.call(
+            "ResolveRecord",
+            &(
+                query.interface_index,
+                record_name.as_str(),
+                DNS_CLASS_IN,
+                DNS_TYPE_PTR,
+                query.family.mdns_flags(),
+            ),
         ),
-    ) {
+    )
+    .await
+    .map_err(|_| discovery_timeout())?
+    {
         Ok(reply) => reply,
         Err(error) if empty_browse_error(&error) => return Ok(empty_snapshot(query, 0)),
         Err(error) => return Err(ensure_domain(ErrorOperation::Discovery, error.into())),
     };
 
     let (records, response_flags) = reply;
-    let (instances, mut warnings) = browse_instances(records, &query.service_type);
-    let (services, response_flags) =
-        resolve_instances(proxy, query, instances, response_flags, &mut warnings);
+    let (instances, mut warnings) = browse_instances(records, query);
+    let (services, response_flags) = resolve_instances(
+        proxy,
+        query,
+        instances,
+        response_flags,
+        &mut warnings,
+        deadline,
+    )
+    .await;
     Ok(DiscoverySnapshot {
         services,
         warnings,
@@ -204,19 +266,26 @@ fn browse(proxy: &Proxy<'_>, query: &ServiceQuery) -> Result<DiscoverySnapshot> 
 
 fn browse_instances(
     records: Vec<ResolvedRecord>,
-    service_type: &str,
-) -> (Vec<String>, Vec<String>) {
+    query: &ServiceQuery,
+) -> (Vec<(i32, String)>, Vec<String>) {
     let mut instances = Vec::new();
     let mut warnings = Vec::new();
-    for (_, class, record_type, bytes) in records {
+    for (interface, class, record_type, bytes) in records {
+        if interface <= 0 || (query.interface_index != 0 && interface != query.interface_index) {
+            warnings.push("ignored a DNS-SD record from an unexpected interface".to_string());
+            continue;
+        }
         if class != DNS_CLASS_IN || record_type != DNS_TYPE_PTR {
             continue;
         }
-        let Some(instance) = ptr_instance(&bytes, service_type, MDNS_DOMAIN) else {
+        let Some(instance) = ptr_instance(&bytes, &query.service_type, MDNS_DOMAIN) else {
             warnings.push("ignored one malformed DNS-SD PTR record".to_string());
             continue;
         };
-        if instances.contains(&instance) {
+        let instance = (interface, instance);
+        if instances.iter().any(|(iface, name): &(i32, String)| {
+            *iface == interface && name.eq_ignore_ascii_case(&instance.1)
+        }) {
             continue;
         }
         if instances.len() == MAX_DISCOVERY_INSTANCES {
@@ -230,23 +299,44 @@ fn browse_instances(
     (instances, warnings)
 }
 
-fn resolve_instances(
+async fn resolve_instances(
     proxy: &Proxy<'_>,
     query: &ServiceQuery,
-    instances: Vec<String>,
+    instances: Vec<(i32, String)>,
     mut response_flags: u64,
     warnings: &mut Vec<String>,
+    deadline: Instant,
 ) -> (Vec<DiscoveredService>, u64) {
     let mut services = Vec::new();
-    for instance in instances {
-        match resolve_one(proxy, query, &instance) {
+    // A stale instance must not hold up every other device. Bound concurrency
+    // as well as elapsed time; dropping the stream cancels outstanding calls.
+    let mut resolutions = futures::stream::iter(instances)
+        .map(|(interface_index, instance)| async move {
+            let scoped_query = ServiceQuery {
+                interface_index,
+                ..query.clone()
+            };
+            let instance_deadline = deadline.min(Instant::now() + INSTANCE_TIMEOUT);
+            let reply = resolve_one(proxy, &scoped_query, &instance, instance_deadline).await;
+            (interface_index, instance, reply)
+        })
+        .buffer_unordered(8);
+    loop {
+        if Instant::now() >= deadline {
+            warnings.push("mDNS discovery deadline exceeded; results are incomplete".to_string());
+            break;
+        }
+        let Some((interface, instance, reply)) = resolutions.next().await else {
+            break;
+        };
+        match reply {
             Ok(reply) => {
                 let snapshot = snapshot_from_reply(query, reply);
                 response_flags |= snapshot.response_flags;
                 services.extend(snapshot.services);
             }
             Err(error) => warnings.push(format!(
-                "could not resolve DNS-SD instance {instance}: {error:#}"
+                "could not resolve DNS-SD instance {instance} on interface {interface}: {error:#}"
             )),
         }
     }
@@ -301,15 +391,17 @@ fn empty_browse_error(error: &zbus::Error) -> bool {
                 name.as_str(),
                 "org.freedesktop.resolve1.NoSuchRR"
                     | "org.freedesktop.resolve1.DnsError.NXDOMAIN"
-                    | "org.freedesktop.resolve1.NoNameServers"
-                    | "org.freedesktop.DBus.Error.Timeout"
             )
     )
 }
 
 fn ptr_instance(record: &[u8], service_type: &str, domain: &str) -> Option<String> {
     let mut offset = 0;
-    dns_labels(record, &mut offset)?;
+    let owner = dns_labels(record, &mut offset)?;
+    let expected_owner = format!("{service_type}.{domain}");
+    if !labels_match(&owner, &expected_owner) {
+        return None;
+    }
     let record_type = u16::from_be_bytes(take_bytes(record, &mut offset)?);
     let record_class = u16::from_be_bytes(take_bytes(record, &mut offset)?);
     take_bytes::<4>(record, &mut offset)?;
@@ -339,15 +431,24 @@ fn ptr_instance(record: &[u8], service_type: &str, domain: &str) -> Option<Strin
     String::from_utf8(instance.clone()).ok()
 }
 
+fn labels_match(labels: &[Vec<u8>], name: &str) -> bool {
+    labels.len() == name.split('.').count()
+        && labels
+            .iter()
+            .zip(name.split('.'))
+            .all(|(label, expected)| label.eq_ignore_ascii_case(expected.as_bytes()))
+}
+
 fn dns_labels(bytes: &[u8], offset: &mut usize) -> Option<Vec<Vec<u8>>> {
+    let start = *offset;
     let mut labels = Vec::new();
     loop {
         let length = usize::from(*bytes.get(*offset)?);
         *offset += 1;
         if length == 0 {
-            return Some(labels);
+            return (*offset - start <= 255).then_some(labels);
         }
-        if length > 63 {
+        if length > 63 || *offset - start + length >= 255 {
             return None;
         }
         let end = offset.checked_add(length)?;
@@ -399,17 +500,22 @@ fn txt_record(bytes: Vec<u8>) -> DiscoveryTxtRecord {
 }
 
 fn validate_service_type(service_type: &str) -> Result<()> {
-    let valid = service_type.len() <= 255
-        && service_type
-            .strip_suffix("._tcp")
-            .or_else(|| service_type.strip_suffix("._udp"))
-            .is_some_and(|label| {
-                label.starts_with('_')
-                    && (2..=63).contains(&label.len())
-                    && label
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-            });
+    // RFC 6763 / RFC 6335 service names: 1–15 ASCII letters, digits or
+    // hyphens, with at least one letter and no edge/consecutive hyphens.
+    let valid = service_type
+        .strip_suffix("._tcp")
+        .or_else(|| service_type.strip_suffix("._udp"))
+        .and_then(|label| label.strip_prefix('_'))
+        .is_some_and(|label| {
+            (1..=15).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && !label.contains("--")
+                && label.bytes().any(|byte| byte.is_ascii_alphabetic())
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        });
     if valid {
         Ok(())
     } else {
@@ -434,6 +540,8 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{AddressFamily, ServiceQuery, ptr_instance, snapshot_from_reply};
+
+    mod dbus;
 
     #[test]
     fn query_accepts_dns_sd_types_and_rejects_non_service_names() {
@@ -464,6 +572,35 @@ mod tests {
             )
             .is_err()
         );
+        for name in [
+            "_bad_name._tcp",
+            "_-edge._tcp",
+            "_123._udp",
+            "_longerthan15chars._tcp",
+            "_two--hyphens._tcp",
+        ] {
+            assert!(
+                ServiceQuery::new(name.into(), None, None, AddressFamily::Any).is_err(),
+                "{name}"
+            );
+        }
+        assert!(
+            ServiceQuery::new(
+                "_googlecast._tcp".into(),
+                Some("é".repeat(32)),
+                None,
+                AddressFamily::Any
+            )
+            .is_err()
+        );
+        let query = ServiceQuery::new(
+            "_googlecast._tcp".into(),
+            Some(" Living Room ".into()),
+            None,
+            AddressFamily::Any,
+        )
+        .unwrap();
+        assert_eq!(query.name.as_deref(), Some(" Living Room "));
     }
 
     #[test]
@@ -521,6 +658,12 @@ mod tests {
             Some("Living Room")
         );
         assert!(ptr_instance(&record, "_spotify-connect._tcp", "local").is_none());
+        record[1] = b'x';
+        assert!(
+            ptr_instance(&record, "_googlecast._tcp", "local").is_none(),
+            "reject a PTR owned by a different service"
+        );
+        record[1] = b'_';
         record.pop();
         assert!(ptr_instance(&record, "_googlecast._tcp", "local").is_none());
     }

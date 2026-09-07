@@ -73,7 +73,12 @@ impl<'a> Application<'a> {
     ) -> Result<crate::discovery::DiscoverySnapshot> {
         operation_result(
             ErrorOperation::Discovery,
-            crate::discovery::resolve_services(self.nm.connection(), query),
+            // Discovery runs on a daemon blocking worker with the Tokio timer
+            // driver active; keep the D-Bus requests cancellable at the deadline.
+            futures::executor::block_on(crate::discovery::resolve_services(
+                self.nm.connection().inner().clone(),
+                query,
+            )),
         )
     }
 

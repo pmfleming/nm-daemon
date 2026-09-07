@@ -516,8 +516,9 @@ pub(crate) struct SavedWifiConnection {
     /// Exact SSID bytes used for identity/matching.
     pub(crate) ssid_bytes: Vec<u8>,
     pub(crate) autoconnect: bool,
-    /// Whether this profile permits mDNS discovery used by casting devices.
-    /// Profiles without an explicit NetworkManager setting default to disabled.
+    /// Whether this profile explicitly permits mDNS discovery used by casting devices.
+    /// Inherited policy is reported as disabled, matching the required host mdns=0
+    /// default. This is saved policy, not proof of the live resolver/application state.
     #[serde(default)]
     pub(crate) casting_enabled: bool,
     #[serde(default)]
@@ -781,7 +782,7 @@ pub(crate) struct WifiProfileAdvancedUpdate {
     pub(crate) channel: Option<u32>,
     /// Empty list makes the profile available to every user.
     pub(crate) permissions: Option<Vec<String>>,
-    /// Enables resolve-only mDNS for Cast discovery, or disables mDNS on this profile.
+    /// Saves resolve-only/disabled mDNS and reapplies only that field on active devices.
     pub(crate) casting_enabled: Option<bool>,
     /// Empty string restores the default firewall zone.
     pub(crate) firewall_zone: Option<String>,
