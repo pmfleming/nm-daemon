@@ -122,7 +122,21 @@ impl Device {
 }
 
 #[test]
-fn saved_policy_and_live_reapply_are_scoped_and_partial_failure_is_explicit() {
+fn saved_policy_and_live_reapply_are_scoped_and_partial_failure_is_explicit() -> anyhow::Result<()>
+{
+    crate::test_support::workflows::isolated(
+        concat!(
+            module_path!(),
+            "::saved_policy_and_live_reapply_are_scoped_and_partial_failure_is_explicit"
+        ),
+        || {
+            run_policy_test();
+            Ok(())
+        },
+    )
+}
+
+fn run_policy_test() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

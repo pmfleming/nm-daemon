@@ -544,7 +544,21 @@ mod tests {
     }
 
     #[test]
-    fn fake_secret_service_prompts_are_dismissed_and_never_counted_as_success() {
+    fn fake_secret_service_prompts_are_dismissed_and_never_counted_as_success() -> anyhow::Result<()>
+    {
+        crate::test_support::workflows::isolated(
+            concat!(
+                module_path!(),
+                "::fake_secret_service_prompts_are_dismissed_and_never_counted_as_success"
+            ),
+            || {
+                run_prompt_test();
+                Ok(())
+            },
+        )
+    }
+
+    fn run_prompt_test() {
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

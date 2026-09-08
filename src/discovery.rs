@@ -531,6 +531,39 @@ mod tests {
     mod dbus;
 
     #[test]
+    #[ignore = "opt-in release timing/allocation benchmark"]
+    fn benchmark_discovery_snapshot() -> anyhow::Result<()> {
+        let query = ServiceQuery::new("_googlecast._tcp".into(), None, None, AddressFamily::Any)?;
+        let reply = (
+            vec![
+                (
+                    0,
+                    0,
+                    8009,
+                    "device.local".into(),
+                    vec![(3, 2, vec![192, 0, 2, 10])],
+                    "device.local".into()
+                );
+                16
+            ],
+            vec![b"fn=Living Room".to_vec(), vec![0xff, 0]],
+            "Living Room".into(),
+            "_googlecast._tcp".into(),
+            "local".into(),
+            16,
+        );
+        crate::test_support::performance::measure(
+            "discovery_snapshot_16_services",
+            500,
+            || reply.clone(),
+            |reply| {
+                std::hint::black_box(snapshot_from_reply(&query, reply));
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
     fn query_accepts_dns_sd_types_and_rejects_non_service_names() {
         assert!(
             ServiceQuery::new(

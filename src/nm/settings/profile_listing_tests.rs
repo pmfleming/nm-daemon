@@ -69,7 +69,21 @@ impl Profile {
 }
 
 #[test]
-fn disappearing_profiles_do_not_break_listing_but_existing_profile_errors_survive() {
+fn disappearing_profiles_do_not_break_listing_but_existing_profile_errors_survive()
+-> anyhow::Result<()> {
+    crate::test_support::workflows::isolated(
+        concat!(
+            module_path!(),
+            "::disappearing_profiles_do_not_break_listing_but_existing_profile_errors_survive"
+        ),
+        || {
+            run_listing_test();
+            Ok(())
+        },
+    )
+}
+
+fn run_listing_test() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

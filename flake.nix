@@ -90,11 +90,14 @@
           packages = with pkgs; [
             cargo
             cargo-llvm-cov
+            cargo-machete
             clippy
             gcc
+            heaptrack
             just
             llvmPackages.llvm
             pkg-config
+            python3
             rust-analyzer
             rustc
             rustfmt

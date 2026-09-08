@@ -140,7 +140,21 @@ fn browse_limits_unique_targets_and_rejects_truncated_records() -> anyhow::Resul
 }
 
 #[test]
-fn browsing_is_link_scoped_mdns_only_and_reports_resolver_failures_and_deadlines() {
+fn browsing_is_link_scoped_mdns_only_and_reports_resolver_failures_and_deadlines()
+-> anyhow::Result<()> {
+    crate::test_support::workflows::isolated(
+        concat!(
+            module_path!(),
+            "::browsing_is_link_scoped_mdns_only_and_reports_resolver_failures_and_deadlines"
+        ),
+        || {
+            run_browsing_test();
+            Ok(())
+        },
+    )
+}
+
+fn run_browsing_test() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

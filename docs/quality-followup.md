@@ -26,7 +26,14 @@ Starting checkpoint: `3126c24` (the preceding RustQualityLens refactor). Each st
 
 ## 4. Unused dependencies, coverage, and performance evidence
 
-Pending.
+Reproduce in `nix develop` with `bash tools/quality-evidence.sh all`, or select `dependencies`, `coverage`, `benchmarks`, or `allocations`. The script fails on unavailable tools or failed tests; it does not use `--ignore-run-fail`. The dev shell now includes cargo-machete, heaptrack, and Python for artifact selection.
+
+- **Dependencies:** cargo-machete 0.9.2 with Cargo metadata found no unused dependencies; nothing was removed speculatively.
+- **Coverage:** cargo-llvm-cov 0.8.5 / LLVM 21.1.8: 12,989 / 21,962 lines (**59.14%**) and 1,378 / 2,508 functions (**54.94%**). This includes embedded tests; it is not production-only or branch coverage. Key line results: connect 67.69%, hotspot 84.92%, VPN 70.95%, discovery 86.90%, execution lanes 93.29%. Weak areas include daemon connect transport (5.88%) and runtime orchestration (41.24%).
+- **Test isolation finding:** the initial full instrumented run hit an 8-second discovery timeout, while that test passed alone under instrumentation. A later ordinary full run also hung in the pre-existing Cast-policy fixture until the outer 180-second timeout. Discovery, Cast-policy, profile-listing, and Secret Service D-Bus fixtures now use the bounded, completion-checked child harness, without retries or relaxed deadlines. Subsequent ordinary and full coverage runs passed 103 tests; two opt-in benchmarks were ignored. Preserve the initial failure as evidence of a test-isolation/flakiness risk, not proof that all timing problems are solved.
+- **Release timings:** five samples after five warmups. Median status snapshot over fake D-Bus: **2.495 ms/call** (25 iterations/sample). Median discovery conversion: **6.829 µs/16-service snapshot** (500 iterations/sample); fixture preparation is outside timing. These are new baselines, not before/after speedup claims or real NetworkManager latency.
+- **Heaptrack 1.6.80:** separate profiler runs recorded 567,938 allocation calls / 472.59 KB peak heap for status, and 677,056 calls / 1.34 MB peak heap for discovery. Counts cover the whole benchmark process, including fixtures, warmup, runtime setup, and teardown—not allocations per operation. Reported live-at-exit allocations include test/runtime/background-thread state and are not by themselves proof of a production leak. No unsafe counting allocator was introduced.
+- Logs, LLVM JSON, benchmark samples, and heaptrack traces/reports are under `target/quality-evidence/`. No additional clone removal was made after collecting these baselines.
 
 ## 5. Hardware validation
 

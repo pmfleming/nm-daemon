@@ -1,6 +1,7 @@
 use std::os::unix::net::UnixStream;
 use std::thread;
 
+pub(crate) mod performance;
 pub(crate) mod workflows;
 
 use zbus::Guid;
