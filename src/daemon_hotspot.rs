@@ -106,6 +106,40 @@ mod tests {
     use super::HotspotStartParams;
 
     #[test]
+    fn late_cancellation_stops_the_hotspot_and_emits_only_cancelled() -> anyhow::Result<()> {
+        use crate::test_support::workflows::{ACTIVE, FakeNm, Outcome, isolated};
+        isolated(
+            concat!(
+                module_path!(),
+                "::late_cancellation_stops_the_hotspot_and_emits_only_cancelled"
+            ),
+            || {
+                let fake = FakeNm::new([Outcome::CancelOnSuccess], false)?;
+                let cancellation = fake.cancellation();
+                let request = serde_json::from_str::<HotspotStartParams>(
+                    r#"{"ssid":"Test","passphrase":"test password"}"#,
+                )?
+                .into();
+                let event = fake.terminal_event(|emitter| {
+                    super::run_hotspot_worker(
+                        &fake.nm,
+                        "late-hotspot",
+                        &request,
+                        &cancellation,
+                        &emitter,
+                    )
+                })?;
+                assert_eq!(event["event"], "cancelled");
+                assert_eq!(event["request_id"], "late-hotspot");
+                let state = fake.state.lock().unwrap();
+                assert_eq!(state.deactivated, [ACTIVE]);
+                assert_eq!(state.deleted, 1);
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
     fn insecure_security_choices_are_rejected_at_the_parameter_boundary() {
         for rejected in [
             r#"{"security":"wep"}"#,

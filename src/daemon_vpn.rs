@@ -147,6 +147,38 @@ mod tests {
 
     use super::VpnConnectParams;
 
+    #[test]
+    fn late_cancellation_disconnects_the_vpn_without_deleting_its_profile() -> anyhow::Result<()> {
+        use crate::test_support::workflows::{ACTIVE, FakeNm, Outcome, isolated};
+        isolated(
+            concat!(
+                module_path!(),
+                "::late_cancellation_disconnects_the_vpn_without_deleting_its_profile"
+            ),
+            || {
+                let fake = FakeNm::new([Outcome::CancelOnSuccess], true)?;
+                let cancellation = fake.cancellation();
+                let (selector, timeout) = connect(r#"{"uuid":"test-vpn","timeout":1}"#).split()?;
+                let event = fake.terminal_event(|emitter| {
+                    super::run_vpn_worker(
+                        &fake.nm,
+                        "late-vpn",
+                        &selector,
+                        timeout,
+                        &cancellation,
+                        &emitter,
+                    )
+                })?;
+                assert_eq!(event["event"], "cancelled", "{event}");
+                assert_eq!(event["request_id"], "late-vpn");
+                let state = fake.state.lock().unwrap();
+                assert_eq!(state.deactivated, [ACTIVE]);
+                assert_eq!(state.deleted, 0);
+                Ok(())
+            },
+        )
+    }
+
     fn connect(json: &str) -> VpnConnectParams {
         serde_json::from_str(json).expect("connect params")
     }

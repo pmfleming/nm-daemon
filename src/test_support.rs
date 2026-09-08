@@ -1,6 +1,8 @@
 use std::os::unix::net::UnixStream;
 use std::thread;
 
+pub(crate) mod workflows;
+
 use zbus::Guid;
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;

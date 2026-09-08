@@ -191,11 +191,9 @@ impl Nm {
         active_path: &OwnedObjectPath,
         profile_id: &str,
     ) -> Result<VpnActiveStatus> {
-        let active = self
-            .network_active_connections()?
-            .into_iter()
-            .find(|active| active.path == active_path.as_str());
-        if let Some(active) = active {
+        // ActivateConnection already returned the authoritative object path.
+        // The cached root ActiveConnections list can lag its creation signal.
+        if let Some(active) = self.active_connection_summary(active_path)? {
             return Ok(self.vpn_active_status(active));
         }
         if let Some(signal) = self.latest_health_signal(HealthSubject::Vpn, active_path.as_str()) {

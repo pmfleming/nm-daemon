@@ -263,7 +263,7 @@ impl Nm {
             .filter(|speed| *speed > 0)
     }
 
-    fn active_connection_summary(
+    pub(super) fn active_connection_summary(
         &self,
         path: &OwnedObjectPath,
     ) -> Result<Option<ActiveConnectionSummary>> {
