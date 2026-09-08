@@ -19,7 +19,10 @@ Starting checkpoint: `3126c24` (the preceding RustQualityLens refactor). Each st
 
 ## 3. Runtime boundaries and architecture measurements
 
-Pending.
+- Moved bounded execution into `daemon_runtime/lanes.rs`. It runs context-free jobs; NetworkManager context is captured by the runtime when admitting work. Task registration/cancellation remain in the runtime, separate from executor mechanics.
+- Moved subscription ownership, debounce, and refresh coalescing into `daemon_runtime/subscriptions.rs`. The runtime no longer imports subscription payload-building internals.
+- Added tests for full-queue rejection, panic containment and lane reuse, rejection after shutdown, and preserving exactly one final refresh after coalesced invalidations. All 103 tests and strict Clippy pass.
+- Runtime root shrank from 1,509 to 1,032 physical lines. RQLens evidence: `target/quality-step1/` versus `target/quality-step3/` (includes step 2). Root outbound dependencies: 9 → 7; locality: 86.5 → 91.75; leverage: 76.0 → 84.5. Whole-project means: locality 94.676 → 94.840, leverage 62.506 → 62.518; module count 81 → 83. These are heuristic architecture signals, still partial due to generated configuration wiring.
 
 ## 4. Unused dependencies, coverage, and performance evidence
 

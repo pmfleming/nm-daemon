@@ -121,10 +121,12 @@ Directional transmit and receive link rates bypass the command gateway. `src/nl8
 
 The process uses Tokio for command dispatch, the frontend session D-Bus service, JSONL sessions, owner monitoring, subscription control, and shutdown. The daemon creates one shared blocking `Nm` instance and therefore one NetworkManager system-bus connection. Keeping this domain boundary blocking is deliberate: NetworkManager workflows already provide cancellation and rollback semantics, while Tokio prevents them from blocking frontend transport work.
 
-`DaemonRuntime` owns:
+`DaemonRuntime` owns task registration, cancellation, admission policy, and orchestration. `src/daemon_runtime/lanes.rs` owns bounded blocking execution without depending on NetworkManager or subscriptions; jobs capture their domain context at admission. `src/daemon_runtime/subscriptions.rs` owns the single control actor, subscription state, and refresh coalescing.
+
+Together these provide:
 
 - a bounded Tokio long-work queue for cancellable scan/connect/band-selection jobs;
-- a separate bounded Tokio fast queue for immediate calls, status refreshes, and target-guarded activation aborts;
+- separate bounded Tokio read and serialized fast queues for read-only calls, mutations, shared refreshes, and target-guarded activation aborts;
 - fixed concurrency semaphores for both lanes, with admitted jobs executed by `spawn_blocking` and panic containment around every job;
 - cancellable scan/connect task registrations;
 - one Tokio control actor that exclusively owns subscriptions and refresh coalescing;
