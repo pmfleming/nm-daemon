@@ -21,6 +21,15 @@ pub(crate) fn value_map<const N: usize>(
         .context("create D-Bus variant dictionary")
 }
 
+/// Read a typed property by reference; a missing or differently typed value
+/// remains absent rather than being coerced or cloned.
+pub(crate) fn setting<'a, T>(section: &'a HashMap<String, OwnedValue>, key: &str) -> Option<T>
+where
+    T: TryFrom<&'a OwnedValue>,
+{
+    section.get(key)?.try_into().ok()
+}
+
 pub(crate) fn value_string(value: &OwnedValue) -> Option<String> {
     <&str>::try_from(value).ok().map(str::to_string)
 }
@@ -79,7 +88,7 @@ pub(crate) fn insert_optional_u32s(
 
 #[cfg(test)]
 mod tests {
-    use super::{value_map, value_string};
+    use super::{setting, value_map, value_string};
 
     #[test]
     fn borrowed_dictionary_values_keep_their_dbus_types() -> anyhow::Result<()> {
@@ -95,8 +104,10 @@ mod tests {
         drop(text);
         assert_eq!(value_string(&values["text"]).as_deref(), Some("Example"));
         assert_eq!(value_string(&values["channel"]), None);
-        assert_eq!(u32::try_from(&values["channel"])?, 36);
-        assert!(bool::try_from(&values["enabled"])?);
+        assert_eq!(setting::<u32>(&values, "channel"), Some(36));
+        assert_eq!(setting::<bool>(&values, "enabled"), Some(true));
+        assert_eq!(setting::<bool>(&values, "channel"), None);
+        assert_eq!(setting::<u32>(&values, "missing"), None);
         assert_eq!(Vec::<u8>::try_from(values["ssid"].try_clone()?)?, bytes);
         assert_eq!(
             Vec::<String>::try_from(values["protocols"].try_clone()?)?,

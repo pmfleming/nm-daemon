@@ -14,7 +14,7 @@ use crate::model::{
     ProfileEnterpriseSettings, ProfileEnterpriseUpdate, SecretFlags, WifiBand,
     WifiProfileAdvancedUpdate,
 };
-use crate::variant::insert_optional_value;
+use crate::variant::{insert_optional_value, setting};
 
 const WIRELESS: &str = "802-11-wireless";
 const ENTERPRISE: &str = "802-1x";
@@ -95,7 +95,7 @@ pub(super) fn read_enterprise(settings: &ConnectionSettings) -> Option<ProfileEn
         phase1_peapver: text(section, "phase1-peapver"),
         phase1_peaplabel: text(section, "phase1-peaplabel"),
         phase1_fast_provisioning: text(section, "phase1-fast-provisioning"),
-        phase1_auth_flags: number(section, "phase1-auth-flags"),
+        phase1_auth_flags: setting(section, "phase1-auth-flags"),
         phase2_auth: text(section, "phase2-auth"),
         phase2_autheap: text(section, "phase2-autheap"),
         phase2_ca_cert: blob(section, "phase2-ca-cert"),
@@ -435,18 +435,11 @@ fn strings(section: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
 }
 
 fn flag(section: &HashMap<String, OwnedValue>, key: &str) -> bool {
-    section
-        .get(key)
-        .and_then(|value| bool::try_from(value).ok())
-        .unwrap_or(false)
-}
-
-fn number(section: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
-    section.get(key).and_then(|value| u32::try_from(value).ok())
+    setting(section, key).unwrap_or(false)
 }
 
 fn secret_flags(section: &HashMap<String, OwnedValue>, key: &str) -> SecretFlags {
-    SecretFlags::from_code(number(section, key).unwrap_or(0))
+    SecretFlags::from_code(setting(section, key).unwrap_or(0))
 }
 
 #[cfg(test)]

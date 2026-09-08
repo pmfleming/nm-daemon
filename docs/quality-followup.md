@@ -12,7 +12,10 @@ Starting checkpoint: `3126c24` (the preceding RustQualityLens refactor). Each st
 
 ## 2. Shared selection/settings logic
 
-Pending.
+- Unified saved Wi-Fi SSID/BSSID/band/channel interpretation in `WifiProfileMatch`, used by cached inventory candidates and direct activation selection. Tests verify both paths agree for band/channel restrictions, unknown frequency, exact SSID bytes/case, alternate BSSID notation, and malformed BSSIDs.
+- Added one borrowed typed dictionary reader and removed duplicate scalar conversion helpers in inventory/profile editing. Preserved the existing settings-specific UTF-8 byte-array fallback for legacy string properties.
+- Deliberately retained different UUID/path precedence in VPN and generic deactivation selectors rather than forcing superficially similar code into a misleading abstraction.
+- Step 1 passed 100 tests and strict Clippy. Step 2 adds one matching regression test.
 
 ## 3. Runtime boundaries and architecture measurements
 

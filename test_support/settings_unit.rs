@@ -41,10 +41,36 @@ fn profile_matching_requires_both_band_and_channel_and_handles_unknown_frequency
         let candidate =
             super::saved_wifi_profile_candidate_from_settings(&path, &settings).unwrap();
         assert_eq!(
-            candidate.matches_access_point(&ap),
+            candidate.matcher.matches_access_point(&ap),
             expected,
             "inventory and activation must agree"
         );
+    }
+}
+
+#[test]
+fn cached_and_direct_profile_matching_share_exact_ssid_and_bssid_rules() {
+    let mut settings = wifi_settings("Example", "802-11-wireless");
+    settings.get_mut("802-11-wireless").unwrap().insert(
+        "bssid".into(),
+        crate::nm::owned_value(vec![0_u8, 17, 34, 51, 68, 255]).unwrap(),
+    );
+    let path = zvariant::OwnedObjectPath::try_from("/settings/1").unwrap();
+    let candidate = super::saved_wifi_profile_candidate_from_settings(&path, &settings).unwrap();
+    for (ssid, bssid, expected) in [
+        ("Example", "00:11:22:33:44:FF", true),
+        ("Example", "00-11-22-33-44-ff", true),
+        ("example", "00:11:22:33:44:FF", false),
+        ("Example", "00:11:22:33:44:55", false),
+        ("Example", "invalid", false),
+    ] {
+        let ap = crate::model::AccessPoint {
+            ssid: ssid.into(),
+            bssid: bssid.into(),
+            ..Default::default()
+        };
+        assert_eq!(super::settings_match_access_point(&settings, &ap), expected);
+        assert_eq!(candidate.matcher.matches_access_point(&ap), expected);
     }
 }
 

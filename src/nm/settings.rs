@@ -475,7 +475,7 @@ impl Nm {
         let compatible = available.iter().filter_map(|path| {
             profiles_by_path
                 .get(&path.to_string())
-                .filter(|candidate| candidate.matches_access_point(access_point))
+                .filter(|candidate| candidate.matcher.matches_access_point(access_point))
                 .map(|candidate| candidate.profile.clone())
         });
         matches
@@ -612,13 +612,29 @@ impl Nm {
 
 struct SavedWifiProfileCandidate {
     profile: SavedWifiConnection,
+    matcher: WifiProfileMatch,
+}
+
+/// One interpretation of saved SSID/BSSID/band/channel restrictions for both
+/// inventory enrichment and activation selection.
+struct WifiProfileMatch {
     ssid_bytes: Vec<u8>,
     bssid_bytes: Option<Vec<u8>>,
     band: Option<String>,
     channel: u32,
 }
 
-impl SavedWifiProfileCandidate {
+impl WifiProfileMatch {
+    fn from_settings(settings: &ConnectionSettings) -> Option<Self> {
+        let wireless = wifi_settings_section(settings)?;
+        Some(Self {
+            ssid_bytes: wireless.get("ssid").and_then(setting_bytes)?,
+            bssid_bytes: wireless.get("bssid").and_then(setting_bytes),
+            band: setting_string(wireless, "band").filter(|band| !band.is_empty()),
+            channel: wireless.get("channel").and_then(setting_u32).unwrap_or(0),
+        })
+    }
+
     fn matches_access_point(&self, ap: &AccessPoint) -> bool {
         ssid_bytes_match(&self.ssid_bytes, ap.ssid_bytes().as_ref())
             && self
@@ -633,16 +649,9 @@ fn saved_wifi_profile_candidate_from_settings(
     path: &OwnedObjectPath,
     settings: &ConnectionSettings,
 ) -> Option<SavedWifiProfileCandidate> {
-    let profile = saved_wifi_connection_from_settings(path, settings)?;
-    let wireless = wifi_settings_section(settings)?;
-    let ssid_bytes = wireless.get("ssid").and_then(setting_bytes)?;
-    let bssid_bytes = wireless.get("bssid").and_then(setting_bytes);
     Some(SavedWifiProfileCandidate {
-        profile,
-        ssid_bytes,
-        bssid_bytes,
-        band: setting_string(wireless, "band").filter(|band| !band.is_empty()),
-        channel: wireless.get("channel").and_then(setting_u32).unwrap_or(0),
+        profile: saved_wifi_connection_from_settings(path, settings)?,
+        matcher: WifiProfileMatch::from_settings(settings)?,
     })
 }
 
@@ -1188,27 +1197,8 @@ fn settings_match_wifi_ssid(settings: &ConnectionSettings, ssid_bytes: &[u8]) ->
 }
 
 fn settings_match_access_point(settings: &ConnectionSettings, ap: &AccessPoint) -> bool {
-    let Some(wireless) = wifi_settings_section(settings) else {
-        return false;
-    };
-    if !wireless
-        .get("ssid")
-        .and_then(setting_bytes)
-        .is_some_and(|saved_ssid| ssid_bytes_match(&saved_ssid, ap.ssid_bytes().as_ref()))
-    {
-        return false;
-    }
-    wireless
-        .get("bssid")
-        .and_then(setting_bytes)
-        .is_none_or(|saved_bssid| bssid_bytes_match(&saved_bssid, &ap.bssid))
-        && ap_matches_band_channel(
-            ap,
-            setting_string(wireless, "band")
-                .as_deref()
-                .filter(|band| !band.is_empty()),
-            wireless.get("channel").and_then(setting_u32).unwrap_or(0),
-        )
+    WifiProfileMatch::from_settings(settings)
+        .is_some_and(|matcher| matcher.matches_access_point(ap))
 }
 
 fn ap_matches_band_channel(ap: &AccessPoint, band: Option<&str>, channel: u32) -> bool {
@@ -1239,19 +1229,15 @@ pub(super) fn setting_string(settings: &HashMap<String, OwnedValue>, key: &str) 
 }
 
 fn setting_value_string(value: &OwnedValue) -> Option<String> {
-    value
-        .try_clone()
-        .ok()
-        .and_then(|value| value.try_into().ok())
-        .or_else(|| String::from_utf8(setting_bytes(value)?).ok())
+    crate::variant::value_string(value).or_else(|| String::from_utf8(setting_bytes(value)?).ok())
 }
 
 fn setting_bool(value: &OwnedValue) -> Option<bool> {
-    value.try_clone().ok()?.try_into().ok()
+    value.try_into().ok()
 }
 
 fn setting_u32(value: &OwnedValue) -> Option<u32> {
-    value.try_clone().ok()?.try_into().ok()
+    value.try_into().ok()
 }
 
 fn setting_bytes(value: &OwnedValue) -> Option<Vec<u8>> {

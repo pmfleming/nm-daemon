@@ -10,7 +10,7 @@ use crate::model::{
     NetworkDeviceSummary, NetworkInventory, NetworkStateSummary, ProfileActivationResult,
     device_state_reason,
 };
-use crate::variant::value_string;
+use crate::variant::{setting, value_string};
 
 /// Selects one saved profile by UUID or settings path, plus an optional device.
 #[derive(Debug, Clone, Default)]
@@ -318,9 +318,9 @@ impl Nm {
             uuid,
             connection_type: connection_type.clone(),
             type_name: connection_type_name(&connection_type),
-            autoconnect: setting_bool(connection, "autoconnect").unwrap_or(true),
-            autoconnect_priority: setting_i32(connection, "autoconnect-priority").unwrap_or(0),
-            timestamp_ms: setting_u64(connection, "timestamp")
+            autoconnect: setting(connection, "autoconnect").unwrap_or(true),
+            autoconnect_priority: setting(connection, "autoconnect-priority").unwrap_or(0),
+            timestamp_ms: setting::<u64>(connection, "timestamp")
                 .map(|seconds| seconds.saturating_mul(1000)),
             interface_name: setting_string(connection, "interface-name").filter(|v| !v.is_empty()),
             permissions: setting_strings(connection, "permissions"),
@@ -448,24 +448,6 @@ fn object_path_list_property(proxy: &zbus::blocking::Proxy<'_>, name: &str) -> V
 
 fn setting_string(settings: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
     settings.get(key).and_then(value_string)
-}
-
-fn setting_bool(settings: &HashMap<String, OwnedValue>, key: &str) -> Option<bool> {
-    settings
-        .get(key)
-        .and_then(|value| bool::try_from(value.clone()).ok())
-}
-
-fn setting_i32(settings: &HashMap<String, OwnedValue>, key: &str) -> Option<i32> {
-    settings
-        .get(key)
-        .and_then(|value| i32::try_from(value.clone()).ok())
-}
-
-fn setting_u64(settings: &HashMap<String, OwnedValue>, key: &str) -> Option<u64> {
-    settings
-        .get(key)
-        .and_then(|value| u64::try_from(value.clone()).ok())
 }
 
 fn setting_strings(settings: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
