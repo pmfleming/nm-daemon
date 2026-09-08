@@ -11,7 +11,7 @@ use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     AccessPoint, EnterpriseAuth, WepKeyType, WifiConnectTarget, enterprise_key_mgmt,
 };
-use crate::variant::{insert_optional_strings, insert_optional_u32s, insert_string};
+use crate::variant::{insert_optional_strings, insert_optional_u32s, insert_string, value_map};
 pub(super) use profile::{apply_target_connection_metadata, apply_target_profile_settings};
 
 pub(super) fn psk_wifi_connection_settings(
@@ -28,10 +28,7 @@ pub(super) fn psk_wifi_connection_settings(
 }
 
 pub(super) fn owe_wifi_connection_settings() -> Result<ConnectionSettings> {
-    Ok(security_connection_settings(HashMap::from([(
-        "key-mgmt".to_string(),
-        owned_value("owe".to_string())?,
-    )])))
+    Ok(security_connection_settings(key_management_section("owe")?))
 }
 
 pub(super) fn visible_connection_settings(
@@ -100,17 +97,16 @@ fn security_settings_for_saved_profile(
     if target.enterprise.is_some() || target.key_mgmt.is_some() {
         return security_settings_for_target_hint(target, password, wep_key_type);
     }
-    let key_mgmt: String = settings
+    let key_mgmt = settings
         .get("802-11-wireless-security")
         .and_then(|section| section.get("key-mgmt"))
-        .and_then(|value| value.try_clone().ok())
-        .and_then(|value| value.try_into().ok())
+        .and_then(|value| <&str>::try_from(value).ok())
         .unwrap_or_default();
-    match (key_mgmt.as_str(), password) {
+    match (key_mgmt, password) {
         ("wpa-psk" | "sae", Some(password)) => {
             validate_wpa_psk(password)?;
             Ok(Some(security_connection_settings(
-                wireless_security_section(&key_mgmt, password)?,
+                wireless_security_section(key_mgmt, password)?,
             )))
         }
         ("none" | "", Some(password)) => {
@@ -266,7 +262,7 @@ fn enterprise_wifi_connection_settings_with_key_mgmt(
     password: Option<&str>,
     key_mgmt: &str,
 ) -> Result<ConnectionSettings> {
-    let security = enterprise_security_section(key_mgmt)?;
+    let security = key_management_section(key_mgmt)?;
     let mut dot1x = enterprise_dot1x_section(enterprise, password)?;
     insert_enterprise_certificate_settings(&mut dot1x, enterprise)?;
     insert_enterprise_flag_settings(&mut dot1x, enterprise)?;
@@ -277,11 +273,8 @@ fn enterprise_wifi_connection_settings_with_key_mgmt(
     ]))
 }
 
-fn enterprise_security_section(key_mgmt: &str) -> Result<HashMap<String, OwnedValue>> {
-    Ok(HashMap::from([(
-        "key-mgmt".to_string(),
-        owned_value(key_mgmt.to_string())?,
-    )]))
+fn key_management_section(key_mgmt: &str) -> Result<HashMap<String, OwnedValue>> {
+    value_map([("key-mgmt", key_mgmt.into())])
 }
 
 fn enterprise_dot1x_section(
@@ -446,31 +439,19 @@ fn base_wifi_connection_settings(
 }
 
 fn base_connection_section(ssid: &str) -> Result<HashMap<String, OwnedValue>> {
-    Ok(HashMap::from([
-        ("id".to_string(), owned_value(ssid.to_string())?),
-        (
-            "type".to_string(),
-            owned_value("802-11-wireless".to_string())?,
-        ),
-    ]))
+    value_map([("id", ssid.into()), ("type", "802-11-wireless".into())])
 }
 
 fn base_wireless_section(ssid_bytes: &[u8], hidden: bool) -> Result<HashMap<String, OwnedValue>> {
-    Ok(HashMap::from([
-        ("ssid".to_string(), owned_value(ssid_bytes.to_vec())?),
-        (
-            "mode".to_string(),
-            owned_value("infrastructure".to_string())?,
-        ),
-        ("hidden".to_string(), owned_value(hidden)?),
-    ]))
+    value_map([
+        ("ssid", ssid_bytes.into()),
+        ("mode", "infrastructure".into()),
+        ("hidden", hidden.into()),
+    ])
 }
 
 fn automatic_ip_section() -> Result<HashMap<String, OwnedValue>> {
-    Ok(HashMap::from([(
-        "method".to_string(),
-        owned_value("auto".to_string())?,
-    )]))
+    value_map([("method", "auto".into())])
 }
 
 fn security_connection_settings(section: HashMap<String, OwnedValue>) -> ConnectionSettings {
@@ -494,10 +475,7 @@ fn wireless_security_section(
     key_mgmt: &str,
     password: &str,
 ) -> Result<HashMap<String, OwnedValue>> {
-    Ok(HashMap::from([
-        ("key-mgmt".to_string(), owned_value(key_mgmt.to_string())?),
-        ("psk".to_string(), owned_value(password.to_string())?),
-    ]))
+    value_map([("key-mgmt", key_mgmt.into()), ("psk", password.into())])
 }
 
 fn wep_security_section(
@@ -505,14 +483,11 @@ fn wep_security_section(
     wep_key_type: WepKeyType,
 ) -> Result<HashMap<String, OwnedValue>> {
     validate_wep_key(password, wep_key_type)?;
-    Ok(HashMap::from([
-        ("key-mgmt".to_string(), owned_value("none".to_string())?),
-        ("wep-key0".to_string(), owned_value(password.to_string())?),
-        (
-            "wep-key-type".to_string(),
-            owned_value(wep_key_type.nm_value())?,
-        ),
-    ]))
+    value_map([
+        ("key-mgmt", "none".into()),
+        ("wep-key0", password.into()),
+        ("wep-key-type", wep_key_type.nm_value().into()),
+    ])
 }
 
 fn insert_required_string(

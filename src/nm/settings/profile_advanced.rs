@@ -36,20 +36,16 @@ pub(super) fn profile_version(settings: &ConnectionSettings) -> String {
                 .filter(|(key, _)| {
                     section != CONNECTION || !VOLATILE_CONNECTION_KEYS.contains(&key.as_str())
                 })
-                .map(|(key, value)| (key.clone(), format!("{value:?}")))
+                .map(|(key, value)| (key, format!("{value:?}")))
                 .collect::<BTreeMap<_, _>>();
-            (section.clone(), values)
+            (section, values)
         })
         .collect::<BTreeMap<_, _>>();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for (section, values) in &canonical {
-        for byte in section.as_bytes() {
-            hash = fnv1a(hash, *byte);
-        }
+    for (section, values) in canonical {
+        hash = section.bytes().fold(hash, fnv1a);
         for (key, value) in values {
-            for byte in key.as_bytes().iter().chain(value.as_bytes()) {
-                hash = fnv1a(hash, *byte);
-            }
+            hash = key.bytes().chain(value.bytes()).fold(hash, fnv1a);
         }
     }
     format!("{hash:016x}")
@@ -441,14 +437,12 @@ fn strings(section: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
 fn flag(section: &HashMap<String, OwnedValue>, key: &str) -> bool {
     section
         .get(key)
-        .and_then(|value| bool::try_from(value.clone()).ok())
+        .and_then(|value| bool::try_from(value).ok())
         .unwrap_or(false)
 }
 
 fn number(section: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
-    section
-        .get(key)
-        .and_then(|value| u32::try_from(value.clone()).ok())
+    section.get(key).and_then(|value| u32::try_from(value).ok())
 }
 
 fn secret_flags(section: &HashMap<String, OwnedValue>, key: &str) -> SecretFlags {
@@ -528,6 +522,47 @@ mod tests {
             assert!(enterprise.ca_path.is_none() && enterprise.phase2_ca_path.is_none());
             assert!(enterprise.system_ca_certs);
         }
+    }
+
+    #[test]
+    fn version_ignores_insertion_order_and_only_volatile_connection_fields() -> anyhow::Result<()> {
+        let mut original = settings();
+        original.insert(
+            "ipv4".into(),
+            HashMap::from([
+                ("method".into(), owned_value("auto".to_string())?),
+                ("may-fail".into(), owned_value(false)?),
+            ]),
+        );
+        let token = profile_version(&original);
+        let mut reordered = ConnectionSettings::new();
+        for (key, values) in &original {
+            reordered.insert(
+                key.clone(),
+                values.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            );
+        }
+        assert_eq!(profile_version(&reordered), token);
+        reordered
+            .entry("connection".into())
+            .or_default()
+            .insert("timestamp".into(), owned_value(99_u64)?);
+        assert_eq!(profile_version(&reordered), token);
+        reordered
+            .entry("ipv4".into())
+            .or_default()
+            .insert("timestamp".into(), owned_value(99_u64)?);
+        assert_ne!(profile_version(&reordered), token);
+        reordered
+            .entry("ipv4".into())
+            .or_default()
+            .remove("timestamp");
+        reordered
+            .entry("connection".into())
+            .or_default()
+            .insert("id".into(), owned_value("Changed".to_string())?);
+        assert!(check_expected_version(&reordered, Some(&token)).is_err());
+        Ok(())
     }
 
     #[test]

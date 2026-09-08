@@ -4,8 +4,15 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use super::super::*;
-use crate::error::{ErrorCode, ErrorReport};
+use tokio::time::Instant;
+use zbus::Proxy;
+
+use super::super::{
+    AF_INET, AddressFamily, DISCOVERY_TIMEOUT, DNS_CLASS_IN, DNS_TYPE_PTR, MAX_DISCOVERY_INSTANCES,
+    MDNS_IPV4, RESOLVED_INTERFACE, RESOLVED_PATH, ResolveRecordReply, ResolveServiceReply,
+    ServiceQuery, browse_instances, ptr_instance, resolve_instances, resolve_with_proxy,
+};
+use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
 use crate::test_support::TestPeer;
 
 #[derive(Debug, zbus::DBusError)]
@@ -51,7 +58,7 @@ impl Resolved {
                     if interface == 0 { 3 } else { interface },
                     class,
                     kind,
-                    record.clone(),
+                    ptr("LIVING ROOM"),
                 ),
                 (4, class, kind, record),
             ],
@@ -109,6 +116,30 @@ fn ptr(instance: &str) -> Vec<u8> {
 }
 
 #[test]
+fn browse_limits_unique_targets_and_rejects_truncated_records() -> anyhow::Result<()> {
+    let query = ServiceQuery::new("_googlecast._tcp".into(), None, None, AddressFamily::Any)?;
+    let records = (0..=MAX_DISCOVERY_INSTANCES)
+        .map(|index| {
+            (
+                3,
+                DNS_CLASS_IN,
+                DNS_TYPE_PTR,
+                ptr(&format!("Device {index}")),
+            )
+        })
+        .collect();
+    let (instances, warnings) = browse_instances(records, &query);
+    assert_eq!(instances.len(), MAX_DISCOVERY_INSTANCES);
+    assert_eq!(instances[0], (3, "Device 0".into()));
+    assert_eq!(warnings.len(), 1);
+    let record = ptr("Living Room");
+    for end in 0..record.len() {
+        assert!(ptr_instance(&record[..end], "_googlecast._tcp", "local").is_none());
+    }
+    Ok(())
+}
+
+#[test]
 fn browsing_is_link_scoped_mdns_only_and_reports_resolver_failures_and_deadlines() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -136,6 +167,12 @@ fn browsing_is_link_scoped_mdns_only_and_reports_resolver_failures_and_deadlines
             .await
             .unwrap();
         assert_eq!(snapshot.services.len(), 2);
+        assert!(
+            snapshot
+                .services
+                .iter()
+                .all(|service| service.instance == "Living Room")
+        );
         let mut interfaces = snapshot
             .services
             .iter()

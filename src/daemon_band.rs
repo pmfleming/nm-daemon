@@ -7,11 +7,10 @@ use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::Application;
-use crate::daemon_event::{emit_json_event_nonfatal, started_response};
+use crate::daemon_event::{OperationEvents, started_response};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{ErrorOperation, ErrorReport};
 use crate::model::{NmObjectPath, WifiBand, WifiBandSelectionResult};
-use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
 
 const STREAM: Stream = Stream::WifiBand;
@@ -30,12 +29,8 @@ pub(crate) struct BandSetParams {
 }
 
 pub(crate) fn status(runtime: &Arc<DaemonRuntime>, params: BandStatusParams) -> Result<Value> {
-    runtime.call(ErrorOperation::BandOperation, move |nm| {
-        api_data_value(
-            Method::WifiBandStatus.spec().response_key,
-            &Application::new(nm).band_status(params.path.as_str())?,
-            "serialize Wi-Fi band status response JSON",
-        )
+    runtime.call_application(Method::WifiBandStatus, move |application| {
+        application.band_status(params.path.as_str())
     })
 }
 
@@ -70,40 +65,25 @@ fn run_band_worker(
     cancellation: &AtomicBool,
     emitter: &SignalEmitter<'static>,
 ) {
-    emit_json_event_nonfatal(
-        emitter,
-        STREAM,
-        Some(request_id),
-        "started",
-        json!({
-            "request_id": request_id,
-            "phase": "preparing",
-            "path": params.path.as_str(),
-            "requested_band": params.band,
-        }),
-    );
-    emit_json_event_nonfatal(
-        emitter,
-        STREAM,
-        Some(request_id),
-        "progress",
-        json!({
-            "request_id": request_id,
-            "phase": "applying",
-            "path": params.path.as_str(),
-            "requested_band": params.band,
-        }),
-    );
-
+    let events = OperationEvents::new(emitter, STREAM, request_id);
+    for (event, phase) in [("started", "preparing"), ("progress", "applying")] {
+        events.event(
+            event,
+            json!({
+                "phase": phase,
+                "path": params.path.as_str(),
+                "requested_band": params.band,
+            }),
+        );
+    }
     match Application::new(nm).select_band(params.path.as_str(), params.band, Some(cancellation)) {
-        Ok(result) => emit_band_success(emitter, request_id, &params, cancellation, result),
-        Err(error) => emit_band_error(emitter, request_id, &params, &error),
+        Ok(result) => emit_band_success(&events, &params, cancellation, result),
+        Err(error) => emit_band_error(&events, &params, &error),
     }
 }
 
 fn emit_band_success(
-    emitter: &SignalEmitter<'_>,
-    request_id: &str,
+    events: &OperationEvents<'_, '_>,
     params: &BandSetParams,
     cancellation: &AtomicBool,
     result: WifiBandSelectionResult,
@@ -113,7 +93,6 @@ fn emit_band_success(
         (
             "cancelled",
             json!({
-                "request_id": request_id,
                 "phase": "cancelled",
                 "path": params.path.as_str(),
                 "requested_band": params.band,
@@ -124,7 +103,6 @@ fn emit_band_success(
         (
             "succeeded",
             json!({
-                "request_id": request_id,
                 "phase": "complete",
                 "path": params.path.as_str(),
                 "requested_band": params.band,
@@ -132,24 +110,19 @@ fn emit_band_success(
             }),
         )
     };
-    emit_json_event_nonfatal(emitter, STREAM, Some(request_id), event, data);
+    events.event(event, data);
 }
 
 fn emit_band_error(
-    emitter: &SignalEmitter<'_>,
-    request_id: &str,
+    events: &OperationEvents<'_, '_>,
     params: &BandSetParams,
     error: &anyhow::Error,
 ) {
     let report = ErrorReport::from_error(error, ErrorOperation::BandOperation);
     let cancelled = report.code == crate::error::ErrorCode::Cancelled;
-    emit_json_event_nonfatal(
-        emitter,
-        STREAM,
-        Some(request_id),
+    events.event(
         if cancelled { "cancelled" } else { "failed" },
         json!({
-            "request_id": request_id,
             "phase": if cancelled { "cancelled" } else { "failed" },
             "path": params.path.as_str(),
             "requested_band": params.band,

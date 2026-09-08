@@ -6,11 +6,9 @@ use serde_json::Value;
 use super::{EmptyParams, parse_params, parse_required_params, wrong_dispatch_group};
 use crate::daemon_methods::{
     ActivateProfileParams, DeactivateParams, DiscoveryServicesParams, ProfileOperationParams,
-    RequestStatusParams, SetEnabledParams, call_connectivity, call_disconnect,
-    call_discovery_services, call_network_activate_profile, call_network_connections,
-    call_network_deactivate, call_network_devices, call_network_inventory, call_network_state,
-    call_networks, call_profile_operation, call_request_status, call_saved, call_set_airplane_mode,
-    call_set_enabled, call_set_wwan_enabled, call_status,
+    RequestStatusParams, SetEnabledParams, call_discovery_services, call_network_activate_profile,
+    call_network_deactivate, call_networks, call_profile_operation, call_request_status,
+    call_set_airplane_mode, call_set_enabled, call_set_wwan_enabled,
 };
 use crate::daemon_runtime::DaemonRuntime;
 use crate::daemon_secret::{SecretCapabilitiesParams, SecretProvideParams};
@@ -92,19 +90,23 @@ fn dispatch_empty(
 ) -> Result<Value> {
     parse_params::<EmptyParams>(params_json)?;
     match method {
-        Method::WifiStatus => call_status(runtime),
-        Method::NetworkConnectivity => call_connectivity(runtime),
-        Method::NetworkInventory => call_network_inventory(runtime),
-        Method::NetworkDevices => call_network_devices(runtime),
-        Method::NetworkConnections => call_network_connections(runtime),
-        Method::NetworkState => call_network_state(runtime),
-        Method::HotspotCapabilities => crate::daemon_hotspot::call_capabilities(runtime),
-        Method::HotspotStatus => crate::daemon_hotspot::call_status(runtime),
-        Method::HotspotStop => crate::daemon_hotspot::call_stop(runtime),
-        Method::VpnList => crate::daemon_vpn::call_list(runtime),
-        Method::VpnStatus => crate::daemon_vpn::call_status(runtime),
-        Method::WifiDisconnect => call_disconnect(runtime),
-        Method::WifiSaved => call_saved(runtime),
+        Method::WifiStatus => runtime.call_status(),
+        Method::NetworkConnectivity => runtime.call_application(method, |app| app.connectivity()),
+        Method::NetworkInventory => runtime.call_application(method, |app| app.network_inventory()),
+        Method::NetworkDevices => runtime.call_application(method, |app| app.network_devices()),
+        Method::NetworkConnections => {
+            runtime.call_application(method, |app| app.network_connections())
+        }
+        Method::NetworkState => runtime.call_application(method, |app| app.network_state()),
+        Method::HotspotCapabilities => {
+            runtime.call_application(method, |app| app.hotspot_capabilities())
+        }
+        Method::HotspotStatus => runtime.call_application(method, |app| app.hotspot_status()),
+        Method::HotspotStop => runtime.call_application(method, |app| app.stop_hotspot()),
+        Method::VpnList => runtime.call_application(method, |app| app.vpn_profiles()),
+        Method::VpnStatus => runtime.call_application(method, |app| app.vpn_status()),
+        Method::WifiDisconnect => runtime.call_application(method, |app| app.disconnect()),
+        Method::WifiSaved => runtime.call_application(method, |app| app.saved_profiles()),
         _ => Err(wrong_dispatch_group(method)),
     }
 }

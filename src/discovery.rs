@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
@@ -41,7 +42,7 @@ const INSTANCE_TIMEOUT: Duration = Duration::from_secs(2);
 const MDNS_IPV4: u64 = 1 << 3;
 const MDNS_IPV6: u64 = 1 << 4;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ServiceQuery {
     pub(crate) service_type: String,
     pub(crate) name: Option<String>,
@@ -179,7 +180,7 @@ async fn resolve_with_proxy(
     deadline: Instant,
 ) -> Result<DiscoverySnapshot> {
     match query.name.as_deref() {
-        Some(instance) => resolve_one(proxy, query, instance, deadline)
+        Some(instance) => resolve_one(proxy, query, query.interface_index, instance, deadline)
             .await
             .map(|reply| snapshot_from_reply(query, reply)),
         None => browse(proxy, query, deadline).await,
@@ -189,6 +190,7 @@ async fn resolve_with_proxy(
 async fn resolve_one(
     proxy: &Proxy<'_>,
     query: &ServiceQuery,
+    interface_index: i32,
     instance: &str,
     deadline: Instant,
 ) -> Result<ResolveServiceReply> {
@@ -197,7 +199,7 @@ async fn resolve_one(
         proxy.call(
             "ResolveService",
             &(
-                query.interface_index,
+                interface_index,
                 instance,
                 query.service_type.as_str(),
                 MDNS_DOMAIN,
@@ -269,6 +271,7 @@ fn browse_instances(
     query: &ServiceQuery,
 ) -> (Vec<(i32, String)>, Vec<String>) {
     let mut instances = Vec::new();
+    let mut seen = HashSet::new();
     let mut warnings = Vec::new();
     for (interface, class, record_type, bytes) in records {
         if interface <= 0 || (query.interface_index != 0 && interface != query.interface_index) {
@@ -282,10 +285,7 @@ fn browse_instances(
             warnings.push("ignored one malformed DNS-SD PTR record".to_string());
             continue;
         };
-        let instance = (interface, instance);
-        if instances.iter().any(|(iface, name): &(i32, String)| {
-            *iface == interface && name.eq_ignore_ascii_case(&instance.1)
-        }) {
+        if !seen.insert((interface, instance.to_ascii_lowercase())) {
             continue;
         }
         if instances.len() == MAX_DISCOVERY_INSTANCES {
@@ -294,7 +294,7 @@ fn browse_instances(
             ));
             break;
         }
-        instances.push(instance);
+        instances.push((interface, instance));
     }
     (instances, warnings)
 }
@@ -312,12 +312,9 @@ async fn resolve_instances(
     // as well as elapsed time; dropping the stream cancels outstanding calls.
     let mut resolutions = futures::stream::iter(instances)
         .map(|(interface_index, instance)| async move {
-            let scoped_query = ServiceQuery {
-                interface_index,
-                ..query.clone()
-            };
             let instance_deadline = deadline.min(Instant::now() + INSTANCE_TIMEOUT);
-            let reply = resolve_one(proxy, &scoped_query, &instance, instance_deadline).await;
+            let reply =
+                resolve_one(proxy, query, interface_index, &instance, instance_deadline).await;
             (interface_index, instance, reply)
         })
         .buffer_unordered(8);
@@ -414,24 +411,14 @@ fn ptr_instance(record: &[u8], service_type: &str, domain: &str) -> Option<Strin
     if offset != data_end {
         return None;
     }
-    let mut suffix = service_type
-        .split('.')
-        .map(str::as_bytes)
-        .chain(std::iter::once(domain.as_bytes()))
-        .collect::<Vec<_>>();
-    if labels.len() != suffix.len() + 1 {
+    let (instance, suffix) = labels.split_first()?;
+    if !labels_match(suffix, &expected_owner) {
         return None;
     }
-    let instance = labels.first()?;
-    for (actual, expected) in labels[1..].iter().zip(suffix.drain(..)) {
-        if !actual.eq_ignore_ascii_case(expected) {
-            return None;
-        }
-    }
-    String::from_utf8(instance.clone()).ok()
+    std::str::from_utf8(instance).ok().map(str::to_string)
 }
 
-fn labels_match(labels: &[Vec<u8>], name: &str) -> bool {
+fn labels_match(labels: &[&[u8]], name: &str) -> bool {
     labels.len() == name.split('.').count()
         && labels
             .iter()
@@ -439,7 +426,7 @@ fn labels_match(labels: &[Vec<u8>], name: &str) -> bool {
             .all(|(label, expected)| label.eq_ignore_ascii_case(expected.as_bytes()))
 }
 
-fn dns_labels(bytes: &[u8], offset: &mut usize) -> Option<Vec<Vec<u8>>> {
+fn dns_labels<'a>(bytes: &'a [u8], offset: &mut usize) -> Option<Vec<&'a [u8]>> {
     let start = *offset;
     let mut labels = Vec::new();
     loop {
@@ -452,7 +439,7 @@ fn dns_labels(bytes: &[u8], offset: &mut usize) -> Option<Vec<Vec<u8>>> {
             return None;
         }
         let end = offset.checked_add(length)?;
-        labels.push(bytes.get(*offset..end)?.to_vec());
+        labels.push(bytes.get(*offset..end)?);
         *offset = end;
     }
 }

@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::inventory::device_state_name;
 use super::{
@@ -17,7 +17,7 @@ use crate::model::{
     validate_ssid_bytes, wifi_qr_payload,
 };
 use crate::random::{random_passphrase, random_uuid_v4};
-use crate::variant::value_string;
+use crate::variant::{insert_optional_value, value_map, value_string};
 
 /// NM_WIFI_DEVICE_CAP_* bits this module depends on.
 const CAP_AP: u32 = 0x40;
@@ -30,7 +30,6 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(20);
 const ACTIVATION_POLL: Duration = Duration::from_millis(200);
 
 /// Validated hotspot start request; secrets stay in memory and are never logged.
-#[derive(Debug, Clone)]
 pub(crate) struct HotspotRequest {
     pub(crate) ssid: Option<String>,
     pub(crate) passphrase: Option<String>,
@@ -39,20 +38,6 @@ pub(crate) struct HotspotRequest {
     pub(crate) channel: Option<u32>,
     pub(crate) hidden: bool,
     pub(crate) device: Option<String>,
-}
-
-impl Default for HotspotRequest {
-    fn default() -> Self {
-        Self {
-            ssid: None,
-            passphrase: None,
-            security: HotspotSecurity::WpaPsk,
-            band: WifiBand::Auto,
-            channel: None,
-            hidden: false,
-            device: None,
-        }
-    }
 }
 
 struct ResolvedHotspot {
@@ -174,14 +159,14 @@ impl Nm {
                 let state: u32 = device_proxy.get_property("State").unwrap_or(0);
                 let active_connection: OwnedObjectPath = device_proxy
                     .get_property("ActiveConnection")
-                    .unwrap_or_else(|_| root_path());
+                    .unwrap_or_default();
                 drop(device_proxy);
                 let wifi = self.proxy_path(&device.path, WIFI_IFACE)?;
                 let capabilities: u32 = wifi.get_property("WirelessCapabilities").unwrap_or(0);
                 let mode: u32 = wifi.get_property("Mode").unwrap_or(0);
                 Ok(HotspotDevice {
                     path: device.path.to_string(),
-                    interface: device.iface.clone(),
+                    interface: device.iface,
                     ap_capable: capabilities & CAP_AP != 0,
                     in_use: active_connection.as_str() != "/",
                     state,
@@ -202,16 +187,14 @@ impl Nm {
         let device_proxy = self.proxy(&device.path, DEVICE_IFACE)?;
         let active_path: OwnedObjectPath = device_proxy
             .get_property("ActiveConnection")
-            .unwrap_or_else(|_| root_path());
+            .unwrap_or_default();
         drop(device_proxy);
         if active_path.as_str() == "/" {
             return Ok(None);
         }
         let active = self.proxy(active_path.as_str(), ACTIVE_CONNECTION_IFACE)?;
         let state: u32 = active.get_property("State").unwrap_or(0);
-        let profile_path: OwnedObjectPath = active
-            .get_property("Connection")
-            .unwrap_or_else(|_| root_path());
+        let profile_path: OwnedObjectPath = active.get_property("Connection").unwrap_or_default();
         drop(active);
         let settings = self.connection_settings(&profile_path)?;
         let wireless = settings.get("802-11-wireless");
@@ -231,7 +214,7 @@ impl Nm {
                 .map(|band| WifiBand::from_nm_value(&band)),
             channel: wireless
                 .and_then(|section| section.get("channel"))
-                .and_then(|value| u32::try_from(value.clone()).ok())
+                .and_then(|value| u32::try_from(value).ok())
                 .filter(|channel| *channel > 0),
             security: settings
                 .get("802-11-wireless-security")
@@ -244,7 +227,7 @@ impl Nm {
                 }),
             hidden: wireless
                 .and_then(|section| section.get("hidden"))
-                .and_then(|value| bool::try_from(value.clone()).ok())
+                .and_then(|value| bool::try_from(value).ok())
                 .unwrap_or(false),
             profile_path: Some(profile_path.to_string()),
             active_connection: Some(active_path.to_string()),
@@ -305,7 +288,7 @@ impl Nm {
     ) -> Result<(OwnedObjectPath, OwnedObjectPath)> {
         let device_path = OwnedObjectPath::try_from(resolved.device.path.as_str())
             .context("parse hotspot device path")?;
-        let specific_object = root_path();
+        let specific_object = OwnedObjectPath::default();
         // "volatile" keeps the generated profile — and its passphrase — out of
         // persistent NetworkManager storage once the hotspot goes away.
         let options =
@@ -414,7 +397,7 @@ impl Nm {
     fn roll_back_hotspot(&self, profile_path: &OwnedObjectPath, active_path: &OwnedObjectPath) {
         if let Err(error) = self
             .root_proxy()
-            .call::<_, _, ()>("DeactivateConnection", &(active_path.clone(),))
+            .call::<_, _, ()>("DeactivateConnection", &(active_path,))
         {
             tracing::debug!(%error, "hotspot activation was already inactive during rollback");
         }
@@ -442,52 +425,32 @@ fn hotspot_connection_settings(
     resolved: &ResolvedHotspot,
     request: &HotspotRequest,
 ) -> Result<ConnectionSettings> {
-    let mut connection = HashMap::from([
-        ("id".to_string(), owned_value(resolved.ssid.clone())?),
+    let connection = value_map([
+        ("id", resolved.ssid.as_str().into()),
         (
-            "uuid".to_string(),
-            owned_value(random_uuid_v4().context("generate hotspot profile uuid")?)?,
+            "uuid",
+            random_uuid_v4()
+                .context("generate hotspot profile uuid")?
+                .into(),
         ),
-        (
-            "type".to_string(),
-            owned_value("802-11-wireless".to_string())?,
-        ),
-        ("autoconnect".to_string(), owned_value(false)?),
-    ]);
-    connection.insert(
-        "interface-name".to_string(),
-        owned_value(resolved.device.interface.clone())?,
-    );
-
-    let mut wireless = HashMap::from([
-        (
-            "ssid".to_string(),
-            OwnedValue::try_from(Value::from(resolved.ssid_bytes.clone()))
-                .context("encode hotspot SSID")?,
-        ),
-        ("mode".to_string(), owned_value("ap".to_string())?),
-        ("hidden".to_string(), owned_value(request.hidden)?),
-    ]);
-    if let Some(band) = resolved.band.nm_value() {
-        wireless.insert("band".to_string(), owned_value(band.to_string())?);
-    }
-    if let Some(channel) = resolved.channel {
-        wireless.insert("channel".to_string(), owned_value(channel)?);
-    }
-
-    let security = HashMap::from([
-        (
-            "key-mgmt".to_string(),
-            owned_value(request.security.key_management().to_string())?,
-        ),
-        ("psk".to_string(), owned_value(resolved.passphrase.clone())?),
-        ("proto".to_string(), owned_value(vec!["rsn".to_string()])?),
-        (
-            "pairwise".to_string(),
-            owned_value(vec!["ccmp".to_string()])?,
-        ),
-        ("group".to_string(), owned_value(vec!["ccmp".to_string()])?),
-    ]);
+        ("type", "802-11-wireless".into()),
+        ("autoconnect", false.into()),
+        ("interface-name", resolved.device.interface.as_str().into()),
+    ])?;
+    let mut wireless = value_map([
+        ("ssid", resolved.ssid_bytes.as_slice().into()),
+        ("mode", "ap".into()),
+        ("hidden", request.hidden.into()),
+    ])?;
+    insert_optional_value(&mut wireless, "band", resolved.band.nm_value())?;
+    insert_optional_value(&mut wireless, "channel", resolved.channel)?;
+    let security = value_map([
+        ("key-mgmt", request.security.key_management().into()),
+        ("psk", resolved.passphrase.as_str().into()),
+        ("proto", vec!["rsn"].into()),
+        ("pairwise", vec!["ccmp"].into()),
+        ("group", vec!["ccmp"].into()),
+    ])?;
 
     Ok(ConnectionSettings::from([
         ("connection".to_string(), connection),
@@ -495,11 +458,11 @@ fn hotspot_connection_settings(
         ("802-11-wireless-security".to_string(), security),
         (
             "ipv4".to_string(),
-            HashMap::from([("method".to_string(), owned_value("shared".to_string())?)]),
+            value_map([("method", "shared".into())])?,
         ),
         (
             "ipv6".to_string(),
-            HashMap::from([("method".to_string(), owned_value("ignore".to_string())?)]),
+            value_map([("method", "ignore".into())])?,
         ),
     ]))
 }
@@ -536,7 +499,7 @@ fn hotspot_availability(
     (None, "A Wi-Fi hotspot can be started".to_string())
 }
 
-/// Prefers an unused AP-capable device, then any AP-capable device.
+/// Selects an unused AP-capable device.
 fn preferred_hotspot_device(devices: &[HotspotDevice]) -> Option<&HotspotDevice> {
     devices
         .iter()
@@ -645,15 +608,14 @@ fn wifi_mode_name(mode: u32) -> &'static str {
     }
 }
 
-fn root_path() -> OwnedObjectPath {
-    OwnedObjectPath::default()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{capability_bands, resolve_band, select_hotspot_device};
+    use super::{
+        HotspotRequest, ResolvedHotspot, capability_bands, hotspot_connection_settings,
+        resolve_band, select_hotspot_device,
+    };
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
-    use crate::model::{HotspotDevice, WifiBand};
+    use crate::model::{HotspotDevice, HotspotSecurity, WifiBand};
 
     fn device(interface: &str, ap_capable: bool, in_use: bool) -> HotspotDevice {
         HotspotDevice {
@@ -666,6 +628,67 @@ mod tests {
             mode: "infrastructure",
             bands: vec![WifiBand::Ghz2_4, WifiBand::Ghz5],
         }
+    }
+
+    #[test]
+    fn hotspot_settings_preserve_security_and_optional_radio_constraints() -> anyhow::Result<()> {
+        for (security, band, channel) in [
+            (HotspotSecurity::WpaPsk, WifiBand::Auto, None),
+            (HotspotSecurity::Sae, WifiBand::Ghz5, Some(36)),
+        ] {
+            let request = HotspotRequest {
+                ssid: None,
+                passphrase: None,
+                device: None,
+                security,
+                band,
+                channel,
+                hidden: true,
+            };
+            let resolved = ResolvedHotspot {
+                ssid: "tést".into(),
+                ssid_bytes: "tést".as_bytes().to_vec(),
+                passphrase: "correct horse".into(),
+                generated_passphrase: false,
+                generated_ssid: false,
+                device: device("wlan0", true, false),
+                band,
+                channel,
+            };
+            let settings = hotspot_connection_settings(&resolved, &request)?;
+            let text = |section: &str, key: &str| {
+                settings[section]
+                    .get(key)
+                    .and_then(crate::variant::value_string)
+            };
+            assert_eq!(
+                text("connection", "type").as_deref(),
+                Some("802-11-wireless")
+            );
+            assert!(!bool::try_from(&settings["connection"]["autoconnect"])?);
+            let wireless = &settings["802-11-wireless"];
+            assert_eq!(
+                Vec::<u8>::try_from(wireless["ssid"].try_clone()?)?,
+                resolved.ssid_bytes
+            );
+            assert!(bool::try_from(&wireless["hidden"])?);
+            assert_eq!(text("802-11-wireless", "band").as_deref(), band.nm_value());
+            assert_eq!(
+                wireless.get("channel").map(u32::try_from).transpose()?,
+                channel
+            );
+            assert_eq!(
+                text("802-11-wireless-security", "key-mgmt").as_deref(),
+                Some(security.key_management())
+            );
+            assert_eq!(
+                text("802-11-wireless-security", "psk").as_deref(),
+                Some("correct horse")
+            );
+            assert_eq!(text("ipv4", "method").as_deref(), Some("shared"));
+            assert_eq!(text("ipv6", "method").as_deref(), Some("ignore"));
+        }
+        Ok(())
     }
 
     #[test]

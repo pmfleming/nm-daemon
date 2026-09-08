@@ -10,8 +10,19 @@ where
     OwnedValue::try_from(Value::new(value)).context("create D-Bus variant value")
 }
 
+/// Encode a heterogeneous D-Bus dictionary without cloning its input values.
+pub(crate) fn value_map<const N: usize>(
+    values: [(&str, Value<'_>); N],
+) -> Result<HashMap<String, OwnedValue>> {
+    values
+        .into_iter()
+        .map(|(key, value)| Ok((key.to_string(), OwnedValue::try_from(value)?)))
+        .collect::<Result<_>>()
+        .context("create D-Bus variant dictionary")
+}
+
 pub(crate) fn value_string(value: &OwnedValue) -> Option<String> {
-    String::try_from(value.clone()).ok()
+    <&str>::try_from(value).ok().map(str::to_string)
 }
 
 pub(crate) fn insert_string(
@@ -64,4 +75,33 @@ pub(crate) fn insert_optional_u32s(
     values
         .iter()
         .try_for_each(|(key, value)| insert_optional_value(section, key, *value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{value_map, value_string};
+
+    #[test]
+    fn borrowed_dictionary_values_keep_their_dbus_types() -> anyhow::Result<()> {
+        let text = String::from("Example");
+        let bytes = [0, 0xff, 42];
+        let values = value_map([
+            ("text", text.as_str().into()),
+            ("ssid", bytes.as_slice().into()),
+            ("enabled", true.into()),
+            ("channel", 36_u32.into()),
+            ("protocols", vec!["rsn"].into()),
+        ])?;
+        drop(text);
+        assert_eq!(value_string(&values["text"]).as_deref(), Some("Example"));
+        assert_eq!(value_string(&values["channel"]), None);
+        assert_eq!(u32::try_from(&values["channel"])?, 36);
+        assert!(bool::try_from(&values["enabled"])?);
+        assert_eq!(Vec::<u8>::try_from(values["ssid"].try_clone()?)?, bytes);
+        assert_eq!(
+            Vec::<String>::try_from(values["protocols"].try_clone()?)?,
+            ["rsn"]
+        );
+        Ok(())
+    }
 }

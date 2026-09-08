@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::application::{Application, NetworksRequest, ProfileOperation, ProfileOperationResult};
@@ -15,10 +15,6 @@ use crate::model::{
 use crate::nm::{ActiveConnectionSelector, ProfileSelector};
 use crate::output::api_data_value;
 use crate::protocol::Method;
-
-pub(crate) fn call_status(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    runtime.call_status()
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,7 +45,7 @@ pub(crate) fn call_set_enabled(
     runtime: &Arc<DaemonRuntime>,
     params: SetEnabledParams,
 ) -> Result<Value> {
-    call_application(runtime, Method::WifiSetEnabled, move |application| {
+    runtime.call_application(Method::WifiSetEnabled, move |application| {
         application.set_wifi_enabled(params.enabled)
     })
 }
@@ -58,7 +54,7 @@ pub(crate) fn call_set_wwan_enabled(
     runtime: &Arc<DaemonRuntime>,
     params: SetEnabledParams,
 ) -> Result<Value> {
-    call_application(runtime, Method::RadioSetWwanEnabled, move |application| {
+    runtime.call_application(Method::RadioSetWwanEnabled, move |application| {
         application.set_wwan_enabled(params.enabled)
     })
 }
@@ -67,14 +63,8 @@ pub(crate) fn call_set_airplane_mode(
     runtime: &Arc<DaemonRuntime>,
     params: SetEnabledParams,
 ) -> Result<Value> {
-    call_application(runtime, Method::RadioSetAirplaneMode, move |application| {
+    runtime.call_application(Method::RadioSetAirplaneMode, move |application| {
         application.set_airplane_mode(params.enabled)
-    })
-}
-
-pub(crate) fn call_connectivity(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_application(runtime, Method::NetworkConnectivity, |application| {
-        application.connectivity()
     })
 }
 
@@ -88,32 +78,8 @@ pub(crate) fn call_discovery_services(
         params.interface_index,
         params.family,
     )?;
-    call_application(runtime, Method::DiscoveryServices, move |application| {
+    runtime.call_application(Method::DiscoveryServices, move |application| {
         application.discover_services(&query)
-    })
-}
-
-pub(crate) fn call_network_inventory(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_application(runtime, Method::NetworkInventory, |application| {
-        application.network_inventory()
-    })
-}
-
-pub(crate) fn call_network_devices(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_application(runtime, Method::NetworkDevices, |application| {
-        application.network_devices()
-    })
-}
-
-pub(crate) fn call_network_connections(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_application(runtime, Method::NetworkConnections, |application| {
-        application.network_connections()
-    })
-}
-
-pub(crate) fn call_network_state(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_application(runtime, Method::NetworkState, |application| {
-        application.network_state()
     })
 }
 
@@ -122,11 +88,9 @@ pub(crate) fn call_network_activate_profile(
     params: ActivateProfileParams,
 ) -> Result<Value> {
     let selector = params.into_selector()?;
-    call_application(
-        runtime,
-        Method::NetworkActivateProfile,
-        move |application| application.activate_network_profile(&selector),
-    )
+    runtime.call_application(Method::NetworkActivateProfile, move |application| {
+        application.activate_network_profile(&selector)
+    })
 }
 
 pub(crate) fn call_network_deactivate(
@@ -134,7 +98,7 @@ pub(crate) fn call_network_deactivate(
     params: DeactivateParams,
 ) -> Result<Value> {
     let selector = params.into_selector()?;
-    call_application(runtime, Method::NetworkDeactivate, move |application| {
+    runtime.call_application(Method::NetworkDeactivate, move |application| {
         application.deactivate_network_connection(&selector)
     })
 }
@@ -218,48 +182,6 @@ pub(crate) fn call_networks(runtime: &Arc<DaemonRuntime>, params: NetworksParams
     })
 }
 
-pub(crate) fn call_saved(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_application(runtime, Method::WifiSaved, |application| {
-        application.saved_profiles()
-    })
-}
-
-pub(crate) fn call_disconnect(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_application(runtime, Method::WifiDisconnect, |application| {
-        application.disconnect()
-    })
-}
-
-fn call_application<T: Serialize>(
-    runtime: &Arc<DaemonRuntime>,
-    method: Method,
-    action: impl FnOnce(&Application<'_>) -> Result<T> + Send + 'static,
-) -> Result<Value> {
-    let spec = method.spec();
-    let call = move |nm: &crate::nm::Nm| {
-        let result = action(&Application::new(nm))?;
-        api_data_value(
-            spec.response_key,
-            &result,
-            "serialize daemon method response JSON",
-        )
-    };
-    if matches!(
-        method,
-        Method::NetworkConnectivity
-            | Method::NetworkInventory
-            | Method::NetworkDevices
-            | Method::NetworkConnections
-            | Method::NetworkState
-            | Method::DiscoveryServices
-            | Method::WifiSaved
-    ) {
-        runtime.call_read(spec.operation, call)
-    } else {
-        runtime.call(spec.operation, call)
-    }
-}
-
 pub(crate) fn call_profile_operation(
     runtime: &Arc<DaemonRuntime>,
     params: ProfileOperationParams,
@@ -300,10 +222,9 @@ pub(crate) fn call_profile_operation(
 }
 
 fn serialize_forget_result(result: &crate::forget::ForgetResult) -> Result<Value> {
-    let result = serde_json::to_value(result)?;
     api_data_value(
         Method::WifiProfileOperation.spec().response_key,
-        &result,
+        result,
         "serialize forget response JSON",
     )
 }

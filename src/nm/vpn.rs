@@ -40,9 +40,8 @@ pub(crate) struct VpnSelector {
 
 impl Nm {
     pub(crate) fn vpn_profiles(&self) -> Result<Vec<VpnProfileSummary>> {
-        let connections = self.network_connections()?;
-        connections
-            .iter()
+        self.network_connections()?
+            .into_iter()
             .filter(|profile| is_vpn_like(&profile.connection_type))
             .map(|profile| self.vpn_profile_summary(profile))
             .collect()
@@ -53,8 +52,8 @@ impl Nm {
             .network_active_connections()?
             .into_iter()
             .filter(|active| active.vpn || is_vpn_like(&active.connection_type))
-            .map(|active| self.vpn_active_status(&active))
-            .collect::<Result<Vec<_>>>()?;
+            .map(|active| self.vpn_active_status(active))
+            .collect();
         Ok(VpnStatus { active })
     }
 
@@ -145,8 +144,8 @@ impl Nm {
                 ErrorOperation::VpnOperation,
                 "no saved VPN or WireGuard profile matched the request",
             )
-            .with_detail("uuid", selector.uuid.clone().unwrap_or_default())
-            .with_detail("path", selector.path.clone().unwrap_or_default())
+            .with_detail("uuid", selector.uuid.as_deref().unwrap_or_default())
+            .with_detail("path", selector.path.as_deref().unwrap_or_default())
             .into()
         })
     }
@@ -197,7 +196,7 @@ impl Nm {
             .into_iter()
             .find(|active| active.path == active_path.as_str());
         if let Some(active) = active {
-            return self.vpn_active_status(&active);
+            return Ok(self.vpn_active_status(active));
         }
         if let Some(signal) = self.latest_health_signal(HealthSubject::Vpn, active_path.as_str()) {
             return Err(vpn_activation_error(
@@ -215,10 +214,7 @@ impl Nm {
         .into())
     }
 
-    fn vpn_active_status(
-        &self,
-        active: &crate::model::ActiveConnectionSummary,
-    ) -> Result<VpnActiveStatus> {
+    fn vpn_active_status(&self, active: crate::model::ActiveConnectionSummary) -> VpnActiveStatus {
         let settings = active
             .profile_path
             .as_deref()
@@ -233,31 +229,33 @@ impl Nm {
             .as_ref()
             .and_then(|settings| settings.get("connection"))
             .and_then(|connection| connection.get("timestamp"))
-            .and_then(|value| u64::try_from(value.clone()).ok())
+            .and_then(|value| u64::try_from(value).ok())
             .map(|seconds| seconds.saturating_mul(1000));
         let (vpn_state, banner) = self.vpn_plugin_state(&active.path);
-        Ok(VpnActiveStatus {
-            path: active.path.clone(),
-            id: active.id.clone(),
-            uuid: active.uuid.clone(),
-            connection_type: active.connection_type.clone(),
-            plugin: plugin_name(&active.connection_type, service_type.as_deref()),
+        let plugin = plugin_name(&active.connection_type, service_type.as_deref());
+        let reason = self.vpn_reason(&active.path, &active.devices, vpn_state);
+        VpnActiveStatus {
+            path: active.path,
+            id: active.id,
+            uuid: active.uuid,
+            connection_type: active.connection_type,
+            plugin,
             service_type,
             banner,
             vpn_state,
             vpn_state_name: vpn_state.map(vpn_state_name),
-            reason: Some(self.vpn_reason(&active.path, &active.devices, vpn_state)),
+            reason: Some(reason),
             active_state: active.state,
             active_state_name: active.state_name,
-            profile_path: active.profile_path.clone(),
-            specific_object: active.specific_object.clone(),
-            devices: active.devices.clone(),
+            profile_path: active.profile_path,
+            specific_object: active.specific_object,
+            devices: active.devices,
             activated_at_ms,
             duration_ms: activated_at_ms
                 .map(|at| crate::cache::now_ms().saturating_sub(u128::from(at)) as u64),
             default4: active.default4,
             default6: active.default6,
-        })
+        }
     }
 
     fn vpn_plugin_state(&self, active_path: &str) -> (Option<u32>, Option<String>) {
@@ -297,7 +295,7 @@ impl Nm {
             .unwrap_or_else(|| active_connection_state_reason(0))
     }
 
-    fn vpn_profile_summary(&self, profile: &NetworkConnectionSummary) -> Result<VpnProfileSummary> {
+    fn vpn_profile_summary(&self, profile: NetworkConnectionSummary) -> Result<VpnProfileSummary> {
         let path =
             OwnedObjectPath::try_from(profile.path.as_str()).context("parse VPN profile path")?;
         let settings = self.connection_settings(&path)?;
@@ -311,20 +309,21 @@ impl Nm {
             .as_deref()
             .and_then(|active| self.proxy(active, ACTIVE_CONNECTION_IFACE).ok())
             .and_then(|proxy| proxy.get_property::<u32>("State").ok());
+        let plugin = plugin_name(&profile.connection_type, service_type.as_deref());
         Ok(VpnProfileSummary {
-            path: profile.path.clone(),
-            id: profile.id.clone(),
-            uuid: profile.uuid.clone(),
-            connection_type: profile.connection_type.clone(),
+            path: profile.path,
+            id: profile.id,
+            uuid: profile.uuid,
+            connection_type: profile.connection_type,
             type_name: profile.type_name,
-            plugin: plugin_name(&profile.connection_type, service_type.as_deref()),
+            plugin,
             service_type,
             autoconnect: profile.autoconnect,
             timestamp_ms: profile.timestamp_ms,
-            permissions: profile.permissions.clone(),
+            permissions: profile.permissions,
             requires_secrets: profile_requires_secrets(&settings),
             secret_names,
-            active_connection: profile.active_connection.clone(),
+            active_connection: profile.active_connection,
             state,
             state_name: state.map(active_connection_state_name),
         })
@@ -333,7 +332,7 @@ impl Nm {
     fn deactivate_quietly(&self, active_path: &OwnedObjectPath) {
         if let Err(error) = self
             .root_proxy()
-            .call::<_, _, ()>("DeactivateConnection", &(active_path.clone(),))
+            .call::<_, _, ()>("DeactivateConnection", &(active_path,))
         {
             tracing::debug!(%error, "VPN activation was already inactive during rollback");
         }
@@ -455,8 +454,7 @@ fn profile_requires_secrets(settings: &super::ConnectionSettings) -> bool {
         .flat_map(|(_, values)| values.iter())
         .any(|(key, value)| {
             key.ends_with("-flags")
-                && u32::try_from(value.clone())
-                    .is_ok_and(|flags| flags & AGENT_OWNED_OR_NOT_SAVED != 0)
+                && u32::try_from(value).is_ok_and(|flags| flags & AGENT_OWNED_OR_NOT_SAVED != 0)
         })
         || settings
             .get("vpn")
@@ -473,7 +471,7 @@ fn profile_requires_secrets(settings: &super::ConnectionSettings) -> bool {
 }
 
 fn object_path(value: &str) -> Result<OwnedObjectPath> {
-    OwnedObjectPath::try_from(value.to_string())
+    OwnedObjectPath::try_from(value)
         .with_context(|| format!("parse NetworkManager object path {value}"))
 }
 

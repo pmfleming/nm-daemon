@@ -2,11 +2,11 @@ use std::sync::{Arc, Mutex};
 
 use zvariant::OwnedObjectPath;
 
-use super::*;
+use super::{casting_enabled_from_settings, mdns_policy};
 use crate::command::SystemCommandRunner;
-use crate::error::ErrorReport;
+use crate::error::{ErrorOperation, ErrorReport};
 use crate::nl80211::UnavailableWirelessTelemetry;
-use crate::nm::NM_PATH;
+use crate::nm::{ConnectionSettings, NM_PATH, Nm, owned_value};
 use crate::test_support::TestPeer;
 
 const PROFILE: &str = "/org/freedesktop/NetworkManager/Settings/1";

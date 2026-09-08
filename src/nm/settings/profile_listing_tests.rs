@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -5,10 +6,10 @@ use std::sync::{
 
 use zvariant::OwnedObjectPath;
 
-use super::*;
 use crate::command::SystemCommandRunner;
-use crate::error::{ErrorCode, ErrorReport};
+use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
 use crate::nl80211::UnavailableWirelessTelemetry;
+use crate::nm::{ConnectionSettings, Nm, owned_value};
 use crate::test_support::TestPeer;
 
 const EXPIRED: &str = "/org/freedesktop/NetworkManager/Settings/1";

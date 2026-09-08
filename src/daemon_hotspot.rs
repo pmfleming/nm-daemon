@@ -12,7 +12,6 @@ use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::ErrorOperation;
 use crate::model::{HotspotSecurity, WifiBand};
 use crate::nm::HotspotRequest;
-use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
 
 const STREAM: Stream = Stream::Hotspot;
@@ -45,24 +44,6 @@ impl From<HotspotStartParams> for HotspotRequest {
     }
 }
 
-pub(crate) fn call_capabilities(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_hotspot(runtime, Method::HotspotCapabilities, |application| {
-        application.hotspot_capabilities()
-    })
-}
-
-pub(crate) fn call_status(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_hotspot(runtime, Method::HotspotStatus, |application| {
-        application.hotspot_status()
-    })
-}
-
-pub(crate) fn call_stop(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    call_hotspot(runtime, Method::HotspotStop, |application| {
-        application.stop_hotspot()
-    })
-}
-
 pub(crate) fn start(
     runtime: &Arc<DaemonRuntime>,
     params: HotspotStartParams,
@@ -86,23 +67,6 @@ pub(crate) fn start(
         "Hotspot start requested; listen for Event('hotspot', event_json) signals",
         json!({}),
     )
-}
-
-fn call_hotspot<T>(
-    runtime: &Arc<DaemonRuntime>,
-    method: Method,
-    operation: impl FnOnce(&Application<'_>) -> Result<T> + Send + 'static,
-) -> Result<Value>
-where
-    T: serde::Serialize + Send + 'static,
-{
-    runtime.call(method.spec().operation, move |nm| {
-        api_data_value(
-            method.spec().response_key,
-            &operation(&Application::new(nm))?,
-            "serialize hotspot response JSON",
-        )
-    })
 }
 
 fn run_hotspot_worker(

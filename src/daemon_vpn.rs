@@ -12,7 +12,6 @@ use crate::daemon_event::{OperationEvents, started_response};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{DomainError, ErrorOperation};
 use crate::nm::VpnSelector;
-use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
 
 const STREAM: Stream = Stream::Vpn;
@@ -73,37 +72,13 @@ fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-pub(crate) fn call_list(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    runtime.call(ErrorOperation::VpnOperation, |nm| {
-        api_data_value(
-            Method::VpnList.spec().response_key,
-            &Application::new(nm).vpn_profiles()?,
-            "serialize VPN list response JSON",
-        )
-    })
-}
-
-pub(crate) fn call_status(runtime: &Arc<DaemonRuntime>) -> Result<Value> {
-    runtime.call(ErrorOperation::VpnOperation, |nm| {
-        api_data_value(
-            Method::VpnStatus.spec().response_key,
-            &Application::new(nm).vpn_status()?,
-            "serialize VPN status response JSON",
-        )
-    })
-}
-
 pub(crate) fn call_disconnect(
     runtime: &Arc<DaemonRuntime>,
     params: VpnSelectParams,
 ) -> Result<Value> {
     let selector = params.into_selector();
-    runtime.call(ErrorOperation::VpnOperation, move |nm| {
-        api_data_value(
-            Method::VpnDisconnect.spec().response_key,
-            &Application::new(nm).disconnect_vpn(&selector)?,
-            "serialize VPN disconnect response JSON",
-        )
+    runtime.call_application(Method::VpnDisconnect, move |application| {
+        application.disconnect_vpn(&selector)
     })
 }
 

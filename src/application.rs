@@ -381,14 +381,12 @@ impl<'a> Application<'a> {
         // at most one alternate candidate; explicit legacy BSSID/AP requests
         // remain strict and therefore contain no alternatives.
         let primary = request.primary_candidate();
-        let alternative = request.alternatives.first();
+        let mut alternative = request.alternatives.first();
         let total = 1 + usize::from(alternative.is_some());
         let mut attempts = Vec::with_capacity(total);
-        for (index, candidate) in std::iter::once(primary.as_ref())
-            .chain(alternative)
-            .enumerate()
-        {
-            let attempt = index + 1;
+        let mut candidate = primary.as_ref();
+        let mut attempt = 1;
+        loop {
             let candidate_info = candidate.info(attempt, total);
             emit_trying_candidate(&target_identity, &candidate_info, &mut emit)?;
             let started_at = Instant::now();
@@ -404,7 +402,7 @@ impl<'a> Application<'a> {
             if let Some(outcome) = finish_connect_cancellation(request, cancellation, &mut emit)? {
                 return Ok(outcome);
             }
-            match result {
+            let error = match result {
                 Ok(result) => {
                     let outcome = self.successful_connect_outcome(
                         result,
@@ -417,28 +415,27 @@ impl<'a> Application<'a> {
                     emit_finished_connect(request, &outcome, &mut emit)?;
                     return Ok(outcome);
                 }
-                Err(error) => {
-                    let reason =
-                        record_failed_attempt(&mut attempts, &candidate_info, started_at, &error);
-                    if let Some(next) = alternative.filter(|_| index == 0)
-                        && retryable_candidate_failure(reason)
-                    {
-                        emit_retry(
-                            &target_identity,
-                            &candidate_info,
-                            next.info(2, total),
-                            reason,
-                            &mut emit,
-                        )?;
-                        continue;
-                    }
-                    let outcome = final_failed_connect_outcome(request, error, attempts, total > 1);
-                    emit_finished_connect(request, &outcome, &mut emit)?;
-                    return Ok(outcome);
-                }
+                Err(error) => error,
+            };
+            let reason = record_failed_attempt(&mut attempts, &candidate_info, started_at, &error);
+            if retryable_candidate_failure(reason)
+                && let Some(next) = alternative.take()
+            {
+                emit_retry(
+                    &target_identity,
+                    &candidate_info,
+                    next.info(2, total),
+                    reason,
+                    &mut emit,
+                )?;
+                candidate = next;
+                attempt += 1;
+                continue;
             }
+            let outcome = final_failed_connect_outcome(request, error, attempts, total > 1);
+            emit_finished_connect(request, &outcome, &mut emit)?;
+            return Ok(outcome);
         }
-        unreachable!("connect request always has a primary candidate")
     }
 
     fn run_connect_candidate(

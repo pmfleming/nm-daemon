@@ -541,6 +541,37 @@ impl DaemonRuntime {
         );
     }
 
+    /// Serialize application results at the transport boundary. Preserve the
+    /// read lane for the existing read-only methods; other calls stay serialized.
+    pub(crate) fn call_application<T: serde::Serialize>(
+        self: &Arc<Self>,
+        method: Method,
+        action: impl FnOnce(&Application<'_>) -> Result<T> + Send + 'static,
+    ) -> Result<Value> {
+        let spec = method.spec();
+        let call = move |nm: &Nm| {
+            api_data_value(
+                spec.response_key,
+                &action(&Application::new(nm))?,
+                "serialize daemon method response JSON",
+            )
+        };
+        if matches!(
+            method,
+            Method::NetworkConnectivity
+                | Method::NetworkInventory
+                | Method::NetworkDevices
+                | Method::NetworkConnections
+                | Method::NetworkState
+                | Method::DiscoveryServices
+                | Method::WifiSaved
+        ) {
+            self.call_read(spec.operation, call)
+        } else {
+            self.call(spec.operation, call)
+        }
+    }
+
     pub(crate) fn call_status(self: &Arc<Self>) -> Result<Value> {
         if let Some(response) = self.cached_status() {
             return Ok(response);
