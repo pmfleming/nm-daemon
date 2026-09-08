@@ -37,4 +37,27 @@ Reproduce in `nix develop` with `bash tools/quality-evidence.sh all`, or select 
 
 ## 5. Hardware validation
 
-Preflight: one connected Wi-Fi interface (`wlp2s0`), Ethernet has no carrier, no spare Wi-Fi adapter. Disruptive roaming, band rollback, hotspot, and VPN tests require a recovery path and suitable test profiles; do not interrupt the sole working link blindly. Read-only validation and an explicitly gated field-test procedure will be recorded here.
+**Read-only checks passed; disruptive lifecycle validation remains blocked, not completed.**
+
+Run `cargo build --locked && bash tools/hardware-smoke.sh`. This exercises the freshly built direct CLI, not the installed daemon, using private runtime/state/log directories and 30-second command limits. It does not replace or restart the running user service. Raw evidence can contain network identifiers; it stays in a mode-0700 directory under `target/hardware-smoke.*`, outside Git.
+
+On this host, all ten probes returned successful v1 `nm-api` envelopes: Wi-Fi status/networks/saved profiles, network status/connectivity/inventory, hotspot capabilities/status, and VPN list/status. Wi-Fi was active on 5 GHz. Device states and active-connection object paths matched before and after; the existing user daemon remained active. Network connectivity includes NetworkManager's connectivity probe, but no scan, profile mutation, activation, or deactivation was requested.
+
+Preflight found one connected Wi-Fi interface (`wlp2s0`), Ethernet unavailable/no carrier, no spare Wi-Fi adapter, zero VPN/WireGuard profiles, and hotspot capability explicitly unavailable with `device-busy`.
+
+| Hardware scenario | Result / blocker |
+| --- | --- |
+| New connection, alternate candidate, and roaming | Blocked: no independent recovery link or designated alternate AP |
+| Band change and rollback | Blocked: sole live radio; no safe recovery path |
+| Hotspot activation/cancellation/rollback | Blocked: device busy; no spare radio/test client |
+| VPN activation and late cancellation | Blocked: no configured authorized VPN/WireGuard test profile |
+
+To finish on suitable hardware:
+
+1. Establish an independently verified wired/recovery connection or console, choose an explicit spare Wi-Fi device and disposable test profiles, and record initial active paths, profile settings, and radio state. Do not use production credentials or arbitrary saved profiles.
+2. Using the current build and the methods documented in `docs/dbus-daemon.md`, test normal connect, already-active connect, roaming/alternate AP retry, and authentication failure. Require one terminal event, exact SSID verification, bounded retries, and cleanup of failed temporary profiles.
+3. Change the test profile's band, force activation failure, and verify restoration of its original settings and connection. Exercise cancellation before and after activation acknowledgement.
+4. Start a hotspot explicitly on the spare device, verify it with a second client, then test failure and early/late cancellation. Confirm no active hotspot or transient profile survives rollback.
+5. Activate the authorized VPN test profile and exercise failure and early/late cancellation. Confirm the specific activated object is checked, no cancelled VPN remains active, and the base connection survives. Restore and compare all initial state before marking these rows passed.
+
+Scripted fake-D-Bus coverage from step 1 is useful evidence for these semantics, but does not substitute for this remaining hardware work. Final ordinary/coverage suites pass 103 tests (two opt-in benchmarks ignored); release benchmarks pass separately.
