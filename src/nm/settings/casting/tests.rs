@@ -49,6 +49,21 @@ struct State {
     reject: bool,
     switched: bool,
     reapplications: usize,
+    firewall_reconciliations: usize,
+    reject_firewall: bool,
+}
+
+struct Firewall(Arc<Mutex<State>>);
+#[zbus::interface(name = "org.laufan.NmCastPolicy1")]
+impl Firewall {
+    fn reconcile(&self) -> zbus::fdo::Result<()> {
+        let mut state = self.0.lock().unwrap();
+        state.firewall_reconciliations += 1;
+        if state.reject_firewall {
+            return Err(zbus::fdo::Error::Failed("nft update failed".into()));
+        }
+        Ok(())
+    }
 }
 
 struct Manager(Arc<Mutex<State>>);
@@ -142,13 +157,19 @@ fn run_policy_test() {
         .build()
         .unwrap();
     let _entered = runtime.enter();
-    for (initial, enabled, active, reject, switched) in [
-        (0, true, true, false, false),
-        (2, false, true, false, false),
-        (2, true, true, false, false), // resolve-only, not hostname advertising
-        (0, true, false, false, false),
-        (0, true, true, true, false),
-        (0, true, true, false, true),
+    for (initial, enabled, active, reject, switched, reject_firewall) in [
+        (0, true, true, false, false, false),
+        (0, false, true, false, false, false), // idempotent Off still enforces firewall
+        (1, false, true, false, false, false),
+        (2, false, true, false, false, false),
+        (2, true, true, false, false, false), // resolve-only, not hostname advertising
+        (0, true, false, false, false, false),
+        (0, true, true, true, false, false),
+        (0, true, true, false, true, false),
+        (1, false, true, true, false, false), // firewall still closes if resolver fails
+        (1, false, true, false, false, true),
+        (0, true, true, false, false, true),
+        (0, false, false, false, false, true), // inactive still needs installed enforcement
     ] {
         let peer = TestPeer::new(":1.0", ":1.1");
         let saved = settings(initial);
@@ -165,12 +186,20 @@ fn run_policy_test() {
             reject,
             switched,
             reapplications: 0,
+            firewall_reconciliations: 0,
+            reject_firewall,
         }));
         let server = peer.server.object_server();
         server.at(NM_PATH, Manager(state.clone())).unwrap();
         server.at(PROFILE, Saved(state.clone())).unwrap();
         server.at(ACTIVE, Active).unwrap();
         server.at(DEVICE, Device(state.clone())).unwrap();
+        let missing_firewall = reject_firewall && enabled;
+        if !missing_firewall {
+            server
+                .at(crate::cast_policy::PATH, Firewall(state.clone()))
+                .unwrap();
+        }
         let nm = Nm::with_connection_runner_destination_and_telemetry(
             peer.client.clone(),
             Arc::new(SystemCommandRunner),
@@ -178,7 +207,7 @@ fn run_policy_test() {
             Arc::new(UnavailableWirelessTelemetry),
         )
         .unwrap();
-        let result = if !enabled {
+        let result = if !enabled && initial == 2 {
             // Exercise the advanced editor route as well as the direct CLI toggle.
             let update = serde_json::from_value(serde_json::json!({
                 "autoconnect": true, "metered": "auto", "hidden": false,
@@ -191,7 +220,7 @@ fn run_policy_test() {
         } else {
             nm.set_connection_casting_by_path(PROFILE, enabled)
         };
-        if reject || switched {
+        if reject || switched || reject_firewall {
             let report = ErrorReport::from_error(&result.unwrap_err(), ErrorOperation::Unknown);
             assert_eq!(report.details["profile_saved"], true);
             assert_eq!(report.details["live_applied"], false);
@@ -213,7 +242,15 @@ fn run_policy_test() {
             state.applied["ipv4"], expected_ip,
             "do not apply pending saved IP changes"
         );
-        assert_eq!(state.reapplications, usize::from(active && !switched));
+        assert_eq!(
+            state.reapplications,
+            usize::from(active && !switched && initial != i32::from(enabled))
+        );
+        assert_eq!(
+            state.firewall_reconciliations,
+            if missing_firewall { 0 } else { 2 },
+            "enforce before and after resolver reapply, even on failure"
+        );
     }
 }
 

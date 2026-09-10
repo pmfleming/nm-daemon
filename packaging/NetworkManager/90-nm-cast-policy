@@ -1,0 +1,9 @@
+#!/bin/sh
+# Install in dispatcher.d and symlink from pre-up.d / pre-down.d. The synchronous
+# pre hooks withdraw the previous network's permission before activation completes.
+# No connection-supplied environment or arguments are forwarded to the root helper.
+case "$2" in
+    pre-up|up|pre-down|down|reapply)
+        exec @out@/bin/nm-cast-policy reconcile
+        ;;
+esac

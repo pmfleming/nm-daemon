@@ -1,0 +1,33 @@
+[Unit]
+Description=Per-network discovery and Cast firewall policy
+Documentation=https://github.com/pmfleming/nm-daemon/blob/main/docs/mdns-discovery.md
+After=dbus.service nftables.service
+Before=NetworkManager.service
+Wants=dbus.service
+
+[Service]
+Type=dbus
+BusName=org.laufan.NmCastPolicy
+ExecStart=@out@/bin/nm-cast-policy serve --nft @nft@
+ExecStopPost=@out@/bin/nm-cast-policy close --nft @nft@
+Restart=on-failure
+RestartSec=1s
+TimeoutStartSec=15s
+TimeoutStopSec=5s
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

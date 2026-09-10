@@ -3,6 +3,7 @@ mod app;
 mod application;
 mod auth;
 mod cache;
+mod cast_policy;
 mod cli;
 mod client;
 mod command;
@@ -49,3 +50,4 @@ mod variant;
 mod test_support;
 
 pub use app::{report_error, run};
+pub use cast_policy::run as run_cast_policy;

@@ -518,7 +518,7 @@ pub(crate) struct SavedWifiConnection {
     pub(crate) autoconnect: bool,
     /// Whether this profile explicitly permits mDNS discovery used by casting devices.
     /// Inherited policy is reported as disabled, matching the required host mdns=0
-    /// default. This is saved policy, not proof of the live resolver/application state.
+    /// default. This is saved policy, not proof of live resolver/firewall/application state.
     #[serde(default)]
     pub(crate) casting_enabled: bool,
     #[serde(default)]

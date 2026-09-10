@@ -29,6 +29,18 @@
               install -Dm644 ${./packaging/systemd/nm-daemon.service} $out/share/systemd/user/nm-daemon.service
               install -Dm644 ${./packaging/dbus/org.laufan.NmDaemon.service} \
                 $out/share/dbus-1/services/org.laufan.NmDaemon.service
+              install -Dm644 ${./packaging/systemd/nm-cast-policy.service} \
+                $out/lib/systemd/system/nm-cast-policy.service
+              install -Dm644 ${./packaging/dbus/org.laufan.NmCastPolicy.conf} \
+                $out/share/dbus-1/system.d/org.laufan.NmCastPolicy.conf
+              install -Dm755 ${./packaging/NetworkManager/90-nm-cast-policy} \
+                $out/lib/NetworkManager/dispatcher.d/90-nm-cast-policy
+              substituteInPlace $out/lib/systemd/system/nm-cast-policy.service \
+                --replace-fail @out@ $out \
+                --replace-fail @nft@ ${pkgs.nftables}/bin/nft
+              substituteInPlace $out/lib/NetworkManager/dispatcher.d/90-nm-cast-policy \
+                --replace-fail @out@ $out
+              patchShebangs $out/lib/NetworkManager/dispatcher.d/90-nm-cast-policy
               substituteInPlace \
                 $out/share/systemd/user/nm-daemon.service \
                 $out/share/dbus-1/services/org.laufan.NmDaemon.service \
@@ -67,9 +79,12 @@
           };
         });
 
+      nixosModules.default = import ./nix/nixos.nix { inherit self; };
+
       checks = forAllSystems (system: pkgs: {
         package = self.packages.${system}.default;
         connectParityProbe = self.packages.${system}.connectParityProbe;
+        castPolicy = import ./nix/tests/cast-policy.nix { inherit self pkgs; };
       });
 
       apps = forAllSystems (system: pkgs: {

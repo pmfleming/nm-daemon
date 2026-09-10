@@ -44,6 +44,33 @@ pub(super) fn set_casting_enabled(settings: &mut ConnectionSettings, enabled: bo
 
 impl Nm {
     pub(super) fn reapply_casting(&self, profile: &OwnedObjectPath, enabled: bool) -> Result<()> {
+        // Saved policy is already committed. Close the firewall first on Off;
+        // on On it stays closed until the applied resolver policy also agrees.
+        // Always attempt both layers, even if one fails, and never claim success
+        // when the privileged companion is missing or enforcement failed.
+        let before = self.reconcile_cast_firewall();
+        let resolver = self.reapply_casting_resolver(profile, enabled);
+        let after = self.reconcile_cast_firewall();
+        let failures: Vec<String> = [before, resolver, after]
+            .into_iter()
+            .filter_map(|result| result.err().map(|error| format!("{error:#}")))
+            .collect();
+        anyhow::ensure!(failures.is_empty(), "{}", failures.join("; "));
+        Ok(())
+    }
+
+    fn reconcile_cast_firewall(&self) -> Result<()> {
+        zbus::blocking::Proxy::new(
+            &self.conn,
+            crate::cast_policy::DESTINATION,
+            crate::cast_policy::PATH,
+            crate::cast_policy::INTERFACE,
+        )?
+        .call::<_, _, ()>("Reconcile", &())
+        .context("apply Cast firewall policy (nm-cast-policy system service required)")
+    }
+
+    fn reapply_casting_resolver(&self, profile: &OwnedObjectPath, enabled: bool) -> Result<()> {
         let active_paths: Vec<OwnedObjectPath> = self
             .root_proxy()
             .get_property("ActiveConnections")
