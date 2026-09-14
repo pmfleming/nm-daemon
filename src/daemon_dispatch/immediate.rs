@@ -34,6 +34,9 @@ pub(super) fn dispatch(
         | Method::VpnStatus
         | Method::WifiDisconnect
         | Method::WifiSaved => dispatch_empty(method, params_json, runtime),
+        Method::WifiQrRender => crate::daemon_qr::call_render(parse_required_params::<
+            crate::daemon_qr::QrPayloadParams,
+        >(params_json)?),
         Method::WifiQrParse => crate::daemon_qr::call_parse(parse_required_params::<
             crate::daemon_qr::QrPayloadParams,
         >(params_json)?),

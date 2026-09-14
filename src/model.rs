@@ -485,6 +485,9 @@ pub(crate) struct WifiSharePayload {
     pub(crate) ssid: String,
     pub(crate) auth_type: Option<String>,
     pub(crate) qr_payload: Option<String>,
+    pub(crate) qr_svg: Option<String>,
+    pub(crate) password: Option<String>,
+    pub(crate) version: Option<String>,
 }
 
 impl WifiSharePayload {
@@ -494,15 +497,22 @@ impl WifiSharePayload {
         password: Option<&str>,
         hidden: bool,
     ) -> Self {
+        let payload = wifi_qr_payload(auth_type, &profile.ssid, password, hidden);
+        let svg = crate::qr::render_share(&payload).ok();
         Self {
             status: "ok",
-            shareable: true,
-            reason: None,
+            shareable: svg.is_some(),
+            reason: svg
+                .is_none()
+                .then(|| "QR image could not be generated".into()),
             path: profile.path.clone(),
             id: profile.id.clone(),
             ssid: profile.ssid.clone(),
             auth_type: Some(auth_type.to_string()),
-            qr_payload: Some(wifi_qr_payload(auth_type, &profile.ssid, password, hidden)),
+            qr_payload: svg.as_ref().map(|_| payload),
+            password: svg.as_ref().and(password.map(str::to_owned)),
+            qr_svg: svg,
+            version: None,
         }
     }
 }

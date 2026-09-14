@@ -32,6 +32,7 @@ pub(crate) enum Method {
     VpnConnect,
     VpnDisconnect,
     WifiQrParse,
+    WifiQrRender,
     WifiQrConnect,
     WifiNetworks,
     WifiBandStatus,
@@ -84,7 +85,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static METHOD_REGISTRY: &[MethodSpec; 34] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 35] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -294,6 +295,16 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 34] = &[
         stream: None,
         operation: ErrorOperation::QrOperation,
         description: "Validates a scanned Wi-Fi QR payload without logging it or echoing its secret.",
+    },
+    MethodSpec {
+        method: Method::WifiQrRender,
+        name: "wifi.qr.render",
+        parameters: ParameterKind::QrPayload,
+        params_example: r#"{"payload":"WIFI:T:nopass;S:Guest;;"}"#,
+        response_key: "result",
+        stream: None,
+        operation: ErrorOperation::QrOperation,
+        description: "Explicitly renders a validated Wi-Fi payload in memory; response contains credentials.",
     },
     MethodSpec {
         method: Method::WifiQrConnect,

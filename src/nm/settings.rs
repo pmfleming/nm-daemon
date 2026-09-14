@@ -406,11 +406,14 @@ impl Nm {
             .map_err(|err| format!("{err:#}"))
             .ok();
 
-        Ok(wifi_share_payload_for_settings(
-            &profile,
-            &settings,
-            secrets.as_ref(),
-        ))
+        let mut payload = wifi_share_payload_for_settings(&profile, &settings, secrets.as_ref());
+        // Fence a settings change while resolving its credential.
+        let version = profile_version(&settings);
+        if profile_version(&self.connection_settings(&path)?) != version {
+            anyhow::bail!("Wi-Fi profile changed while preparing sharing; request it again");
+        }
+        payload.version = Some(version);
+        Ok(payload)
     }
 
     pub(crate) fn network_entries_for_access_points(
@@ -785,6 +788,9 @@ fn unshareable_payload(profile: &SavedWifiConnection, reason: &str) -> WifiShare
         ssid: profile.ssid.clone(),
         auth_type: None,
         qr_payload: None,
+        qr_svg: None,
+        password: None,
+        version: None,
     }
 }
 

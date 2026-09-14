@@ -34,6 +34,32 @@ pub(crate) fn wifi_qr_payload(
     )
 }
 
+/// Render only bounded, validated Wi-Fi payloads. No subprocesses, files or logs.
+pub(crate) fn render_share(payload: &str) -> Result<String> {
+    anyhow::ensure!(payload.len() <= 1024, "Wi-Fi QR payload is too large");
+    parse_wifi_qr(payload)?;
+    let code = qrcode::QrCode::new(payload.as_bytes())?;
+    Ok(code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(320, 320)
+        .build())
+}
+
+#[cfg(test)]
+mod render_tests {
+    #[test]
+    fn renders_validated_payloads_without_embedding_plaintext() {
+        let payload = super::wifi_qr_payload("WPA", "Cafe;Guest", Some("pass:word1"), true);
+        let svg = super::render_share(&payload).unwrap();
+        assert!(svg.contains("<svg"));
+        assert!(!svg.contains("pass:word1"));
+        assert!(svg.len() < 200_000);
+        assert!(super::render_share(&"x".repeat(1025)).is_err());
+        assert!(super::render_share("not a Wi-Fi code").is_err());
+        assert!(super::render_share("WIFI:T:nopass;S:Guest;;").is_ok());
+    }
+}
+
 fn wifi_qr_value(value: &str) -> String {
     let escaped: String = value
         .chars()

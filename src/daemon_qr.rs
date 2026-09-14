@@ -28,6 +28,19 @@ pub(crate) struct QrConnectParams {
     ifname: Option<InterfaceName>,
 }
 
+pub(crate) fn call_render(params: QrPayloadParams) -> Result<Value> {
+    let svg = crate::qr::render_share(&params.payload)?;
+    let parsed = parse_wifi_qr(&params.payload)?;
+    api_data_value(
+        Method::WifiQrRender.spec().response_key,
+        &serde_json::json!({
+            "shareable": true, "ssid": parsed.ssid,
+            "qr_payload": params.payload, "qr_svg": svg, "password": parsed.password,
+        }),
+        "serialize requested Wi-Fi share image",
+    )
+}
+
 pub(crate) fn call_parse(params: QrPayloadParams) -> Result<Value> {
     let parsed = parse_wifi_qr(&params.payload)?;
     tracing::info!(

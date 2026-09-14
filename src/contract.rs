@@ -169,6 +169,7 @@ fn wifi_method_fixtures() -> Value {
             "message": "Secret provided to pending NetworkManager request; the wifi.secret stream reports the persistence outcome",
         })),
         "wifi-qr.parse": response_fixture(Method::WifiQrParse, json!(contract_parsed_qr("WIFI:T:WPA;S:Example;P:correct horse battery staple;;"))),
+        "wifi-qr.render": response_fixture(Method::WifiQrRender, serde_json::json!({"shareable": true, "qr_svg": crate::qr::render_share("WIFI:T:nopass;S:Guest;;").unwrap(), "qr_payload": "WIFI:T:nopass;S:Guest;;", "password": null, "ssid": "Guest"})),
         "wifi-qr.parse-open": response_fixture(Method::WifiQrParse, json!(contract_parsed_qr("WIFI:T:nopass;S:Guest;H:true;;"))),
         "wifi-qr.connect": response_fixture(Method::WifiQrConnect, json!({
             "status": "started",
@@ -1569,6 +1570,7 @@ mod tests {
             crate::protocol::Method::VpnConnect,
             crate::protocol::Method::VpnDisconnect,
             crate::protocol::Method::WifiQrParse,
+            crate::protocol::Method::WifiQrRender,
             crate::protocol::Method::WifiQrConnect,
             crate::protocol::Method::WifiNetworks,
             crate::protocol::Method::WifiBandStatus,
