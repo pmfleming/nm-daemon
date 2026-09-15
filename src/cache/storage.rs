@@ -1,7 +1,8 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 
 use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
@@ -13,6 +14,7 @@ use crate::generated::{CACHE_MAX_BYTES, HISTORY_MAX_BYTES, HISTORY_ROTATIONS};
 const CACHE_DIR_NAME: &str = "nm-daemon";
 const LOCK_FILE_NAME: &str = ".storage.lock";
 
+#[cfg(test)]
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -98,63 +100,19 @@ fn read_json_path<T>(path: &Path) -> Result<CacheRead<T>>
 where
     T: DeserializeOwned,
 {
-    let file = match open_cache_file(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(CacheRead::Missing),
-        Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
+    let Some(bytes) = shelllist_daemon_core::read_bytes_bounded(path, CACHE_MAX_BYTES)
+        .with_context(|| format!("read {}", path.display()))?
+    else {
+        return Ok(CacheRead::Missing);
     };
-    let text = read_cache_text(file, path)?;
+    let text =
+        String::from_utf8(bytes).with_context(|| format!("read UTF-8 cache {}", path.display()))?;
     match serde_json::from_str(&text) {
         Ok(value) => Ok(CacheRead::Available(value)),
         Err(error) => Ok(CacheRead::Corrupt {
             message: format!("parse {}: {error}", path.display()),
         }),
     }
-}
-
-fn read_cache_text(file: File, path: &Path) -> Result<String> {
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("stat {}", path.display()))?;
-    if !metadata.is_file() {
-        anyhow::bail!("refusing to read non-regular cache file {}", path.display());
-    }
-    if metadata.len() > CACHE_MAX_BYTES {
-        anyhow::bail!(
-            "cache file {} is {} bytes; maximum is {CACHE_MAX_BYTES}",
-            path.display(),
-            metadata.len()
-        );
-    }
-    let mut text = String::new();
-    file.take(CACHE_MAX_BYTES + 1)
-        .read_to_string(&mut text)
-        .with_context(|| format!("read {}", path.display()))?;
-    if text.len() as u64 > CACHE_MAX_BYTES {
-        anyhow::bail!(
-            "cache file {} grew beyond {CACHE_MAX_BYTES} bytes",
-            path.display()
-        );
-    }
-    Ok(text)
-}
-
-#[cfg(unix)]
-fn open_cache_file(path: &Path) -> io::Result<File> {
-    use rustix::fs::{Mode, OFlags};
-
-    rustix::fs::open(
-        path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-        Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(io::Error::from)
-}
-
-#[cfg(not(unix))]
-fn open_cache_file(path: &Path) -> io::Result<File> {
-    File::open(path)
 }
 
 fn write_json_atomic<T>(path: &Path, value: &T) -> Result<()>
@@ -164,13 +122,13 @@ where
     let parent = path.parent().context("cache path has no parent")?;
     create_private_dir_all(parent)?;
     reject_symlink_file(path, "cache file")?;
-    let tmp_path = temp_path_for(path)?;
     let text = serde_json::to_string_pretty(value).context("serialize cache JSON")?;
-    write_private_file(&tmp_path, format!("{text}\n").as_bytes())
-        .with_context(|| format!("write {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, path)
-        .with_context(|| format!("rename {} to {}", tmp_path.display(), path.display()))?;
-    sync_parent(parent)
+    shelllist_daemon_core::write_bytes_atomic(
+        path,
+        format!("{text}\n").as_bytes(),
+        shelllist_daemon_core::AtomicFilePolicy::PRIVATE,
+    )
+    .with_context(|| format!("write {}", path.display()))
 }
 
 fn append_json_line_with_rotation<T>(
@@ -256,26 +214,6 @@ fn lock_exclusive(file: &File) -> Result<()> {
 #[cfg(not(unix))]
 fn lock_exclusive(_: &File) -> Result<()> {
     Ok(())
-}
-
-fn temp_path_for(path: &Path) -> Result<PathBuf> {
-    let parent = path.parent().context("cache path has no parent")?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("cache path has no file name")?;
-    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    Ok(parent.join(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        counter
-    )))
-}
-
-fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut options = private_open_options();
-    options.write(true).create_new(true);
-    write_private_contents(path, contents, options, File::sync_all)
 }
 
 fn private_open_options() -> OpenOptions {

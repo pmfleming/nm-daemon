@@ -29,6 +29,7 @@ pub(super) enum Control {
         stream: Stream,
         reply: oneshot::Sender<Vec<String>>,
     },
+    Owners(oneshot::Sender<Vec<String>>),
     ExternalEvent {
         stream: Stream,
         request_id: String,
@@ -138,6 +139,14 @@ fn handle_control(
                 .into_iter()
                 .collect();
             let _ = reply.send(owners);
+        }
+        Control::Owners(reply) => {
+            let _ = reply.send(
+                subscriptions
+                    .values()
+                    .filter_map(|subscription| subscription.owner().map(str::to_owned))
+                    .collect(),
+            );
         }
         Control::ExternalEvent {
             stream,

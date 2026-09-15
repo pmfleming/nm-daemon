@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
 use serde_json::json;
 use zbus::message::Header;
 use zbus::object_server::SignalEmitter;
@@ -19,17 +18,15 @@ pub(crate) async fn run_daemon() -> Result<()> {
         tokio::task::spawn_blocking(move || DaemonRuntime::start(crate::nm::Nm::new()?, tokio))
             .await
             .context("join NetworkManager runtime initialization")??;
+    let interface =
+        NmDaemonInterface::new(Arc::clone(&runtime), &tokio::runtime::Handle::current());
+    let requests = Arc::clone(&interface.requests);
+    let controls = Arc::clone(&interface.controls);
     let connection = zbus::connection::Builder::session()
         .context("connect to session D-Bus")?
         .name(DBUS_BUS_NAME)
         .with_context(|| format!("own D-Bus name {DBUS_BUS_NAME}"))?
-        .serve_at(
-            DBUS_OBJECT_PATH,
-            NmDaemonInterface {
-                runtime: Arc::clone(&runtime),
-                tokio: tokio::runtime::Handle::current(),
-            },
-        )
+        .serve_at(DBUS_OBJECT_PATH, interface)
         .context("export nm-daemon D-Bus object")?
         .build()
         .await
@@ -54,6 +51,10 @@ pub(crate) async fn run_daemon() -> Result<()> {
         .close()
         .await
         .context("close nm-daemon session D-Bus connection")?;
+    tokio::join!(
+        requests.shutdown(std::time::Duration::from_secs(5)),
+        controls.shutdown(std::time::Duration::from_secs(5)),
+    );
     runtime.shutdown().await;
     tokio::task::spawn_blocking(move || drop(runtime))
         .await
@@ -80,7 +81,29 @@ fn log_daemon_started() {
 
 struct NmDaemonInterface {
     runtime: Arc<DaemonRuntime>,
-    tokio: tokio::runtime::Handle,
+    requests: Arc<shelllist_daemon_tokio::BlockingLane>,
+    controls: Arc<shelllist_daemon_tokio::BlockingLane>,
+}
+
+impl NmDaemonInterface {
+    fn new(runtime: Arc<DaemonRuntime>, tokio: &tokio::runtime::Handle) -> Self {
+        Self {
+            runtime,
+            requests: Arc::new(shelllist_daemon_tokio::BlockingLane::start(
+                tokio,
+                "dbus-requests",
+                64,
+                8,
+            )),
+            // Cleanup remains available when ordinary calls saturate admission.
+            controls: Arc::new(shelllist_daemon_tokio::BlockingLane::start(
+                tokio,
+                "dbus-controls",
+                16,
+                2,
+            )),
+        }
+    }
 }
 
 #[zbus::interface(name = "org.laufan.NmDaemon1")]
@@ -98,8 +121,8 @@ impl NmDaemonInterface {
         let owner = header.sender().map(ToString::to_string);
         let emitter = directed_emitter(&emitter, &header);
         let runtime = Arc::clone(&self.runtime);
-        self.tokio
-            .spawn_blocking(move || {
+        self.requests
+            .call_async(move || {
                 json_response(dispatch_call(
                     &method,
                     &params_json,
@@ -128,10 +151,8 @@ impl NmDaemonInterface {
         let owner = header.sender().map(ToString::to_string);
         let emitter = directed_emitter(&emitter, &header);
         let runtime = Arc::clone(&self.runtime);
-        self.tokio
-            .spawn_blocking(move || {
-                json_response(subscribe_streams(streams, owner, emitter, &runtime))
-            })
+        self.requests
+            .call_async(move || json_response(subscribe_streams(streams, owner, emitter, &runtime)))
             .await
             .unwrap_or_else(|error| {
                 json_response(Err(crate::error::DomainError::internal(
@@ -154,8 +175,8 @@ impl NmDaemonInterface {
         let emitter = directed_emitter(&emitter, &header);
         let runtime = Arc::clone(&self.runtime);
         if let Err(error) = self
-            .tokio
-            .spawn_blocking(move || {
+            .controls
+            .call_async(move || {
                 let outcome = runtime.cancel(&request_id, owner.as_deref());
                 if outcome.subscription {
                     emit_json_event_nonfatal(
@@ -194,34 +215,42 @@ impl NmDaemonInterface {
 /// so callers must never receive a broadcast emitter when D-Bus supplied a
 /// unique sender name.
 async fn watch_client_disconnects(connection: zbus::Connection, runtime: Arc<DaemonRuntime>) {
-    if let Err(error) = run_owner_watch(&connection, &runtime).await {
-        tracing::warn!(error = %crate::error::err_chain(&error), "D-Bus owner watcher stopped");
+    loop {
+        if let Err(error) = run_owner_watch(&connection, &runtime).await {
+            tracing::warn!(error = %crate::error::err_chain(&error), "D-Bus owner watcher failed; releasing owned work before retry");
+            for owner in runtime.owner_names().await {
+                runtime.drop_owner(owner).await;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 
 async fn run_owner_watch(connection: &zbus::Connection, runtime: &DaemonRuntime) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        connection,
-        "org.freedesktop.DBus",
-        "/org/freedesktop/DBus",
-        "org.freedesktop.DBus",
-    )
-    .await
-    .context("create D-Bus owner proxy")?;
-    let mut changes = proxy
-        .receive_signal("NameOwnerChanged")
-        .await
-        .context("receive D-Bus owner changes")?;
-    while let Some(message) = changes.next().await {
-        let (name, _old_owner, new_owner): (String, String, String) = message
-            .body()
-            .deserialize()
-            .context("decode D-Bus owner change")?;
-        if name.starts_with(':') && new_owner.is_empty() {
-            runtime.drop_owner(name);
+    let monitor = shelllist_daemon_tokio::OwnerLossMonitor::new(connection.clone());
+    let mut losses = monitor.subscribe().await?;
+    reconcile_owners(&monitor, runtime).await?;
+    loop {
+        match losses.recv().await {
+            Ok(owner) => runtime.drop_owner(owner).await,
+            Err(shelllist_daemon_tokio::OwnerLossError::Lagged(_)) => {
+                reconcile_owners(&monitor, runtime).await?
+            }
+            Err(error) => return Err(error.into()),
         }
     }
-    anyhow::bail!("D-Bus owner-change stream ended")
+}
+
+async fn reconcile_owners(
+    monitor: &shelllist_daemon_tokio::OwnerLossMonitor,
+    runtime: &DaemonRuntime,
+) -> Result<()> {
+    for owner in runtime.owner_names().await {
+        if !monitor.has_owner(&owner).await? {
+            runtime.drop_owner(owner).await;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn emit_event_signal(
@@ -340,10 +369,7 @@ mod tests {
             .object_server()
             .at(
                 DBUS_OBJECT_PATH,
-                NmDaemonInterface {
-                    runtime: Arc::clone(&runtime),
-                    tokio: tokio_runtime.handle().clone(),
-                },
+                NmDaemonInterface::new(Arc::clone(&runtime), tokio_runtime.handle()),
             )
             .unwrap();
         let proxy = Proxy::new(&daemon.client, ":1.2", DBUS_OBJECT_PATH, DBUS_INTERFACE).unwrap();

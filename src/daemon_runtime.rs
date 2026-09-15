@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::Value;
+use shelllist_daemon_core::RecentResults;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use zbus::object_server::SignalEmitter;
 
@@ -82,29 +83,21 @@ struct TaskHandle {
 }
 
 struct TerminalRequestResult {
-    recorded_at: Instant,
-    owner: Option<String>,
     stream: Stream,
     event: Value,
 }
 
-fn prune_terminal_results(results: &mut HashMap<String, TerminalRequestResult>) {
-    results.retain(|_, result| result.recorded_at.elapsed() <= TERMINAL_RESULT_TTL);
-}
-
 fn terminal_request_status(
-    results: &HashMap<String, TerminalRequestResult>,
+    results: &mut RecentResults<TerminalRequestResult>,
     request_id: &str,
     owner: Option<&str>,
 ) -> Option<Value> {
-    results.get(request_id).and_then(|result| {
-        (result.owner.as_deref() == owner).then(|| {
-            serde_json::json!({
-                "request_id": request_id,
-                "status": "finished",
-                "stream": result.stream,
-                "event": result.event,
-            })
+    results.get_owned(request_id, owner).map(|result| {
+        serde_json::json!({
+            "request_id": request_id,
+            "status": "finished",
+            "stream": result.stream,
+            "event": result.event,
         })
     })
 }
@@ -278,7 +271,7 @@ pub(crate) struct DaemonRuntime {
     read_work: BlockingLane,
     control: tokio_mpsc::Sender<Control>,
     tasks: Mutex<HashMap<String, TaskHandle>>,
-    terminal_results: Mutex<HashMap<String, TerminalRequestResult>>,
+    terminal_results: Mutex<RecentResults<TerminalRequestResult>>,
     tasks_changed: Condvar,
     connect_attempts: Mutex<ConnectAttemptPolicy>,
     status_cache: Mutex<Option<CachedStatus>>,
@@ -303,7 +296,10 @@ impl DaemonRuntime {
             read_work,
             control: control_tx,
             tasks: Mutex::new(HashMap::new()),
-            terminal_results: Mutex::new(HashMap::new()),
+            terminal_results: Mutex::new(RecentResults::new(
+                TERMINAL_RESULT_LIMIT,
+                Some(TERMINAL_RESULT_TTL),
+            )),
             tasks_changed: Condvar::new(),
             connect_attempts: Mutex::new(ConnectAttemptPolicy::default()),
             status_cache: Mutex::new(None),
@@ -338,31 +334,17 @@ impl DaemonRuntime {
         event: Value,
     ) {
         let mut results = recover_lock(&self.terminal_results, "terminal request results");
-        prune_terminal_results(&mut results);
-        if results.len() >= TERMINAL_RESULT_LIMIT
-            && let Some(oldest) = results
-                .iter()
-                .min_by_key(|(_, result)| result.recorded_at)
-                .map(|(request_id, _)| request_id.clone())
-        {
-            results.remove(&oldest);
-        }
-        results.insert(
+        results.record(
             request_id.to_string(),
-            TerminalRequestResult {
-                recorded_at: Instant::now(),
-                owner,
-                stream,
-                event,
-            },
+            owner,
+            TerminalRequestResult { stream, event },
         );
     }
 
     pub(crate) fn request_status(&self, request_id: &str, owner: Option<&str>) -> Value {
         {
             let mut results = recover_lock(&self.terminal_results, "terminal request results");
-            prune_terminal_results(&mut results);
-            if let Some(status) = terminal_request_status(&results, request_id, owner) {
+            if let Some(status) = terminal_request_status(&mut results, request_id, owner) {
                 return status;
             }
         }
@@ -771,7 +753,21 @@ impl DaemonRuntime {
             .collect()
     }
 
-    pub(crate) fn drop_owner(&self, owner: String) {
+    pub(crate) async fn owner_names(&self) -> Vec<String> {
+        let (reply, received) = oneshot::channel();
+        let mut owners = HashSet::new();
+        if self.control.send(Control::Owners(reply)).await.is_ok() {
+            owners.extend(received.await.unwrap_or_default());
+        }
+        owners.extend(
+            recover_lock(&self.tasks, "daemon task map")
+                .values()
+                .filter_map(|task| task.owner.clone()),
+        );
+        owners.into_iter().collect()
+    }
+
+    pub(crate) async fn drop_owner(&self, owner: String) {
         let cancelled = self.cancel_tasks_for_owner(&owner);
         if !cancelled.is_empty() {
             self.nm.wake_waiters();
@@ -779,7 +775,7 @@ impl DaemonRuntime {
                 self.abort_cancelled_connect(&request_id, Some(&task));
             }
         }
-        if let Err(error) = self.control.try_send(Control::DropOwner(owner)) {
+        if let Err(error) = self.control.send(Control::DropOwner(owner)).await {
             tracing::warn!(error = ?error, "could not queue disconnected D-Bus owner cleanup");
         }
     }
@@ -962,16 +958,14 @@ fn runtime_stopped(operation: ErrorOperation) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use std::time::{Duration, Instant};
+    use shelllist_daemon_core::RecentResults;
+    use std::time::Instant;
 
     use serde_json::json;
 
     use super::{
         ConnectAdmission, ConnectAttemptKey, ConnectAttemptPolicy, TERMINAL_RESULT_TTL,
-        TerminalRequestResult, WRONG_PASSWORD_RETRY_DELAY, prune_terminal_results,
-        terminal_request_status,
+        TerminalRequestResult, WRONG_PASSWORD_RETRY_DELAY, terminal_request_status,
     };
     use crate::model::ConnectFailureReason;
     use crate::protocol::Stream;
@@ -1009,24 +1003,22 @@ mod tests {
 
     #[test]
     fn terminal_request_results_are_owner_scoped_and_expire() {
-        let mut results = HashMap::from([(
+        let mut results = RecentResults::new(256, Some(TERMINAL_RESULT_TTL));
+        results.record(
             "connect-1".to_string(),
+            Some(":1.42".to_string()),
             TerminalRequestResult {
-                recorded_at: Instant::now(),
-                owner: Some(":1.42".to_string()),
                 stream: Stream::WifiConnect,
                 event: json!({ "event": "succeeded" }),
             },
-        )]);
+        );
 
-        let status = terminal_request_status(&results, "connect-1", Some(":1.42")).unwrap();
+        let status = terminal_request_status(&mut results, "connect-1", Some(":1.42")).unwrap();
         assert_eq!(status["status"], "finished");
         assert_eq!(status["event"]["event"], "succeeded");
-        assert!(terminal_request_status(&results, "connect-1", Some(":1.99")).is_none());
+        assert!(terminal_request_status(&mut results, "connect-1", Some(":1.99")).is_none());
 
-        results.get_mut("connect-1").unwrap().recorded_at =
-            Instant::now() - TERMINAL_RESULT_TTL - Duration::from_millis(1);
-        prune_terminal_results(&mut results);
+        results.prune(Instant::now() + TERMINAL_RESULT_TTL);
         assert!(results.is_empty());
     }
 }
