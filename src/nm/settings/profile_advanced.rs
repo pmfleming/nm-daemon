@@ -14,7 +14,7 @@ use crate::model::{
     ProfileEnterpriseSettings, ProfileEnterpriseUpdate, SecretFlags, WifiBand,
     WifiProfileAdvancedUpdate,
 };
-use crate::variant::{insert_optional_value, setting};
+use crate::variant::{insert_optional_value, setting, setting_strings as strings};
 
 const WIRELESS: &str = "802-11-wireless";
 const ENTERPRISE: &str = "802-1x";
@@ -425,13 +425,6 @@ fn blob(section: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
         Ok(value) => Some(value.to_string()),
         Err(_) => Some(format!("blob:{} bytes", bytes.len())),
     }
-}
-
-fn strings(section: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
-    section
-        .get(key)
-        .and_then(|value| Vec::<String>::try_from(value.clone()).ok())
-        .unwrap_or_default()
 }
 
 fn flag(section: &HashMap<String, OwnedValue>, key: &str) -> bool {

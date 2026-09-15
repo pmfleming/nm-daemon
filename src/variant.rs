@@ -30,6 +30,21 @@ where
     section.get(key)?.try_into().ok()
 }
 
+/// Decode a whole string array, including variant-wrapped elements, without
+/// cloning the D-Bus container. A malformed element invalidates the whole list.
+pub(crate) fn setting_strings(section: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
+    setting::<&zvariant::Array<'_>>(section, key)
+        .and_then(|array| {
+            array
+                .inner()
+                .iter()
+                .map(|value| value.downcast_ref::<&str>().map(str::to_owned))
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn value_string(value: &OwnedValue) -> Option<String> {
     <&str>::try_from(value).ok().map(str::to_string)
 }
@@ -88,7 +103,26 @@ pub(crate) fn insert_optional_u32s(
 
 #[cfg(test)]
 mod tests {
-    use super::{setting, value_map, value_string};
+    use super::{owned_value, setting, setting_strings, value_map, value_string};
+
+    #[test]
+    fn borrowed_string_arrays_preserve_owned_conversion_semantics() -> anyhow::Result<()> {
+        use zvariant::Value;
+        for value in [
+            owned_value(vec!["rsn", "wpa"])?,
+            owned_value(Vec::<String>::new())?,
+            owned_value(vec![1_u32])?,
+            owned_value("not an array")?,
+            owned_value(vec![Value::from("rsn"), Value::from("wpa")])?,
+            owned_value(vec![Value::from("rsn"), Value::from(1_u32)])?,
+        ] {
+            let expected = Vec::<String>::try_from(value.try_clone()?).unwrap_or_default();
+            let values = std::collections::HashMap::from([("value".into(), value)]);
+            assert_eq!(setting_strings(&values, "value"), expected);
+            assert!(setting_strings(&values, "missing").is_empty());
+        }
+        Ok(())
+    }
 
     #[test]
     fn borrowed_dictionary_values_keep_their_dbus_types() -> anyhow::Result<()> {

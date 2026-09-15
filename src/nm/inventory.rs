@@ -10,7 +10,7 @@ use crate::model::{
     NetworkDeviceSummary, NetworkInventory, NetworkStateSummary, ProfileActivationResult,
     device_state_reason,
 };
-use crate::variant::{setting, value_string};
+use crate::variant::{setting, setting_strings, value_string};
 
 /// Selects one saved profile by UUID or settings path, plus an optional device.
 #[derive(Debug, Clone, Default)]
@@ -448,13 +448,6 @@ fn object_path_list_property(proxy: &zbus::blocking::Proxy<'_>, name: &str) -> V
 
 fn setting_string(settings: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
     settings.get(key).and_then(value_string)
-}
-
-fn setting_strings(settings: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
-    settings
-        .get(key)
-        .and_then(|value| Vec::<String>::try_from(value.clone()).ok())
-        .unwrap_or_default()
 }
 
 fn nonempty(value: Option<String>) -> Option<String> {
