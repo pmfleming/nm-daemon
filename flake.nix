@@ -2,8 +2,10 @@
   description = "NetworkManager JSON/JSONL adapter and user D-Bus daemon";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # Co-development: one live sibling framework; no per-daemon revision pins.
+  # Use ../daemon-framework/tools/local-build.py for Nix builds/checks.
   inputs.daemonFramework = {
-    url = "git+file:../daemon-framework?ref=main";
+    url = "git+file:../daemon-framework";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 

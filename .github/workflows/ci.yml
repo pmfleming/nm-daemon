@@ -7,11 +7,23 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    working-directory: nm-daemon
+
 jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: nm-daemon
+      # Cargo and Nix both consume this current sibling, never a framework pin.
+      - uses: actions/checkout@v4
+        with:
+          repository: pmfleming/daemon-framework
+          ref: main
+          path: daemon-framework
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
@@ -26,5 +38,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: nm-daemon
+      - uses: actions/checkout@v4
+        with:
+          repository: pmfleming/daemon-framework
+          ref: main
+          path: daemon-framework
       - uses: cachix/install-nix-action@v31
-      - run: nix flake check --print-build-logs
+      - run: python3 ../daemon-framework/tools/local-build.py check . --print-build-logs
