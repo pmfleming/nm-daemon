@@ -593,26 +593,35 @@ pub(crate) fn isolated(name: &str, run: impl FnOnce() -> Result<()>) -> Result<(
         .args(["--exact", name, "--nocapture"])
         .env("NM_WORKFLOW_TEST", name)
         .env("NM_WORKFLOW_COMPLETED", &completed)
+        // Keep fixtures runnable on small builders and expose dispatch-startup
+        // races that extra worker threads can otherwise conceal.
+        .env("TOKIO_WORKER_THREADS", "1")
         .env("XDG_RUNTIME_DIR", &directory)
         .env("XDG_STATE_HOME", &directory)
         .spawn()?;
     let deadline = Instant::now() + Duration::from_secs(45);
     let result = loop {
         if let Some(status) = child.try_wait()? {
-            break status.success();
+            break Some(status);
         }
         if Instant::now() >= deadline {
             child.kill()?;
             child.wait()?;
-            break false;
+            break None;
         }
         std::thread::sleep(Duration::from_millis(20));
     };
     let completed = completed.is_file();
     std::fs::remove_dir_all(directory)?;
+    let status =
+        result.ok_or_else(|| anyhow::anyhow!("workflow child timed out after 45s: {name}"))?;
     anyhow::ensure!(
-        result && completed,
-        "workflow child failed, timed out, or did not run: {name}"
+        status.success(),
+        "workflow child exited with {status}: {name}"
+    );
+    anyhow::ensure!(
+        completed,
+        "workflow child did not complete the test body: {name}"
     );
     Ok(())
 }
