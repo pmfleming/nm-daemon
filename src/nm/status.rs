@@ -3,6 +3,7 @@ use zbus::blocking::Proxy;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::inventory::{active_connection_state_name, device_state_name};
+use super::ip_status::IpFamily;
 use super::{
     ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, NM_DEVICE_TYPE_MODEM,
     NM_DEVICE_TYPE_WIFI, Nm, RadioRestoreState, SETTINGS_CONNECTION_IFACE, WIFI_IFACE,
@@ -10,7 +11,7 @@ use super::{
 use crate::command::nmcli::Nmcli;
 use crate::error::ErrorOperation;
 use crate::model::{
-    DisconnectResult, Ip4Status, LinkStateStatus, MeteredStatus, RadioPowerResult, RadioStatus,
+    DisconnectResult, IpStatus, LinkStateStatus, MeteredStatus, RadioPowerResult, RadioStatus,
     SavedWifiConnection, WifiDevice, WifiPowerResult, WifiStatus, WirelessStatus,
     device_state_reason,
 };
@@ -227,7 +228,10 @@ impl Nm {
             profile,
             connectivity: connectivity.clone(),
             ip4: self.enriched_ip4_status(device),
-            ip6: self.device_ip6_status(&device.path).ok().flatten(),
+            ip6: self
+                .device_ip_status(&device.path, IpFamily::V6)
+                .ok()
+                .flatten(),
             wireless: self.wireless_status(device).ok(),
             metered: self.metered_status(&device.path).ok(),
             active_since_ms,
@@ -277,8 +281,11 @@ impl Nm {
         })
     }
 
-    fn enriched_ip4_status(&self, device: &WifiDevice) -> Option<Ip4Status> {
-        let dbus_ip4 = self.device_ip4_status(&device.path).ok().flatten();
+    fn enriched_ip4_status(&self, device: &WifiDevice) -> Option<IpStatus> {
+        let dbus_ip4 = self
+            .device_ip_status(&device.path, IpFamily::V4)
+            .ok()
+            .flatten();
         if !ip4_status_needs_nmcli_fill(&dbus_ip4) {
             return dbus_ip4;
         }
@@ -467,7 +474,7 @@ fn rollback_wireless(root: &Proxy<'_>, enabled: bool) {
     }
 }
 
-fn ip4_status_needs_nmcli_fill(status: &Option<Ip4Status>) -> bool {
+fn ip4_status_needs_nmcli_fill(status: &Option<IpStatus>) -> bool {
     let Some(status) = status else {
         return true;
     };
@@ -476,7 +483,7 @@ fn ip4_status_needs_nmcli_fill(status: &Option<Ip4Status>) -> bool {
         || status.dns.is_empty()
 }
 
-fn merged_ip4_status(dbus: Option<Ip4Status>, nmcli: Option<Ip4Status>) -> Option<Ip4Status> {
+fn merged_ip4_status(dbus: Option<IpStatus>, nmcli: Option<IpStatus>) -> Option<IpStatus> {
     match dbus {
         Some(mut dbus) => {
             if let Some(nmcli) = nmcli {
@@ -488,7 +495,7 @@ fn merged_ip4_status(dbus: Option<Ip4Status>, nmcli: Option<Ip4Status>) -> Optio
     }
 }
 
-fn fill_missing_ip4_fields(dbus: &mut Ip4Status, mut fallback: Ip4Status) {
+fn fill_missing_ip4_fields(dbus: &mut IpStatus, mut fallback: IpStatus) {
     if dbus.address.as_deref().is_none_or(str::is_empty) {
         dbus.address = fallback.address.take();
         dbus.prefix = fallback.prefix;

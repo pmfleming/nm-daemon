@@ -33,16 +33,24 @@ where
 /// Decode a whole string array, including variant-wrapped elements, without
 /// cloning the D-Bus container. A malformed element invalidates the whole list.
 pub(crate) fn setting_strings(section: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
-    setting::<&zvariant::Array<'_>>(section, key)
-        .and_then(|array| {
-            array
-                .inner()
-                .iter()
-                .map(|value| value.downcast_ref::<&str>().map(str::to_owned))
-                .collect::<Result<Vec<_>, _>>()
-                .ok()
-        })
-        .unwrap_or_default()
+    section.get(key).and_then(value_list).unwrap_or_default()
+}
+
+/// Decode elements by reference, allocating only the output list, not a copy
+/// of the D-Bus container. As with zvariant's owned conversion, one invalid
+/// element rejects the entire list (including variant-wrapped elements).
+pub(crate) fn value_list<'a, T>(value: &'a OwnedValue) -> Option<Vec<T>>
+where
+    T: TryFrom<&'a Value<'a>>,
+    T::Error: Into<zvariant::Error>,
+{
+    <&zvariant::Array<'_>>::try_from(value)
+        .ok()?
+        .inner()
+        .iter()
+        .map(Value::downcast_ref)
+        .collect::<Result<_, _>>()
+        .ok()
 }
 
 pub(crate) fn value_string(value: &OwnedValue) -> Option<String> {
@@ -103,7 +111,7 @@ pub(crate) fn insert_optional_u32s(
 
 #[cfg(test)]
 mod tests {
-    use super::{owned_value, setting, setting_strings, value_map, value_string};
+    use super::{owned_value, setting, setting_strings, value_list, value_map, value_string};
 
     #[test]
     fn borrowed_string_arrays_preserve_owned_conversion_semantics() -> anyhow::Result<()> {
@@ -120,6 +128,30 @@ mod tests {
             let values = std::collections::HashMap::from([("value".into(), value)]);
             assert_eq!(setting_strings(&values, "value"), expected);
             assert!(setting_strings(&values, "missing").is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_byte_arrays_preserve_owned_conversion_semantics() -> anyhow::Result<()> {
+        for value in [
+            owned_value(vec![0_u8, 0xff])?,
+            owned_value(Vec::<u8>::new())?,
+            owned_value(vec![1_u32])?,
+            owned_value("not bytes")?,
+            owned_value(vec![
+                zvariant::Value::from(1_u8),
+                zvariant::Value::from(2_u8),
+            ])?,
+            owned_value(vec![
+                zvariant::Value::from(1_u8),
+                zvariant::Value::from("bad"),
+            ])?,
+        ] {
+            assert_eq!(
+                value_list::<u8>(&value),
+                Vec::<u8>::try_from(value.try_clone()?).ok()
+            );
         }
         Ok(())
     }

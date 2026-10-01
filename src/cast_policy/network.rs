@@ -142,7 +142,7 @@ mod dbus;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ConnectionSettings, mdns_enabled, policy_enabled};
     use crate::nm::owned_value;
 
     pub(super) fn settings(mdns: i32) -> ConnectionSettings {

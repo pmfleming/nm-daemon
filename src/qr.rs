@@ -64,9 +64,10 @@ fn wifi_qr_value(value: &str) -> String {
     let escaped: String = value
         .chars()
         .flat_map(|ch| match ch {
-            '\\' | ';' | ',' | ':' | '"' => vec!['\\', ch],
-            ch => vec![ch],
+            '\\' | ';' | ',' | ':' | '"' => [Some('\\'), Some(ch)],
+            ch => [None, Some(ch)],
         })
+        .flatten()
         .collect();
     if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
         format!("\"{escaped}\"")
@@ -123,18 +124,17 @@ pub(crate) fn parse_wifi_qr(payload: &str) -> Result<ParsedWifiQr> {
         .strip_prefix("WIFI:")
         .or_else(|| payload.strip_prefix("wifi:"))
         .ok_or_else(|| qr_error("payload is not a WIFI: code", "payload"))?;
-    let fields = split_fields(body)?;
+    let mut fields = split_fields(body)?;
     let ssid = fields
-        .get("S")
+        .remove("S")
         .filter(|ssid| !ssid.is_empty())
-        .ok_or_else(|| qr_error("payload has no SSID", "S"))?
-        .clone();
+        .ok_or_else(|| qr_error("payload has no SSID", "S"))?;
     let ssid_bytes = ssid.as_bytes().to_vec();
     // The SSID validation message names the constraint, not the payload.
     validate_ssid_bytes(&ssid_bytes).map_err(|error| qr_error(format!("{error}"), "S"))?;
-    let auth_token = fields.get("T").cloned().unwrap_or_default();
+    let auth_token = fields.remove("T").unwrap_or_default();
     let auth = parse_auth(&auth_token)?;
-    let password = fields.get("P").filter(|value| !value.is_empty()).cloned();
+    let password = fields.remove("P").filter(|value| !value.is_empty());
     validate_password(auth, password.as_deref())?;
     let wep_key_type = (auth == WifiQrAuth::Wep)
         .then(|| wep_key_type_for(password.as_deref().unwrap_or_default()));
@@ -166,7 +166,12 @@ fn split_fields(body: &str) -> Result<BTreeMap<String, String>> {
                 current.push(character);
                 escaped = false;
             }
-            '\\' => escaped = true,
+            '\\' => {
+                // Keep escapes until after removing optional wrapper quotes, so
+                // escaped literal quotes cannot be mistaken for wrappers.
+                current.push(character);
+                escaped = true;
+            }
             ';' => {
                 insert_field(&mut fields, std::mem::take(&mut current))?;
             }
@@ -187,24 +192,40 @@ fn insert_field(fields: &mut BTreeMap<String, String>, field: String) -> Result<
     let (key, value) = field
         .split_once(':')
         .ok_or_else(|| qr_error("payload contains a field without a key", "payload"))?;
-    fields.insert(key.to_string(), unquote(value));
+    fields.insert(unescape(key), unescape(unquote(value)));
     Ok(())
 }
 
 /// NetworkManager wraps values that are entirely hex digits in quotes so they
 /// are not mistaken for a raw key.
-fn unquote(value: &str) -> String {
+fn unquote(value: &str) -> &str {
     value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
+        .filter(|value| value.chars().rev().take_while(|&ch| ch == '\\').count() % 2 == 0)
         .unwrap_or(value)
-        .to_string()
+}
+
+/// Decode escapes only after splitting fields and identifying wrapper quotes.
+/// `split_fields` has already rejected dangling escapes.
+fn unescape(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut escaped = false;
+    for character in value.chars() {
+        if character == '\\' && !escaped {
+            escaped = true;
+        } else {
+            decoded.push(character);
+            escaped = false;
+        }
+    }
+    decoded
 }
 
 fn parse_auth(token: &str) -> Result<WifiQrAuth> {
     match token.to_ascii_uppercase().as_str() {
         "" | "NOPASS" => Ok(WifiQrAuth::Open),
-        "WPA" | "WPA2" | "WPA2-EAP" if token.eq_ignore_ascii_case("wpa2-eap") => Err(qr_error(
+        "WPA2-EAP" => Err(qr_error(
             "enterprise Wi-Fi cannot be joined from a QR code",
             "T",
         )),
@@ -216,34 +237,24 @@ fn parse_auth(token: &str) -> Result<WifiQrAuth> {
 }
 
 fn validate_password(auth: WifiQrAuth, password: Option<&str>) -> Result<()> {
-    match (auth, password) {
-        (WifiQrAuth::Open, Some(_)) => Err(qr_error(
-            "an open network payload must not carry a password",
-            "P",
-        )),
-        (WifiQrAuth::Open, None) => Ok(()),
-        (_, None) => Err(qr_error("payload has no password", "P")),
-        (WifiQrAuth::Wpa | WifiQrAuth::Sae, Some(password)) => {
-            let length = password.chars().count();
-            if length == RAW_PSK_CHARS && password.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Ok(());
-            }
-            if (8..=MAX_PASSPHRASE_CHARS).contains(&length) {
-                return Ok(());
-            }
-            Err(qr_error(
-                "WPA passphrase must be 8-63 characters or a 64-character key",
-                "P",
-            ))
+    let length = password.map_or(0, |password| password.chars().count());
+    let message = match (auth, password) {
+        (WifiQrAuth::Open, None) => return Ok(()),
+        (WifiQrAuth::Open, Some(_)) => "an open network payload must not carry a password",
+        (_, None) => "payload has no password",
+        (WifiQrAuth::Wpa | WifiQrAuth::Sae, Some(password))
+            if (8..=MAX_PASSPHRASE_CHARS).contains(&length)
+                || (length == RAW_PSK_CHARS && password.chars().all(|c| c.is_ascii_hexdigit())) =>
+        {
+            return Ok(());
         }
-        (WifiQrAuth::Wep, Some(password)) => {
-            let length = password.chars().count();
-            if length == 0 || length > MAX_WEP_KEY_CHARS {
-                return Err(qr_error("WEP key length is not valid", "P"));
-            }
-            Ok(())
+        (WifiQrAuth::Wpa | WifiQrAuth::Sae, Some(_)) => {
+            "WPA passphrase must be 8-63 characters or a 64-character key"
         }
-    }
+        (WifiQrAuth::Wep, Some(_)) if (1..=MAX_WEP_KEY_CHARS).contains(&length) => return Ok(()),
+        (WifiQrAuth::Wep, Some(_)) => "WEP key length is not valid",
+    };
+    Err(qr_error(message, "P"))
 }
 
 /// WEP secrets are raw keys at the standard hex key lengths, and passphrases
@@ -276,14 +287,58 @@ mod tests {
 
     #[test]
     fn generated_payloads_round_trip_through_the_parser() {
-        let payload = wifi_qr_payload("WPA", "Cafe;Guest", Some("pass:word1"), true);
-        let parsed = parse_wifi_qr(&payload).expect("round trip");
-        assert_eq!(parsed.ssid, "Cafe;Guest");
-        assert_eq!(parsed.password.as_deref(), Some("pass:word1"));
-        assert_eq!(parsed.auth, WifiQrAuth::Wpa);
-        assert!(parsed.hidden);
-        assert!(parsed.has_password);
+        for (ssid, password) in [
+            ("Cafe;Guest", r#"pass:word1\,\""#),
+            (r#""Cafe""#, r#""password""#),
+            ("deadbeef", "0123456789abcdef"),
+            (r#"Cafe\"#, r#"password\"#),
+        ] {
+            let payload = wifi_qr_payload("WPA", ssid, Some(password), true);
+            let parsed = parse_wifi_qr(&payload).expect("round trip");
+            assert_eq!(parsed.ssid, ssid);
+            assert_eq!(parsed.password.as_deref(), Some(password));
+            assert_eq!(parsed.auth, WifiQrAuth::Wpa);
+            assert!(parsed.hidden);
+            assert!(parsed.has_password);
+        }
     }
+
+    #[test]
+    fn wrapper_quotes_are_distinct_from_escaped_literal_quotes() {
+        for (payload, ssid) in [
+            (r#"WIFI:S:"Cafe";;"#, "Cafe"),
+            (r#"WIFI:S:"Cafe\\";;"#, r#"Cafe\"#),
+            (r#"WIFI:S:"Cafe\";;"#, r#""Cafe""#),
+            (r#"WIFI:S:\"Cafe";;"#, r#""Cafe""#),
+        ] {
+            assert_eq!(parse_wifi_qr(payload).unwrap().ssid, ssid);
+        }
+    }
+
+    #[test]
+    fn password_validation_preserves_length_and_encoding_boundaries() {
+        for (auth, password, valid) in [
+            ("nopass", String::new(), true),
+            ("WPA", "a".repeat(7), false),
+            ("WPA", "a".repeat(8), true),
+            ("WPA", "a".repeat(63), true),
+            ("WPA", "a".repeat(64), true),
+            ("WPA", "g".repeat(64), false),
+            ("WPA", "a".repeat(65), false),
+            ("SAE", "é".repeat(8), true),
+            ("WEP", "a".repeat(58), true),
+            ("WEP", "a".repeat(59), false),
+        ] {
+            let payload = wifi_qr_payload(auth, "Cafe", Some(&password), false);
+            assert_eq!(
+                parse_wifi_qr(&payload).is_ok(),
+                valid,
+                "{auth}, {} characters",
+                password.chars().count()
+            );
+        }
+    }
+
     #[test]
     fn wpa3_and_wep_authentication_map_to_key_management_hints() {
         assert_eq!(

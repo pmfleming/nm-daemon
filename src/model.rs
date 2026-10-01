@@ -295,8 +295,8 @@ pub(crate) struct WifiStatus {
     pub(crate) network: Option<NetworkEntry>,
     pub(crate) profile: Option<SavedWifiConnection>,
     pub(crate) connectivity: Option<ConnectivityStatus>,
-    pub(crate) ip4: Option<Ip4Status>,
-    pub(crate) ip6: Option<Ip6Status>,
+    pub(crate) ip4: Option<IpStatus>,
+    pub(crate) ip6: Option<IpStatus>,
     pub(crate) wireless: Option<WirelessStatus>,
     pub(crate) metered: Option<MeteredStatus>,
     pub(crate) active_since_ms: Option<u64>,
@@ -348,38 +348,22 @@ impl WifiStatus {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ConnectionDetails {
-    pub(crate) ip4: Option<Ip4Status>,
+    pub(crate) ip4: Option<IpStatus>,
     #[serde(default)]
-    pub(crate) ip6: Option<Ip6Status>,
+    pub(crate) ip6: Option<IpStatus>,
     pub(crate) wireless: Option<WirelessStatus>,
     pub(crate) metered: Option<MeteredStatus>,
     pub(crate) active_since_ms: Option<u64>,
     pub(crate) updated_at_ms: u128,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct Ip4Status {
+/// Address-family-neutral wire shape; the containing `ip4`/`ip6` field selects
+/// the family. Both families retain the legacy first-address fields.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct IpStatus {
     /// First active address; kept beside `addresses` for existing clients.
     pub(crate) address: Option<String>,
     /// Prefix length of `address`.
-    pub(crate) prefix: Option<u32>,
-    #[serde(default)]
-    pub(crate) addresses: Vec<IpAddressEntry>,
-    pub(crate) gateway: Option<String>,
-    pub(crate) dns: Vec<String>,
-    #[serde(default)]
-    pub(crate) domains: Vec<String>,
-    #[serde(default)]
-    pub(crate) searches: Vec<String>,
-    #[serde(default)]
-    pub(crate) routes: Vec<IpRouteEntry>,
-    pub(crate) dhcp_lease: Option<DhcpLeaseStatus>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct Ip6Status {
-    /// First active address; mirrors `Ip4Status` so clients share one shape.
-    pub(crate) address: Option<String>,
     pub(crate) prefix: Option<u32>,
     #[serde(default)]
     pub(crate) addresses: Vec<IpAddressEntry>,

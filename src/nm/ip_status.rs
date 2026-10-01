@@ -6,32 +6,44 @@ use zbus::blocking::Proxy;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{DEVICE_IFACE, Nm};
-use crate::model::{DhcpLeaseStatus, Ip4Status, Ip6Status, IpAddressEntry, IpRouteEntry};
+use crate::model::{DhcpLeaseStatus, IpAddressEntry, IpRouteEntry, IpStatus};
 use crate::variant::value_string;
 
-const IP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.IP4Config";
-const IP6_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.IP6Config";
-const DHCP4_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.DHCP4Config";
-const DHCP6_CONFIG_IFACE: &str = "org.freedesktop.NetworkManager.DHCP6Config";
+pub(super) enum IpFamily {
+    V4,
+    V6,
+}
 
 impl Nm {
-    pub(super) fn device_ip4_status(
+    pub(super) fn device_ip_status(
         &self,
         device_path: &OwnedObjectPath,
-    ) -> Result<Option<Ip4Status>> {
-        let Some(config) = self.ip_config_proxy(device_path, "Ip4Config", IP4_CONFIG_IFACE)? else {
+        family: IpFamily,
+    ) -> Result<Option<IpStatus>> {
+        let (ip, dhcp) = match family {
+            IpFamily::V4 => (
+                ("Ip4Config", "org.freedesktop.NetworkManager.IP4Config"),
+                ("Dhcp4Config", "org.freedesktop.NetworkManager.DHCP4Config"),
+            ),
+            IpFamily::V6 => (
+                ("Ip6Config", "org.freedesktop.NetworkManager.IP6Config"),
+                ("Dhcp6Config", "org.freedesktop.NetworkManager.DHCP6Config"),
+            ),
+        };
+        let Some(config) = self.ip_config_proxy(device_path, ip)? else {
             return Ok(None);
         };
         let routes = route_entries(&config);
         let addresses = address_entries(&config);
         let gateway = gateway_property(&config).or_else(|| default_route_next_hop(&routes));
-        let dns = nameserver_entries(&config).unwrap_or_else(|| {
-            config
+        let dns = nameserver_entries(&config).unwrap_or_else(|| match family {
+            IpFamily::V4 => config
                 .get_property::<Vec<u32>>("Nameservers")
                 .map(|values| values.into_iter().map(legacy_ipv4).collect())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            IpFamily::V6 => Vec::new(),
         });
-        Ok(Some(Ip4Status {
+        Ok(Some(IpStatus {
             address: addresses.first().map(|entry| entry.address.clone()),
             prefix: addresses.first().map(|entry| entry.prefix),
             addresses,
@@ -40,38 +52,14 @@ impl Nm {
             domains: string_list(&config, "Domains"),
             searches: string_list(&config, "Searches"),
             routes,
-            dhcp_lease: self.dhcp_lease(device_path, "Dhcp4Config", DHCP4_CONFIG_IFACE),
-        }))
-    }
-
-    pub(super) fn device_ip6_status(
-        &self,
-        device_path: &OwnedObjectPath,
-    ) -> Result<Option<Ip6Status>> {
-        let Some(config) = self.ip_config_proxy(device_path, "Ip6Config", IP6_CONFIG_IFACE)? else {
-            return Ok(None);
-        };
-        let routes = route_entries(&config);
-        let addresses = address_entries(&config);
-        let gateway = gateway_property(&config).or_else(|| default_route_next_hop(&routes));
-        Ok(Some(Ip6Status {
-            address: addresses.first().map(|entry| entry.address.clone()),
-            prefix: addresses.first().map(|entry| entry.prefix),
-            addresses,
-            gateway,
-            dns: nameserver_entries(&config).unwrap_or_default(),
-            domains: string_list(&config, "Domains"),
-            searches: string_list(&config, "Searches"),
-            routes,
-            dhcp_lease: self.dhcp_lease(device_path, "Dhcp6Config", DHCP6_CONFIG_IFACE),
+            dhcp_lease: self.dhcp_lease(device_path, dhcp),
         }))
     }
 
     fn ip_config_proxy(
         &self,
         device_path: &OwnedObjectPath,
-        property: &str,
-        interface: &'static str,
+        (property, interface): (&str, &str),
     ) -> Result<Option<Proxy<'static>>> {
         let device = self.proxy_path(device_path, DEVICE_IFACE)?;
         let config_path: OwnedObjectPath = device
@@ -87,13 +75,9 @@ impl Nm {
     fn dhcp_lease(
         &self,
         device_path: &OwnedObjectPath,
-        property: &str,
-        interface: &'static str,
+        property: (&str, &str),
     ) -> Option<DhcpLeaseStatus> {
-        let config = self
-            .ip_config_proxy(device_path, property, interface)
-            .ok()
-            .flatten()?;
+        let config = self.ip_config_proxy(device_path, property).ok().flatten()?;
         let options: HashMap<String, OwnedValue> = config.get_property("Options").ok()?;
         dhcp_lease_from_options(&options)
     }
@@ -110,7 +94,7 @@ pub(super) fn dhcp_lease_from_options(
     };
     let option_u64 = |key: &str| {
         options.get(key).and_then(|value| {
-            u64::try_from(value.clone())
+            u64::try_from(value)
                 .ok()
                 .or_else(|| value_u32(value).map(u64::from))
                 .or_else(|| value_string(value)?.parse().ok())
@@ -195,7 +179,7 @@ fn string_list(config: &Proxy<'_>, name: &str) -> Vec<String> {
 }
 
 fn value_u32(value: &OwnedValue) -> Option<u32> {
-    u32::try_from(value.clone()).ok()
+    u32::try_from(value).ok()
 }
 
 fn legacy_ipv4(value: u32) -> String {

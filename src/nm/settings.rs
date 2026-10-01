@@ -150,13 +150,14 @@ impl Nm {
                 format!("connection is not a saved Wi-Fi profile: {path}"),
             )
         })?;
-        let connection = settings.get("connection").cloned().unwrap_or_default();
-        let wireless = settings.get("802-11-wireless").cloned().unwrap_or_default();
-        let assigned_mac = setting_string(&wireless, "assigned-mac-address");
+        let empty = HashMap::new();
+        let connection = settings.get("connection").unwrap_or(&empty);
+        let wireless = settings.get("802-11-wireless").unwrap_or(&empty);
+        let assigned_mac = setting_string(wireless, "assigned-mac-address");
         Ok(WifiProfileDetails {
             path: profile.path,
             id: profile.id,
-            uuid: setting_string(&connection, "uuid").unwrap_or_default(),
+            uuid: setting_string(connection, "uuid").unwrap_or_default(),
             ssid: profile.ssid,
             version: profile_version(&settings),
             autoconnect: profile.autoconnect,
@@ -165,7 +166,7 @@ impl Nm {
                 .and_then(setting_i64)
                 .and_then(|value| i32::try_from(value).ok())
                 .unwrap_or(0),
-            metered: metered_from_settings(&connection),
+            metered: metered_from_settings(connection),
             hidden: wireless
                 .get("hidden")
                 .and_then(setting_bool)
@@ -179,13 +180,13 @@ impl Nm {
                     "default" | "stable" | "random" | "permanent"
                 )
             }),
-            mac_address: setting_string(&wireless, "mac-address").filter(|v| !v.is_empty()),
-            bssid: setting_string(&wireless, "bssid").filter(|v| !v.is_empty()),
+            mac_address: setting_string(wireless, "mac-address").filter(|v| !v.is_empty()),
+            bssid: setting_string(wireless, "bssid").filter(|v| !v.is_empty()),
             mtu: wireless.get("mtu").and_then(setting_u32).filter(|v| *v > 0),
-            mode: setting_string(&wireless, "mode")
+            mode: setting_string(wireless, "mode")
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "infrastructure".to_string()),
-            band: setting_string(&wireless, "band")
+            band: setting_string(wireless, "band")
                 .map(|band| crate::model::WifiBand::from_nm_value(&band))
                 .unwrap_or(crate::model::WifiBand::Auto),
             channel: wireless
@@ -198,7 +199,7 @@ impl Nm {
                 .get("permissions")
                 .and_then(setting_string_list)
                 .unwrap_or_default(),
-            firewall_zone: setting_string(&connection, "zone").filter(|v| !v.is_empty()),
+            firewall_zone: setting_string(connection, "zone").filter(|v| !v.is_empty()),
             secondaries: connection
                 .get("secondaries")
                 .and_then(setting_string_list)
@@ -403,7 +404,6 @@ impl Nm {
 
         let secrets = self
             .connection_secrets(&path, "802-11-wireless-security")
-            .map_err(|err| format!("{err:#}"))
             .ok();
 
         let mut payload = wifi_share_payload_for_settings(&profile, &settings, secrets.as_ref());
@@ -946,72 +946,41 @@ fn security_type_from_settings(settings: &ConnectionSettings) -> String {
 }
 
 fn profile_ip_settings(settings: &ConnectionSettings, section: &str) -> ProfileIpSettings {
-    let values = settings.get(section);
+    use crate::variant::{setting, setting_strings};
+
+    let empty = HashMap::new();
+    let values = settings.get(section).unwrap_or(&empty);
+    let text = |key| setting_string(values, key).filter(|value| !value.is_empty());
+    let family_i32 = |family, key| {
+        (section == family)
+            .then(|| values.get(key).and_then(setting_i64))
+            .flatten()
+            .and_then(|value| i32::try_from(value).ok())
+    };
     ProfileIpSettings {
-        method: values
-            .and_then(|values| setting_string(values, "method"))
-            .unwrap_or_else(|| "auto".to_string()),
+        method: setting_string(values, "method").unwrap_or_else(|| "auto".to_string()),
         addresses: values
-            .and_then(|values| values.get("address-data"))
+            .get("address-data")
             .and_then(setting_address_data)
             .unwrap_or_default(),
-        gateway: values
-            .and_then(|values| setting_string(values, "gateway"))
-            .filter(|value| !value.is_empty()),
-        dns: values
-            .and_then(|values| values.get("dns-data"))
-            .and_then(setting_string_list)
-            .unwrap_or_default(),
+        gateway: text("gateway"),
+        dns: setting_strings(values, "dns-data"),
         routes: values
-            .and_then(|values| values.get("route-data"))
+            .get("route-data")
             .and_then(setting_route_data)
             .unwrap_or_default(),
-        ignore_auto_dns: values
-            .and_then(|values| values.get("ignore-auto-dns"))
-            .and_then(setting_bool)
-            .unwrap_or(false),
-        dns_search: values
-            .and_then(|values| values.get("dns-search"))
-            .and_then(setting_string_list)
-            .unwrap_or_default(),
-        route_metric: values
-            .and_then(|values| values.get("route-metric"))
-            .and_then(setting_i64),
-        ignore_auto_routes: values
-            .and_then(|values| values.get("ignore-auto-routes"))
-            .and_then(setting_bool)
-            .unwrap_or(false),
-        never_default: values
-            .and_then(|values| values.get("never-default"))
-            .and_then(setting_bool)
-            .unwrap_or(false),
-        may_fail: values
-            .and_then(|values| values.get("may-fail"))
-            .and_then(setting_bool)
-            .unwrap_or(true),
-        dhcp_hostname: values
-            .and_then(|values| setting_string(values, "dhcp-hostname"))
-            .filter(|value| !value.is_empty()),
+        ignore_auto_dns: setting(values, "ignore-auto-dns").unwrap_or(false),
+        dns_search: setting_strings(values, "dns-search"),
+        route_metric: values.get("route-metric").and_then(setting_i64),
+        ignore_auto_routes: setting(values, "ignore-auto-routes").unwrap_or(false),
+        never_default: setting(values, "never-default").unwrap_or(false),
+        may_fail: setting(values, "may-fail").unwrap_or(true),
+        dhcp_hostname: text("dhcp-hostname"),
         dhcp_client_id: (section == "ipv4")
-            .then(|| values.and_then(|values| setting_string(values, "dhcp-client-id")))
-            .flatten()
-            .filter(|value| !value.is_empty()),
-        dad_timeout: (section == "ipv4")
-            .then(|| {
-                values
-                    .and_then(|values| values.get("dad-timeout"))
-                    .and_then(setting_i64)
-                    .and_then(|value| i32::try_from(value).ok())
-            })
+            .then(|| text("dhcp-client-id"))
             .flatten(),
-        ip6_privacy: (section == "ipv6")
-            .then(|| {
-                values
-                    .and_then(|values| values.get("ip6-privacy"))
-                    .and_then(setting_i64)
-                    .and_then(|value| i32::try_from(value).ok())
-            })
-            .flatten(),
+        dad_timeout: family_i32("ipv4", "dad-timeout"),
+        ip6_privacy: family_i32("ipv6", "ip6-privacy"),
     }
 }
 
@@ -1049,14 +1018,12 @@ fn setting_route_data(value: &OwnedValue) -> Option<Vec<TargetIpRoute>> {
 }
 
 fn setting_string_list(value: &OwnedValue) -> Option<Vec<String>> {
-    value.try_clone().ok()?.try_into().ok()
+    crate::variant::value_list(value)
 }
 
 pub(super) fn setting_i64(value: &OwnedValue) -> Option<i64> {
-    value
-        .try_clone()
+    i64::try_from(value)
         .ok()
-        .and_then(|value| value.try_into().ok())
         .or_else(|| setting_u32(value).map(i64::from))
 }
 
@@ -1247,7 +1214,7 @@ fn setting_u32(value: &OwnedValue) -> Option<u32> {
 }
 
 fn setting_bytes(value: &OwnedValue) -> Option<Vec<u8>> {
-    value.try_clone().ok()?.try_into().ok()
+    crate::variant::value_list(value)
 }
 
 fn ssid_bytes_match(saved_ssid: &[u8], ssid_bytes: &[u8]) -> bool {

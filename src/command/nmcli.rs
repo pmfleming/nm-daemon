@@ -4,7 +4,7 @@ use serde::Serialize;
 use super::{CommandRequest, CommandRunner};
 use crate::error::ErrorOperation;
 use crate::generated::NMCLI_QUERY_TIMEOUT;
-use crate::model::{Ip4Status, frequency_band};
+use crate::model::{IpAddressEntry, IpStatus, frequency_band};
 
 pub(crate) struct Nmcli<'a> {
     runner: &'a dyn CommandRunner,
@@ -19,7 +19,7 @@ impl<'a> Nmcli<'a> {
         &self,
         iface: &str,
         operation: ErrorOperation,
-    ) -> Result<Option<Ip4Status>> {
+    ) -> Result<Option<IpStatus>> {
         let request = CommandRequest::new("nmcli", operation, NMCLI_QUERY_TIMEOUT)
             .args(["-t", "device", "show", iface]);
         let output = self
@@ -58,18 +58,8 @@ pub(crate) struct NmcliWifiRow {
     pub(crate) band: String,
 }
 
-pub(crate) fn parse_device_ip4(output: &str) -> Option<Ip4Status> {
-    let mut ip4 = Ip4Status {
-        address: None,
-        prefix: None,
-        addresses: Vec::new(),
-        gateway: None,
-        dns: Vec::new(),
-        domains: Vec::new(),
-        searches: Vec::new(),
-        routes: Vec::new(),
-        dhcp_lease: None,
-    };
+pub(crate) fn parse_device_ip4(output: &str) -> Option<IpStatus> {
+    let mut ip4 = IpStatus::default();
     output
         .lines()
         .filter_map(split_key_value)
@@ -77,17 +67,16 @@ pub(crate) fn parse_device_ip4(output: &str) -> Option<Ip4Status> {
     (ip4.address.is_some() || ip4.gateway.is_some() || !ip4.dns.is_empty()).then_some(ip4)
 }
 
-fn apply_device_ip4_field(ip4: &mut Ip4Status, key: &str, value: String) {
+fn apply_device_ip4_field(ip4: &mut IpStatus, key: &str, value: String) {
     match key {
         key if key.starts_with("IP4.ADDRESS") => {
             let (address, prefix) = parse_cidr(&value);
-            if let (Some(address), Some(prefix)) = (address.clone(), prefix) {
-                ip4.addresses
-                    .push(crate::model::IpAddressEntry { address, prefix });
-            }
             if ip4.address.is_none() {
-                (ip4.address, ip4.prefix) = (address, prefix);
+                ip4.address = Some(address.clone());
+                ip4.prefix = prefix;
             }
+            ip4.addresses
+                .extend(prefix.map(|prefix| IpAddressEntry { address, prefix }));
         }
         "IP4.GATEWAY" if !value.is_empty() => ip4.gateway = Some(value),
         key if key.starts_with("IP4.DNS") && !value.is_empty() => ip4.dns.push(value),
@@ -140,16 +129,27 @@ fn split_fields(line: &str) -> Vec<String> {
     fields
 }
 
-fn parse_cidr(value: &str) -> (Option<String>, Option<u32>) {
-    let Some((address, prefix)) = value.split_once('/') else {
-        return (Some(value.to_string()), None);
-    };
-    (Some(address.to_string()), prefix.parse().ok())
+fn parse_cidr(value: &str) -> (String, Option<u32>) {
+    let (address, prefix) = value.split_once('/').unwrap_or((value, ""));
+    (address.to_string(), prefix.parse().ok())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_active_wifi_row;
+    use super::{parse_active_wifi_row, parse_device_ip4};
+
+    #[test]
+    fn ip4_addresses_keep_primary_and_skip_only_invalid_prefix_entries() {
+        let status = parse_device_ip4("IP4.ADDRESS[1]:192.0.2.2/bad\nIP4.ADDRESS[2]:192.0.2.3/24\nIP4.ADDRESS[3]:192.0.2.4\nIP4.GATEWAY:192.0.2.1\nIP4.DNS[1]:1.1.1.1").unwrap();
+        assert_eq!(status.address.as_deref(), Some("192.0.2.2"));
+        assert_eq!(status.prefix, None);
+        assert_eq!(status.addresses.len(), 1);
+        assert_eq!(status.addresses[0].address, "192.0.2.3");
+        assert_eq!(status.addresses[0].prefix, 24);
+        assert_eq!(status.gateway.as_deref(), Some("192.0.2.1"));
+        assert_eq!(status.dns, ["1.1.1.1"]);
+        assert!(parse_device_ip4("IP4.GATEWAY:\nIP4.DNS[1]:").is_none());
+    }
 
     #[test]
     fn parses_escaped_active_wifi_rows() {

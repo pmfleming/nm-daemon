@@ -6,10 +6,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
-use crate::daemon_connect::DbusConnectTargetParams;
 use crate::daemon_event::emit_json_event_nonfatal;
 use crate::daemon_runtime::{DaemonRuntime, next_request_id};
-use crate::daemon_scan::DbusScanParams;
 use crate::error::{DomainError, ErrorOperation, ErrorReport, operation_result};
 use crate::output::{api_data_value, api_error_value_for};
 use crate::protocol::{Method, Stream};
@@ -59,45 +57,39 @@ fn dispatch_method(
     runtime: &Arc<DaemonRuntime>,
 ) -> Result<Value> {
     match method {
-        Method::WifiScan => crate::daemon_scan::start_scan(
-            runtime,
-            parse_params::<DbusScanParams>(params_json)?,
-            owner,
-            emitter,
-        ),
+        Method::WifiScan => {
+            crate::daemon_scan::start_scan(runtime, parse_params(params_json)?, owner, emitter)
+        }
         Method::WifiConnectTarget => crate::daemon_connect::start_connect_target(
             runtime,
-            parse_required_params::<DbusConnectTargetParams>(params_json)?,
+            parse_required_params(params_json)?,
             owner,
             emitter,
         ),
         Method::NetworkStatisticsWatch => crate::daemon_statistics::start_watch(
             runtime,
-            parse_params::<crate::daemon_statistics::StatisticsWatchParams>(params_json)?,
+            parse_params(params_json)?,
             owner,
             emitter,
         ),
-        Method::HotspotStart => crate::daemon_hotspot::start(
-            runtime,
-            parse_params::<crate::daemon_hotspot::HotspotStartParams>(params_json)?,
-            owner,
-            emitter,
-        ),
+        Method::HotspotStart => {
+            crate::daemon_hotspot::start(runtime, parse_params(params_json)?, owner, emitter)
+        }
         Method::WifiQrConnect => crate::daemon_qr::start_connect(
             runtime,
-            parse_required_params::<crate::daemon_qr::QrConnectParams>(params_json)?,
+            parse_required_params(params_json)?,
             owner,
             emitter,
         ),
         Method::VpnConnect => crate::daemon_vpn::start_connect(
             runtime,
-            parse_required_params::<crate::daemon_vpn::VpnConnectParams>(params_json)?,
+            parse_required_params(params_json)?,
             owner,
             emitter,
         ),
         Method::WifiBandSet => crate::daemon_band::start_set(
             runtime,
-            parse_required_params::<crate::daemon_band::BandSetParams>(params_json)?,
+            parse_required_params(params_json)?,
             owner,
             emitter,
         ),

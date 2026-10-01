@@ -121,6 +121,37 @@ fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets()
 }
 
 #[test]
+fn ip_profile_defaults_and_family_specific_fields_are_preserved() -> anyhow::Result<()> {
+    let mut settings = ConnectionSettings::new();
+    let defaults = profile_ip_settings(&settings, "ipv4");
+    assert_eq!(defaults.method, "auto");
+    assert!(defaults.may_fail);
+    assert!(!defaults.ignore_auto_routes);
+    for family in ["ipv4", "ipv6"] {
+        settings.insert(
+            family.into(),
+            crate::variant::value_map([
+                ("dhcp-client-id", "client".into()),
+                ("dad-timeout", 42_u32.into()),
+                ("ip6-privacy", (-1_i64).into()),
+                ("route-metric", 99_u32.into()),
+                ("may-fail", false.into()),
+            ])?,
+        );
+        let parsed = profile_ip_settings(&settings, family);
+        assert_eq!(
+            parsed.dhcp_client_id.as_deref(),
+            (family == "ipv4").then_some("client")
+        );
+        assert_eq!(parsed.dad_timeout, (family == "ipv4").then_some(42));
+        assert_eq!(parsed.ip6_privacy, (family == "ipv6").then_some(-1));
+        assert_eq!(parsed.route_metric, Some(99));
+        assert!(!parsed.may_fail);
+    }
+    Ok(())
+}
+
+#[test]
 fn advanced_profile_ip_settings_round_trip_and_validate_address_families() {
     let ipv4 = TargetIpSettings {
         method: Some("manual".to_string()),

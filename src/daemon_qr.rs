@@ -64,13 +64,13 @@ pub(crate) fn start_connect(
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
     let parsed = parse_wifi_qr(&params.payload)?;
-    let connect = connect_params(&parsed, params.ifname)?;
     tracing::info!(
         ssid_hex = %parsed.ssid_hex,
         auth = ?parsed.auth,
         hidden = parsed.hidden,
         "connecting from a scanned Wi-Fi QR payload"
     );
+    let connect = connect_params(parsed, params.ifname)?;
     crate::daemon_connect::start_connect_target(runtime, connect, owner, emitter)
 }
 
@@ -78,11 +78,11 @@ pub(crate) fn start_connect(
 /// by SSID rather than by an access point, so a hidden payload is marked hidden
 /// and the payload's authentication becomes the key-management hint.
 fn connect_params(
-    parsed: &ParsedWifiQr,
+    parsed: ParsedWifiQr,
     ifname: Option<InterfaceName>,
 ) -> Result<DbusConnectTargetParams> {
     let target = WifiConnectTarget {
-        ssid: Ssid::from_display(parsed.ssid.clone())?,
+        ssid: Ssid::from_display(parsed.ssid)?,
         ap_path: None,
         bssid: None,
         ifname,
@@ -97,7 +97,7 @@ fn connect_params(
     };
     Ok(DbusConnectTargetParams::for_target(
         target,
-        parsed.password.clone(),
+        parsed.password,
         parsed.wep_key_type,
     ))
 }

@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::command::nmcli::{Nmcli, NmcliWifiRow};
 use crate::error::ErrorOperation;
-use crate::model::{Ip4Status, NetworkEntry, WifiStatus};
+use crate::model::{IpStatus, NetworkEntry, WifiStatus};
 use crate::nm::Nm;
 
 #[derive(Serialize)]
@@ -45,7 +45,7 @@ struct NmApiSnapshot {
 struct NmcliSnapshot {
     available: bool,
     active_wifi: Option<NmcliWifiRow>,
-    ip4: Option<Ip4Status>,
+    ip4: Option<IpStatus>,
     errors: Vec<String>,
 }
 
@@ -269,7 +269,7 @@ fn compare_signal(status: &WifiStatus, nmcli_active: Option<&NmcliWifiRow>) -> P
     }
 }
 
-fn compare_dns(status: &WifiStatus, nmcli_ip4: Option<&Ip4Status>) -> ParityCheck {
+fn compare_dns(status: &WifiStatus, nmcli_ip4: Option<&IpStatus>) -> ParityCheck {
     let left = status.ip4.as_ref().map(|ip4| ip4.dns.join(","));
     let right = nmcli_ip4.map(|ip4| ip4.dns.join(","));
     compare_optional("ip4", "dns", left, right)

@@ -59,8 +59,8 @@ impl BlockingLane {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::error::ErrorReport;
+    use super::BlockingLane;
+    use crate::error::{ErrorOperation, ErrorReport};
     #[tokio::test]
     async fn lane_failures_keep_networkmanager_error_context() {
         let lane = BlockingLane::start(&tokio::runtime::Handle::current(), "test-lane", 1, 1);

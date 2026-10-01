@@ -10,17 +10,16 @@ use crate::model::{
     ConnectResult, ConnectTargetIdentity, ConnectivityStatus, DeviceStatisticsSample,
     DhcpLeaseStatus, DisconnectResult, HealthSeverity, HealthTransitionKind, HotspotCapabilities,
     HotspotDevice, HotspotSecurity, HotspotShare, HotspotStartResult, HotspotStatus,
-    HotspotStopResult, HotspotUnavailableReason, Ip4Status, Ip6Status, IpAddressEntry,
-    IpRouteEntry, LinkStateStatus, MeteredStatus, NetworkConnectionSummary,
-    NetworkDeactivateResult, NetworkDeviceSummary, NetworkEntry, NetworkHealthEvent,
-    NetworkInventory, NetworkSnapshotMetadata, NetworkSnapshotSource, NetworkStateSummary,
-    ProfileActivationResult, ProfileEnterpriseSettings, ProfileIpSettings, ProfilePrivacy,
-    RadioPowerResult, RadioStatus, SavedWifiConnection, SecretFlags, TypedReason,
-    VpnActivationResult, VpnActiveStatus, VpnDisconnectResult, VpnProfileSummary, VpnStatus,
-    WifiBand, WifiBandSelectionResult, WifiBandStatus, WifiPowerResult, WifiProfileDetails,
-    WifiProfileSecret, WifiSharePayload, WifiStatus, WirelessStatus,
-    active_connection_state_reason, device_state_reason, network_entries_with_profile_matches,
-    security_flags_label, security_label, vpn_state_reason,
+    HotspotStopResult, HotspotUnavailableReason, IpAddressEntry, IpRouteEntry, IpStatus,
+    LinkStateStatus, MeteredStatus, NetworkConnectionSummary, NetworkDeactivateResult,
+    NetworkDeviceSummary, NetworkEntry, NetworkHealthEvent, NetworkInventory,
+    NetworkSnapshotMetadata, NetworkSnapshotSource, NetworkStateSummary, ProfileActivationResult,
+    ProfileEnterpriseSettings, ProfileIpSettings, ProfilePrivacy, RadioPowerResult, RadioStatus,
+    SavedWifiConnection, SecretFlags, TypedReason, VpnActivationResult, VpnActiveStatus,
+    VpnDisconnectResult, VpnProfileSummary, VpnStatus, WifiBand, WifiBandSelectionResult,
+    WifiBandStatus, WifiPowerResult, WifiProfileDetails, WifiProfileSecret, WifiSharePayload,
+    WifiStatus, WirelessStatus, active_connection_state_reason, device_state_reason,
+    network_entries_with_profile_matches, security_flags_label, security_label, vpn_state_reason,
 };
 use crate::protocol::{Method, Stream};
 
@@ -470,7 +469,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
             network: Some(network),
             profile: Some(profile),
             connectivity: Some(ConnectivityStatus::from_nm_code(2)),
-            ip4: Some(Ip4Status {
+            ip4: Some(IpStatus {
                 address: Some("192.0.2.10".to_string()),
                 prefix: Some(24),
                 addresses: vec![
@@ -500,7 +499,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
                     expires_at_ms: Some(1_762_086_400_000),
                 }),
             }),
-            ip6: Some(Ip6Status {
+            ip6: Some(IpStatus {
                 address: Some("2001:db8::10".to_string()),
                 prefix: Some(64),
                 addresses: vec![IpAddressEntry {

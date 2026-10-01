@@ -416,7 +416,7 @@ fn text(section: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
 /// NUL-terminated, and DER blobs that are not valid UTF-8 are reported as a
 /// stable marker instead of mangled text.
 fn blob(section: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
-    let bytes = Vec::<u8>::try_from(section.get(key)?.clone()).ok()?;
+    let bytes: Vec<u8> = crate::variant::value_list(section.get(key)?)?;
     let bytes = bytes.strip_suffix(&[0]).unwrap_or(&bytes);
     if bytes.is_empty() {
         return None;

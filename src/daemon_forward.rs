@@ -122,7 +122,7 @@ fn forward_connect(proxy: &Proxy<'_>, request: ConnectRequest) -> Result<Forward
         params,
         Stream::WifiConnect,
         || ForwardOutcome::DirectConnect(Box::new(request)),
-        finish_connect,
+        finish_operation_result,
     )
 }
 
@@ -256,10 +256,10 @@ fn finish_scan(mut events: CorrelatedEvents<'_>, quiet: bool) -> Result<ForwardO
     anyhow::bail!("nm-daemon scan event stream ended before completion")
 }
 
-fn handle_scan_event(event: Value, access_points: &mut Value, quiet: bool) -> Result<bool> {
+fn handle_scan_event(mut event: Value, access_points: &mut Value, quiet: bool) -> Result<bool> {
     match event.get("event").and_then(Value::as_str) {
         Some("warning") => log_scan_warning(&event),
-        Some("snapshot") => *access_points = flatten_access_points(&event),
+        Some("snapshot") => *access_points = flatten_access_points(&mut event),
         Some("complete") => print_scan_result(access_points, quiet)?,
         Some("failed" | "cancelled") => print_response(&event_error(&event).to_string())?,
         _ => return Ok(false),
@@ -287,29 +287,6 @@ fn print_scan_result(access_points: &Value, quiet: bool) -> Result<()> {
     print_response(&envelope.to_string())
 }
 
-fn finish_connect(mut events: CorrelatedEvents<'_>) -> Result<ForwardOutcome> {
-    while let Some(event) = events.next()? {
-        match event.get("event").and_then(Value::as_str) {
-            Some("succeeded") => print_connect_result(&event)?,
-            Some("failed" | "cancelled") => print_response(&event_error(&event).to_string())?,
-            _ => continue,
-        }
-        return Ok(ForwardOutcome::Handled);
-    }
-    anyhow::bail!("nm-daemon connect event stream ended before completion")
-}
-
-fn print_connect_result(event: &Value) -> Result<()> {
-    print_response(
-        &crate::output::api_data_value(
-            "result",
-            event.get("result").unwrap_or(&Value::Null),
-            "serialize forwarded connect response JSON",
-        )?
-        .to_string(),
-    )
-}
-
 fn is_terminal(event: &Value) -> bool {
     matches!(
         event.get("event").and_then(Value::as_str),
@@ -329,14 +306,14 @@ fn request_id(response: &Value) -> Result<String> {
         .context("daemon operation response did not contain request_id")
 }
 
-fn flatten_access_points(event: &Value) -> Value {
+fn flatten_access_points(event: &mut Value) -> Value {
+    let networks = event.get_mut("networks").and_then(Value::as_array_mut);
     Value::Array(
-        event["networks"]
-            .as_array()
+        networks
             .into_iter()
             .flatten()
-            .flat_map(|network| network["access_points"].as_array().into_iter().flatten())
-            .cloned()
+            .filter_map(|network| network.get_mut("access_points")?.as_array_mut())
+            .flat_map(|access_points| access_points.drain(..))
             .collect(),
     )
 }
@@ -490,7 +467,7 @@ mod tests {
 
     #[test]
     fn forwarded_operation_events_preserve_cli_envelopes() {
-        let access_points = flatten_access_points(&json!({
+        let access_points = flatten_access_points(&mut json!({
             "networks": [{ "access_points": [1, 2] }, { "access_points": [3] }],
         }));
         assert_eq!(access_points, json!([1, 2, 3]));
