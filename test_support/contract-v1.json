@@ -447,6 +447,23 @@
       ]
     }
   },
+  "portal_claim": {
+    "portal": {
+      "intent": {
+        "episode": "opaque-episode",
+        "expires_at_ms": 10000,
+        "launch_id": "launch-contract",
+        "reason": "manual",
+        "url": "http://neverssl.com/"
+      }
+    }
+  },
+  "portal_complete": {
+    "portal": {
+      "launch_id": "launch-contract",
+      "outcome": "opened"
+    }
+  },
   "portal_prepare": {
     "portal": {
       "decision": "launch",

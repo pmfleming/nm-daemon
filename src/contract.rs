@@ -70,6 +70,10 @@ fn registry_fixtures() -> Value {
             "decision": "launch",
             "intent": {"launch_id":"launch-contract", "episode":"opaque-episode", "url":"http://neverssl.com/", "reason":"manual", "expires_at_ms":10000}
         })),
+        "portal.claim": response_fixture(Method::NetworkPortalClaim, json!({
+            "intent": {"launch_id":"launch-contract", "episode":"opaque-episode", "url":"http://neverssl.com/", "reason":"manual", "expires_at_ms":10000}
+        })),
+        "portal.complete": response_fixture(Method::NetworkPortalComplete, json!({"launch_id":"launch-contract", "outcome":"opened"})),
         "operation.status": response_fixture(Method::OperationStatus, json!({
             "request_id": "connect-contract",
             "status": "finished",
@@ -1502,6 +1506,8 @@ fn serialized_boundary_snapshot() -> Value {
             "wireless": shell["status"]["wireless"],
         },
         "portal_prepare": methods["portal.prepare"],
+        "portal_claim": methods["portal.claim"],
+        "portal_complete": methods["portal.complete"],
         "connect_success": shell["connect_success"],
         "connect_error": shell["connect_error"],
         "connect_stream": methods["wifi-connect.stream"],
@@ -1559,6 +1565,8 @@ mod tests {
             crate::protocol::Method::RadioSetAirplaneMode,
             crate::protocol::Method::NetworkConnectivity,
             crate::protocol::Method::NetworkPortalPrepare,
+            crate::protocol::Method::NetworkPortalClaim,
+            crate::protocol::Method::NetworkPortalComplete,
             crate::protocol::Method::NetworkInventory,
             crate::protocol::Method::NetworkDevices,
             crate::protocol::Method::NetworkConnections,

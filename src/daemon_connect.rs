@@ -341,7 +341,8 @@ fn emit_connect_event(
     };
     let terminal = matches!(name, "succeeded" | "failed" | "cancelled");
     let stored = terminal.then(|| event_value(STREAM, Some(request_id), name, data.clone()));
-    let emitted = emit_json_event(emitter, STREAM, Some(request_id), name, data);
+    // Publish recovery/portal proof before notifying clients that may immediately
+    // prepare a portal intent in response to this terminal event.
     if let Some(event) = stored
         && let Some(runtime) = terminal_runtime.upgrade()
     {
@@ -352,7 +353,7 @@ fn emit_connect_event(
             event,
         );
     }
-    emitted
+    emit_json_event(emitter, STREAM, Some(request_id), name, data)
 }
 
 fn emit_connect_failure(

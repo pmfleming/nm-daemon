@@ -2,6 +2,9 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
+
+mod ledger;
 
 use crate::{
     daemon_runtime::DaemonRuntime,
@@ -27,7 +30,7 @@ pub(crate) struct PrepareParams {
     pub fallback: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Intent {
     pub launch_id: String,
     pub episode: String,
@@ -57,7 +60,8 @@ fn safe_url(value: &str) -> Option<String> {
     {
         return None;
     }
-    if !(value.starts_with("http://") || value.starts_with("https://")) {
+    // Preserve the portal probe rule: HTTPS cannot be intercepted safely.
+    if !value.starts_with("http://") {
         return None;
     }
     let parsed = url::Url::parse(value).ok()?;
@@ -148,11 +152,83 @@ pub(crate) fn prepare(
     };
     let (nm_owner, status) =
         runtime.call_read(ErrorOperation::Connectivity, |nm| nm.portal_snapshot())?;
-    let intent = validate(&params, &nm_owner, &status, &proof, now_ms())?;
+    let now = now_ms();
+    let intent = validate(&params, &nm_owner, &status, &proof, now)?;
+    let fallback = params.fallback;
+    let intent = with_ledger(|ledger| ledger.reserve(intent, owner, fallback, now))?;
     api_data_value(
         "portal",
-        &serde_json::json!({"decision": "launch", "intent": intent}),
+        &serde_json::json!({"decision": if intent.is_some() { "launch" } else { "suppressed" }, "intent": intent}),
         "serialize portal intent",
+    )
+}
+
+fn with_ledger<T>(action: impl FnOnce(&mut ledger::Ledger) -> Result<T>) -> Result<T> {
+    static LEDGER: OnceLock<Mutex<Result<ledger::Ledger, String>>> = OnceLock::new();
+    let ledger = LEDGER.get_or_init(|| {
+        Mutex::new(
+            (|| {
+                let path = shelllist_daemon_core::resolve_xdg_path(
+                    shelllist_daemon_core::XdgRoot::Runtime,
+                    "nm-daemon-portal",
+                    std::path::Path::new("portal.json"),
+                )
+                .ok_or_else(|| invalid("XDG_RUNTIME_DIR required for portal launch policy"))?;
+                ledger::Ledger::open(path)
+            })()
+            .map_err(|e: anyhow::Error| e.to_string()),
+        )
+    });
+    let mut guard = ledger
+        .lock()
+        .map_err(|_| invalid("portal ledger poisoned"))?;
+    action(guard.as_mut().map_err(|e| invalid(e))?)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClaimParams {
+    pub launch_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CompleteParams {
+    pub launch_id: String,
+    pub outcome: ledger::Outcome,
+}
+
+pub(crate) fn claim(
+    runtime: &DaemonRuntime,
+    owner: Option<&str>,
+    params: ClaimParams,
+) -> Result<Value> {
+    let owner = owner.ok_or_else(|| invalid("portal claim requires a transport owner"))?;
+    let (nm_owner, status) =
+        runtime.call_read(ErrorOperation::Connectivity, |nm| nm.portal_snapshot())?;
+    let episode = episode(&nm_owner, &status)?;
+    let intent = with_ledger(|ledger| {
+        ledger.claim(
+            &params.launch_id,
+            owner,
+            &episode,
+            status.captive_portal,
+            now_ms(),
+        )
+    })?;
+    api_data_value(
+        "portal",
+        &serde_json::json!({"intent": intent}),
+        "serialize portal claim",
+    )
+}
+
+pub(crate) fn complete(owner: Option<&str>, params: CompleteParams) -> Result<Value> {
+    let owner = owner.ok_or_else(|| invalid("portal completion requires a transport owner"))?;
+    with_ledger(|ledger| ledger.complete(&params.launch_id, owner, params.outcome))?;
+    api_data_value(
+        "portal",
+        &serde_json::json!({"launch_id":params.launch_id,"outcome":params.outcome}),
+        "serialize portal completion",
     )
 }
 
@@ -215,6 +291,7 @@ mod tests {
         for value in [
             "javascript:alert(1)",
             "file:///etc/passwd",
+            "https://example.org/probe",
             "--app=x",
             "http://u:p@host/",
             "http://a\\b/",
@@ -224,8 +301,8 @@ mod tests {
             assert!(safe_url(value).is_none(), "{value}");
         }
         assert_eq!(
-            safe_url("https://example.org/a?b=c").unwrap(),
-            "https://example.org/a?b=c"
+            safe_url("http://example.org/a?b=c").unwrap(),
+            "http://example.org/a?b=c"
         );
         let mut status = status();
         status.check_uri = Some("file:///etc/passwd".into());

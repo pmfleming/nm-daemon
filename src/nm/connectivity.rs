@@ -13,10 +13,17 @@ impl Nm {
         let bus = zbus::blocking::fdo::DBusProxy::new(&self.conn)?;
         let destination = zbus::names::BusName::try_from(self.destination.as_str())?;
         let owner = bus.get_name_owner(destination.clone())?.to_string();
-        let root = self.root_proxy();
+        // Ordinary status proxies cache properties asynchronously. A launch
+        // fence must perform real reads against this specific NM owner.
+        let root: zbus::blocking::Proxy<'_> = zbus::blocking::proxy::Builder::new(&self.conn)
+            .destination(owner.as_str())?
+            .path(super::NM_PATH)?
+            .interface(super::NM_IFACE)?
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()?;
         let before: OwnedObjectPath = root.get_property("PrimaryConnection")?;
         let code: u32 = root.get_property("Connectivity")?;
-        let status = self.with_portal_context(ConnectivityStatus::from_nm_code(code));
+        let status = self.portal_context_from(&root, ConnectivityStatus::from_nm_code(code));
         let after: OwnedObjectPath = root.get_property("PrimaryConnection")?;
         let final_code: u32 = root.get_property("Connectivity")?;
         anyhow::ensure!(
@@ -29,7 +36,7 @@ impl Nm {
                 && owner == bus.get_name_owner(destination)?.as_str(),
             "network changed while preparing portal launch"
         );
-        Ok((owner, status))
+        Ok((format!("{}:{owner}", self.conn.server_guid()), status))
     }
 
     pub(crate) fn connectivity_check(&self) -> Result<ConnectivityStatus> {
@@ -62,20 +69,29 @@ impl Nm {
     /// the verdict applies to, so a captive-portal flow opens the URL
     /// NetworkManager probed on the connection it probed it over.
     pub(crate) fn with_portal_context(&self, status: ConnectivityStatus) -> ConnectivityStatus {
-        let root = self.root_proxy();
+        self.portal_context_from(&self.root_proxy(), status)
+    }
+
+    fn portal_context_from(
+        &self,
+        root: &zbus::blocking::Proxy<'_>,
+        status: ConnectivityStatus,
+    ) -> ConnectivityStatus {
         status.with_portal_context(
             root.get_property::<String>("ConnectivityCheckUri").ok(),
             root.get_property("ConnectivityCheckEnabled")
                 .unwrap_or(false),
             root.get_property("ConnectivityCheckAvailable")
                 .unwrap_or(false),
-            self.primary_connection_identity(),
+            self.primary_connection_identity(root),
         )
     }
 
-    fn primary_connection_identity(&self) -> Option<PrimaryConnectionIdentity> {
-        let path = self
-            .root_proxy()
+    fn primary_connection_identity(
+        &self,
+        root: &zbus::blocking::Proxy<'_>,
+    ) -> Option<PrimaryConnectionIdentity> {
+        let path = root
             .get_property::<OwnedObjectPath>("PrimaryConnection")
             .ok()
             .filter(|path| path.as_str() != "/")?;
@@ -96,8 +112,7 @@ impl Nm {
             path: path.to_string(),
             id: active.get_property("Id").unwrap_or_default(),
             uuid: active.get_property("Uuid").unwrap_or_default(),
-            type_name: self
-                .root_proxy()
+            type_name: root
                 .get_property::<String>("PrimaryConnectionType")
                 .ok()
                 .filter(|value| !value.is_empty())

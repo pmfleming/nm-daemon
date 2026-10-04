@@ -20,13 +20,17 @@ Use this checklist on a network that permits testing. Never record or share port
    ```
 
 4. Connect with Shelllist, wait for its captive-portal browser, authenticate, and wait until internet access is available.
-5. Capture Shelllist's helper decisions and browser-window timing:
+5. Note the frontend status and time at prepare, browser opening and window
+   observation. The frontend now uses `network.portalPrepare`, `portalClaim` and
+   `portalComplete`; the retired shell helper's journal tag/timing fields no
+   longer exist. The native UI helper reports `opened`, `failed` or `uncertain`.
 
-   ```sh
-   journalctl -t shelllist-captive-portal --since '10 minutes ago'
-   ```
-
-The helper's `helper_elapsed_ms` measures request parsing, browser launch, and window observation. A quickly observed window followed by a visibly late login page points to the hotspot redirect/page rather than daemon classification or browser process startup.
+The private runtime ledger contains URLs and connection identifiers: do not
+publish it unredacted. Test UI/daemon disappearance after prepare/claim without
+replaying automatic launches; use Sign in or the bar's explicit fallback to retry.
+See [launch intent policy](portal-intents.md). A quickly observed window followed
+by a visibly late login page points to hotspot redirection rather than process
+startup. Live tests are manual and must not be run by automated unit tests.
 
 ## Expected sequence
 

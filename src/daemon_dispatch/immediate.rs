@@ -35,6 +35,12 @@ fn dispatch_params(
         Method::NetworkPortalPrepare => {
             crate::portal::prepare(runtime, owner, parse_required_params(params_json)?)
         }
+        Method::NetworkPortalClaim => {
+            crate::portal::claim(runtime, owner, parse_required_params(params_json)?)
+        }
+        Method::NetworkPortalComplete => {
+            crate::portal::complete(owner, parse_required_params(params_json)?)
+        }
         Method::WifiQrRender => crate::daemon_qr::call_render(parse_required_params(params_json)?),
         Method::WifiQrParse => crate::daemon_qr::call_parse(parse_required_params(params_json)?),
         Method::NetworkActivateProfile => {

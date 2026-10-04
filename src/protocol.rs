@@ -17,6 +17,8 @@ pub(crate) enum Method {
     RadioSetAirplaneMode,
     NetworkConnectivity,
     NetworkPortalPrepare,
+    NetworkPortalClaim,
+    NetworkPortalComplete,
     NetworkInventory,
     NetworkDevices,
     NetworkConnections,
@@ -54,6 +56,8 @@ pub(crate) enum Method {
 pub(crate) enum ParameterKind {
     Empty,
     PortalPrepare,
+    PortalClaim,
+    PortalComplete,
     Enabled,
     ActivateProfile,
     Deactivate,
@@ -87,7 +91,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static METHOD_REGISTRY: &[MethodSpec; 36] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 38] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -147,6 +151,26 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 36] = &[
         stream: None,
         operation: ErrorOperation::Connectivity,
         description: "Prepare a short-lived portal launch intent for the current primary connection; never opens a browser.",
+    },
+    MethodSpec {
+        method: Method::NetworkPortalClaim,
+        name: "network.portalClaim",
+        parameters: ParameterKind::PortalClaim,
+        params_example: r#"{"launch_id":"opaque-launch-id"}"#,
+        response_key: "portal",
+        stream: None,
+        operation: ErrorOperation::Connectivity,
+        description: "Revalidate and claim a portal intent exactly once before frontend browser execution.",
+    },
+    MethodSpec {
+        method: Method::NetworkPortalComplete,
+        name: "network.portalComplete",
+        parameters: ParameterKind::PortalComplete,
+        params_example: r#"{"launch_id":"opaque-launch-id","outcome":"opened"}"#,
+        response_key: "portal",
+        stream: None,
+        operation: ErrorOperation::Connectivity,
+        description: "Acknowledge frontend execution as opened, failed (no effect), or uncertain; never retries an automatic launch.",
     },
     MethodSpec {
         method: Method::NetworkInventory,
