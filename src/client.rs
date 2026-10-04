@@ -2,8 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 use shelllist_daemon_core::DaemonEndpoint;
 use shelllist_daemon_tokio::{
-    CallFailure, CancelMode, CorrelationPolicy, JsonlClientConfig, TrackedId, TrackedKind,
-    run_jsonl_client,
+    CallFailure, CancelMode, CorrelationPolicy, JsonlClientConfig, run_jsonl_client,
 };
 
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH};
@@ -15,23 +14,8 @@ const ENDPOINT: DaemonEndpoint =
 struct NmCorrelation;
 
 impl CorrelationPolicy for NmCorrelation {
-    fn response_id(&self, response: &Value) -> Option<TrackedId> {
-        if let Some(id) = response
-            .pointer("/data/result/request_id")
-            .and_then(Value::as_str)
-        {
-            return Some(TrackedId {
-                id: id.to_string(),
-                kind: TrackedKind::Operation,
-            });
-        }
-        response
-            .pointer("/data/subscription/id")
-            .and_then(Value::as_str)
-            .map(|id| TrackedId {
-                id: id.to_string(),
-                kind: TrackedKind::Subscription,
-            })
+    fn operation_id<'a>(&self, response: &'a Value) -> Option<&'a str> {
+        response.pointer("/data/result/request_id")?.as_str()
     }
 
     fn event_id(&self, stream: &str, event: &Value) -> Option<String> {
@@ -87,7 +71,26 @@ pub(crate) async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
 
-    use super::needs_correlation;
+    use super::{NmCorrelation, needs_correlation};
+    use serde_json::json;
+    use shelllist_daemon_tokio::{CorrelationPolicy, TrackedKind};
+
+    #[test]
+    fn correlates_result_and_subscription_envelopes() {
+        for (data, kind) in [
+            (
+                json!({"result": {"request_id": "id"}}),
+                TrackedKind::Operation,
+            ),
+            (
+                json!({"subscription": {"id": "id"}}),
+                TrackedKind::Subscription,
+            ),
+        ] {
+            let tracked = NmCorrelation.response_id(&json!({"data": data})).unwrap();
+            assert_eq!((tracked.id.as_str(), tracked.kind), ("id", kind));
+        }
+    }
 
     #[test]
     fn every_operation_and_continuous_stream_is_correlated_with_its_response() {
