@@ -41,6 +41,7 @@ mod model;
 mod nl80211;
 mod nm;
 mod output;
+mod portal;
 mod protocol;
 mod qr;
 mod random;

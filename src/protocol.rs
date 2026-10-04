@@ -16,6 +16,7 @@ pub(crate) enum Method {
     RadioSetWwanEnabled,
     RadioSetAirplaneMode,
     NetworkConnectivity,
+    NetworkPortalPrepare,
     NetworkInventory,
     NetworkDevices,
     NetworkConnections,
@@ -52,6 +53,7 @@ pub(crate) enum Method {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ParameterKind {
     Empty,
+    PortalPrepare,
     Enabled,
     ActivateProfile,
     Deactivate,
@@ -85,7 +87,7 @@ pub(crate) struct MethodSpec {
     pub(crate) description: &'static str,
 }
 
-pub(crate) static METHOD_REGISTRY: &[MethodSpec; 35] = &[
+pub(crate) static METHOD_REGISTRY: &[MethodSpec; 36] = &[
     MethodSpec {
         method: Method::WifiStatus,
         name: "wifi.status",
@@ -135,6 +137,16 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 35] = &[
         stream: Some(Stream::NetworkConnectivity),
         operation: ErrorOperation::Connectivity,
         description: "NetworkManager connectivity and captive-portal state.",
+    },
+    MethodSpec {
+        method: Method::NetworkPortalPrepare,
+        name: "network.portalPrepare",
+        parameters: ParameterKind::PortalPrepare,
+        params_example: r#"{"mode":"manual","fallback":false}"#,
+        response_key: "portal",
+        stream: None,
+        operation: ErrorOperation::Connectivity,
+        description: "Prepare a short-lived portal launch intent for the current primary connection; never opens a browser.",
     },
     MethodSpec {
         method: Method::NetworkInventory,

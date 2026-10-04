@@ -32,6 +32,9 @@ fn dispatch_params(
     runtime: &Arc<DaemonRuntime>,
 ) -> Result<Value> {
     match method {
+        Method::NetworkPortalPrepare => {
+            crate::portal::prepare(runtime, owner, parse_required_params(params_json)?)
+        }
         Method::WifiQrRender => crate::daemon_qr::call_render(parse_required_params(params_json)?),
         Method::WifiQrParse => crate::daemon_qr::call_parse(parse_required_params(params_json)?),
         Method::NetworkActivateProfile => {

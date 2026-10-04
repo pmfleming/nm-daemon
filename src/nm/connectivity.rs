@@ -8,6 +8,30 @@ use super::{ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, Nm};
 use crate::model::{ConnectivityStatus, PrimaryConnectionIdentity};
 
 impl Nm {
+    /// Read a current verdict, fenced against primary changes and NM restarts.
+    pub(crate) fn portal_snapshot(&self) -> Result<(String, ConnectivityStatus)> {
+        let bus = zbus::blocking::fdo::DBusProxy::new(&self.conn)?;
+        let destination = zbus::names::BusName::try_from(self.destination.as_str())?;
+        let owner = bus.get_name_owner(destination.clone())?.to_string();
+        let root = self.root_proxy();
+        let before: OwnedObjectPath = root.get_property("PrimaryConnection")?;
+        let code: u32 = root.get_property("Connectivity")?;
+        let status = self.with_portal_context(ConnectivityStatus::from_nm_code(code));
+        let after: OwnedObjectPath = root.get_property("PrimaryConnection")?;
+        let final_code: u32 = root.get_property("Connectivity")?;
+        anyhow::ensure!(
+            before == after
+                && code == final_code
+                && status
+                    .primary_connection
+                    .as_ref()
+                    .is_some_and(|p| p.path == before.as_str())
+                && owner == bus.get_name_owner(destination)?.as_str(),
+            "network changed while preparing portal launch"
+        );
+        Ok((owner, status))
+    }
+
     pub(crate) fn connectivity_check(&self) -> Result<ConnectivityStatus> {
         let started = Instant::now();
         let nm = self.root_proxy();

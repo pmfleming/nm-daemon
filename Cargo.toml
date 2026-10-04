@@ -20,6 +20,7 @@ shelllist-daemon-core = { path = "../daemon-framework/crates/shelllist-daemon-co
 shelllist-daemon-tokio = { path = "../daemon-framework/crates/shelllist-daemon-tokio" }
 rustix = { version = "1", features = ["fs", "process"] }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time", "process"] }
+url = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zbus = { version = "5", features = ["blocking"] }
