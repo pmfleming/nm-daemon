@@ -9,20 +9,38 @@
     inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, daemonFramework }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      daemonFramework,
+    }:
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
     in
     {
-      packages = forAllSystems (system: pkgs:
+      packages = forAllSystems (
+        system: pkgs:
         let
-          nmDaemon = pkgs.rustPlatform.buildRustPackage {
+          nmDaemon = daemonFramework.lib.buildRustPackage pkgs {
             pname = "nm-daemon";
             version = "0.1.0";
-            src = ./.;
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./Cargo.toml
+                ./Cargo.lock
+                ./.cargo/config.toml
+                ./build.rs
+                ./src
+                ./test_support
+                ./config
+                ./data
+              ];
+            };
             postUnpack = ''
-              cp -R --no-preserve=mode ${daemonFramework} "$(dirname "$sourceRoot")/daemon-framework"
+              cp -R --no-preserve=mode ${daemonFramework.lib.daemonSource pkgs} "$(dirname "$sourceRoot")/daemon-framework"
             '';
             cargoLock.lockFile = ./Cargo.lock;
             checkFlags = [ "--test-threads=1" ];
@@ -79,56 +97,63 @@
               platforms = pkgs.lib.platforms.linux;
             };
           };
-        });
+        }
+      );
 
       nixosModules.default = import ./nix/nixos.nix { inherit self; };
 
-      checks = forAllSystems (system: pkgs: {
-        package = self.packages.${system}.default;
-        connectParityProbe = self.packages.${system}.connectParityProbe;
-        castPolicy = import ./nix/tests/cast-policy.nix { inherit self pkgs; };
-      });
+      checks = forAllSystems (
+        system: pkgs: {
+          package = self.packages.${system}.default;
+          connectParityProbe = self.packages.${system}.connectParityProbe;
+          castPolicy = import ./nix/tests/cast-policy.nix { inherit self pkgs; };
+        }
+      );
 
-      apps = forAllSystems (system: pkgs: {
-        default = {
-          type = "app";
-          program = "${self.packages.${system}.default}/bin/nm-daemon";
-          meta.description = "Run the nm-daemon NetworkManager adapter/service";
-        };
-        connectParityProbe = {
-          type = "app";
-          program = "${self.packages.${system}.connectParityProbe}/bin/nm-daemon-connect-parity-probe";
-          meta.description = "Compare nm-daemon and nmcli Wi-Fi connection behavior";
-        };
-      });
+      apps = forAllSystems (
+        system: pkgs: {
+          default = {
+            type = "app";
+            program = "${self.packages.${system}.default}/bin/nm-daemon";
+            meta.description = "Run the nm-daemon NetworkManager adapter/service";
+          };
+          connectParityProbe = {
+            type = "app";
+            program = "${self.packages.${system}.connectParityProbe}/bin/nm-daemon-connect-parity-probe";
+            meta.description = "Compare nm-daemon and nmcli Wi-Fi connection behavior";
+          };
+        }
+      );
 
-      devShells = forAllSystems (system: pkgs: {
-        default = pkgs.mkShell {
-          packages = with pkgs; [
-            cargo
-            cargo-llvm-cov
-            cargo-machete
-            clippy
-            gcc
-            heaptrack
-            just
-            llvmPackages.llvm
-            pkg-config
-            python3
-            rust-analyzer
-            rustc
-            rustfmt
-          ];
+      devShells = forAllSystems (
+        system: pkgs: {
+          default = pkgs.mkShell {
+            packages = with pkgs; [
+              cargo
+              cargo-llvm-cov
+              cargo-machete
+              clippy
+              gcc
+              heaptrack
+              just
+              llvmPackages.llvm
+              pkg-config
+              python3
+              rust-analyzer
+              rustc
+              rustfmt
+            ];
 
-          LLVM_COV = "${pkgs.llvmPackages.llvm}/bin/llvm-cov";
-          LLVM_PROFDATA = "${pkgs.llvmPackages.llvm}/bin/llvm-profdata";
-          RUST_BACKTRACE = "1";
+            LLVM_COV = "${pkgs.llvmPackages.llvm}/bin/llvm-cov";
+            LLVM_PROFDATA = "${pkgs.llvmPackages.llvm}/bin/llvm-profdata";
+            RUST_BACKTRACE = "1";
 
-          shellHook = ''
-            ${pkgs.bash}/bin/bash "$PWD/tools/trim-target.sh"
-          '';
-        };
-      });
+            shellHook = ''
+              ${pkgs.bash}/bin/bash "$PWD/tools/trim-target.sh"
+            '';
+          };
+        }
+      );
 
       formatter = forAllSystems (system: pkgs: pkgs.nixpkgs-fmt);
     };
