@@ -153,17 +153,17 @@ Build-time data and policy live outside the Rust sources:
 - `config/daemon-capacity.conf` defines worker and queue capacities.
 - `config/storage-policy.conf` defines history retention limits.
 
-`build.rs` validates these files and generates typed Rust constants in Cargo's `OUT_DIR`; they are compiled into the binary and are not runtime configuration files. The shared daemon-framework crates come from the current `../daemon-framework` checkout, never a vendored or revision-pinned copy. Use `python3 ../daemon-framework/tools/local-build.py check .` (or `build .`) for Nix development; it snapshots tracked worktrees once and ignores historical local-project pins. Cargo uses the sibling directly.
+`build.rs` validates these files and generates typed Rust constants in Cargo's `OUT_DIR`; they are compiled into the binary and are not runtime configuration files. The shared daemon-framework crates come from the current `../daemon-framework` checkout, never a vendored or revision-pinned copy. Use `../daemon-framework/tools/local-build check .` (or `build .`) for Nix development; it snapshots tracked worktrees once and ignores historical local-project pins. Cargo uses the sibling directly.
 
 Development:
 
 ```bash
-python3 ../daemon-framework/tools/local-build.py develop .
+../daemon-framework/tools/local-build develop .
 just check
-python3 ../daemon-framework/tools/local-build.py build .
+../daemon-framework/tools/local-build build .
 ```
 
-The `local-build.py build .` command refreshes the ignored `result` symlink. Scripts and contract checks should add `--no-link --print-out-paths` and use the printed path rather than assuming an old link is valid. Do not use plain Nix commands that can recreate local framework pins.
+The `local-build build .` command refreshes the ignored `result` symlink. Scripts and contract checks should add `--no-link --print-out-paths` and use the printed path rather than assuming an old link is valid. Do not use plain Nix commands that can recreate local framework pins.
 
 `just check` runs formatting verification, Clippy with warnings denied, and the complete test suite. CI also runs the Nix flake checks and enforces a minimum 40% Rust line-coverage floor. Use `cargo test serialized_v1_boundary_matches_checked_in_snapshot` when reviewing the checked-in protocol snapshot. After updating the production fixture constructors, regenerate it with `NM_DAEMON_UPDATE_CONTRACT_FIXTURE=1 cargo test serialized_v1_boundary_matches_checked_in_snapshot`, then rerun the test normally.
 

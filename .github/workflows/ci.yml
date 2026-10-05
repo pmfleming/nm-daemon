@@ -46,4 +46,5 @@ jobs:
           ref: main
           path: daemon-framework
       - uses: cachix/install-nix-action@v31
-      - run: python3 ../daemon-framework/tools/local-build.py check . --print-build-logs
+      - uses: dtolnay/rust-toolchain@stable
+      - run: ../daemon-framework/tools/local-build check . --print-build-logs
