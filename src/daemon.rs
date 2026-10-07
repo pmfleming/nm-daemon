@@ -36,12 +36,22 @@ pub(crate) async fn run_daemon() -> Result<()> {
         Arc::clone(&runtime),
     ));
     let secret_runtime = Arc::clone(&runtime);
-    tokio::task::spawn_blocking(move || register_secret_agent(&secret_runtime))
-        .await
-        .context("join NetworkManager SecretAgent registration")?;
+    tokio::task::spawn_blocking(move || {
+        crate::daemon_secret::export_secret_agent(
+            &secret_runtime.network_manager_connection(),
+            &secret_runtime,
+        )
+    })
+    .await
+    .context("join NetworkManager SecretAgent export")??;
+    let nm_watch = tokio::spawn(crate::daemon_secret::watch_network_manager(Arc::clone(
+        &runtime,
+    )));
     log_daemon_started();
     let result = shelllist_daemon_tokio::wait_for_shutdown().await;
     owner_watch.abort();
+    nm_watch.abort();
+    let _ = nm_watch.await;
     connection
         .object_server()
         .remove::<NmDaemonInterface, _>(DBUS_OBJECT_PATH)
@@ -60,14 +70,6 @@ pub(crate) async fn run_daemon() -> Result<()> {
         .await
         .context("join NetworkManager runtime disposal")?;
     result
-}
-
-fn register_secret_agent(runtime: &Arc<DaemonRuntime>) {
-    if let Err(err) =
-        crate::daemon_secret::register_secret_agent(&runtime.network_manager_connection(), runtime)
-    {
-        tracing::warn!(error = %crate::error::err_chain(&err), "NetworkManager SecretAgent registration failed");
-    }
 }
 
 fn log_daemon_started() {

@@ -83,6 +83,7 @@ fn run_scan_events(
     let application = Application::new(nm);
     application
         .scan_prepared(request, Some(cancellation), |event| {
+            nm.ensure_current_owner()?;
             emit_scan_event(&application, emitter, request_id, event)
         })
         .map(|_| ())

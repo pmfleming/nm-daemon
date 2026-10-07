@@ -7,7 +7,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use zbus::blocking::{Connection, Proxy};
+use zbus::blocking::Connection;
+use zbus::message::Header;
+
+mod lifecycle;
+pub(crate) use lifecycle::watch_network_manager;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
 use crate::daemon_runtime::DaemonRuntime;
@@ -41,9 +45,29 @@ impl SecretAgentInterface {
             runtime: Arc::downgrade(runtime),
         }
     }
+
+    async fn authorize(&self, header: &Header<'_>) -> zbus::fdo::Result<String> {
+        let runtime = self
+            .runtime
+            .upgrade()
+            .ok_or_else(|| zbus::fdo::Error::Failed("SecretAgent stopped".into()))?;
+        let conn = runtime.network_manager_connection();
+        let owner = zbus::fdo::DBusProxy::new(conn.inner())
+            .await?
+            .get_name_owner(NM_DEST.try_into().expect("constant bus name"))
+            .await?;
+        if header.sender().map(|sender| sender.as_str()) != Some(owner.as_str())
+            || !with_pending_registry(|registry| registry.is_current_owner(Some(owner.as_str())))
+        {
+            return Err(zbus::fdo::Error::AccessDenied(
+                "SecretAgent caller is not the current NetworkManager owner".into(),
+            ));
+        }
+        Ok(owner.to_string())
+    }
 }
 
-pub(crate) fn register_secret_agent(
+pub(crate) fn export_secret_agent(
     system_connection: &Connection,
     runtime: &Arc<DaemonRuntime>,
 ) -> Result<()> {
@@ -51,75 +75,121 @@ pub(crate) fn register_secret_agent(
         .object_server()
         .at(SECRET_AGENT_OBJECT_PATH, SecretAgentInterface::new(runtime))
         .context("export nm-daemon SecretAgent on system D-Bus")?;
-    let manager = Proxy::new(
-        system_connection,
-        NM_DEST,
-        AGENT_MANAGER_PATH,
-        AGENT_MANAGER_IFACE,
-    )
-    .context("create NetworkManager SecretAgent manager proxy")?;
-    let vpn_hints = register_with_capabilities(&manager)?;
-    REGISTERED.store(true, Ordering::Relaxed);
-    tracing::info!(
-        path = SECRET_AGENT_OBJECT_PATH,
-        vpn_hints,
-        "registered NetworkManager SecretAgent"
-    );
     Ok(())
 }
 
-/// Registers with `NM_SECRET_AGENT_CAPABILITY_VPN_HINTS` so NetworkManager
-/// passes the VPN plugin's own hints through, and falls back to plain
-/// registration on NetworkManager builds that do not support capabilities.
-fn register_with_capabilities(manager: &Proxy<'_>) -> Result<bool> {
-    const VPN_HINTS: u32 = 0x1;
-    match manager.call::<_, _, ()>("RegisterWithCapabilities", &(SECRET_AGENT_ID, VPN_HINTS)) {
-        Ok(()) => Ok(true),
-        Err(error) => {
-            tracing::info!(%error, "NetworkManager rejected SecretAgent VPN-hint capabilities; registering without them");
-            manager
-                .call::<_, _, ()>("Register", &(SECRET_AGENT_ID,))
-                .context("register NetworkManager SecretAgent")?;
-            Ok(false)
-        }
+fn change_network_manager_owner(runtime: &Arc<DaemonRuntime>, owner: Option<String>) {
+    let cancelled = with_pending_registry(|registry| {
+        REGISTERED.store(false, Ordering::Release);
+        registry.nm_owner = owner.clone();
+        registry
+            .requests
+            .drain()
+            .map(|(id, entry)| (id, entry.sender))
+            .collect::<Vec<_>>()
+    });
+    runtime.network_manager_owner_changed(owner.as_deref());
+    let weak = Arc::downgrade(runtime);
+    for (id, sender) in cancelled {
+        let _ = sender.send(SecretResponse::cancelled());
+        emit_secret_cancelled(&weak, &id);
     }
+}
+
+fn ensure_request_owner(request: &PendingSecretRequest) -> zbus::fdo::Result<()> {
+    ensure_secret_owner(request.nm_owner.as_deref())
+}
+
+fn ensure_secret_owner(owner: Option<&str>) -> zbus::fdo::Result<()> {
+    with_pending_registry(|registry| {
+        if registry.is_current_owner(owner) {
+            Ok(())
+        } else {
+            Err(zbus::fdo::Error::Failed(
+                "NetworkManager changed during the secret request".into(),
+            ))
+        }
+    })
 }
 
 #[zbus::interface(name = "org.freedesktop.NetworkManager.SecretAgent")]
 impl SecretAgentInterface {
-    fn get_secrets(
+    async fn get_secrets(
         &self,
         connection: ConnectionSettings,
         connection_path: OwnedObjectPath,
         setting_name: &str,
         hints: Vec<String>,
         flags: u32,
+        #[zbus(header)] header: Header<'_>,
     ) -> zbus::fdo::Result<ConnectionSettings> {
-        let request = PendingSecretRequest::new(connection_path, setting_name, hints, flags);
-        resolve_secret_request(
-            request,
-            connection,
-            apply_stored_secret,
-            |request, connection| wait_for_secret_response(&self.runtime, request, connection),
-        )
+        let mut request = PendingSecretRequest::new(connection_path, setting_name, hints, flags);
+        request.nm_owner = Some(self.authorize(&header).await?);
+        let runtime = self.runtime.clone();
+        secret_worker(move || {
+            resolve_secret_request(
+                request,
+                connection,
+                apply_stored_secret,
+                |request, connection| wait_for_secret_response(&runtime, request, connection),
+            )
+        })
+        .await
     }
 
-    fn cancel_get_secrets(&self, connection_path: OwnedObjectPath, setting_name: &str) {
+    async fn cancel_get_secrets(
+        &self,
+        connection_path: OwnedObjectPath,
+        setting_name: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.authorize(&header).await?;
         tracing::info!(%connection_path, setting_name, "NetworkManager cancelled SecretAgent request");
         let key = PendingSecretRequest::key_for(connection_path.as_str(), setting_name);
         if let Some((request_id, sender)) = remove_pending_by_key(&key) {
             let _ = sender.send(SecretResponse::cancelled());
             emit_secret_cancelled(&self.runtime, &request_id);
         }
+        Ok(())
     }
 
-    fn save_secrets(&self, connection: ConnectionSettings, connection_path: OwnedObjectPath) {
-        save_connection_secrets(&connection_path, &connection);
+    async fn save_secrets(
+        &self,
+        connection: ConnectionSettings,
+        connection_path: OwnedObjectPath,
+        #[zbus(header)] header: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let owner = self.authorize(&header).await?;
+        secret_worker(move || {
+            ensure_secret_owner(Some(&owner))?;
+            save_connection_secrets(&connection_path, &connection);
+            Ok(())
+        })
+        .await
     }
 
-    fn delete_secrets(&self, connection: ConnectionSettings, connection_path: OwnedObjectPath) {
-        delete_connection_secrets(&connection_path, &connection);
+    async fn delete_secrets(
+        &self,
+        connection: ConnectionSettings,
+        connection_path: OwnedObjectPath,
+        #[zbus(header)] header: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        let owner = self.authorize(&header).await?;
+        secret_worker(move || {
+            ensure_secret_owner(Some(&owner))?;
+            delete_connection_secrets(&connection_path, &connection);
+            Ok(())
+        })
+        .await
     }
+}
+
+async fn secret_worker<T: Send + 'static>(
+    work: impl FnOnce() -> zbus::fdo::Result<T> + Send + 'static,
+) -> zbus::fdo::Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| zbus::fdo::Error::Failed("SecretAgent worker stopped".into()))?
 }
 
 fn resolve_secret_request(
@@ -131,8 +201,10 @@ fn resolve_secret_request(
         ConnectionSettings,
     ) -> zbus::fdo::Result<ConnectionSettings>,
 ) -> zbus::fdo::Result<ConnectionSettings> {
+    ensure_request_owner(&request)?;
     // A fresh request must not reuse a password NetworkManager already rejected.
     if request.flags & REQUEST_NEW == 0 && stored(&request, &mut connection)? {
+        ensure_request_owner(&request)?;
         return Ok(connection);
     }
     // Fail before registering a pending request or emitting a frontend event.
@@ -169,7 +241,7 @@ fn wait_for_secret_response(
         .upgrade()
         .map(|runtime| runtime.subscriber_owners(Stream::WifiSecret))
         .unwrap_or_default();
-    let (registration, displaced_request_id) = register_pending(&request, owners);
+    let (registration, displaced_request_id) = register_pending(&request, owners)?;
     if let Some(displaced_request_id) = displaced_request_id {
         emit_secret_cancelled(runtime, &displaced_request_id);
     }
@@ -178,6 +250,7 @@ fn wait_for_secret_response(
     let response = registration.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
         zbus::fdo::Error::NoReply(format!("timed out waiting for secret {}", request.id))
     })?;
+    ensure_request_owner(&request)?;
     if let Some(persistence) = apply_secret_response(&mut connection, &request, response)? {
         emit_secret_persistence(runtime, &request.id, persistence);
     }
@@ -267,23 +340,28 @@ pub(crate) fn provide(owner: Option<&str>, params: SecretProvideParams) -> Resul
 fn register_pending(
     request: &PendingSecretRequest,
     owners: Vec<String>,
-) -> (PendingRegistration, Option<String>) {
+) -> zbus::fdo::Result<(PendingRegistration, Option<String>)> {
     let (tx, rx) = mpsc::channel();
     let displaced = with_pending_registry(|registry| {
-        registry.insert(request.id.clone(), request.key.clone(), owners, tx)
-    });
+        if !registry.is_current_owner(request.nm_owner.as_deref()) {
+            return Err(zbus::fdo::Error::Failed(
+                "NetworkManager changed before secret registration".into(),
+            ));
+        }
+        Ok(registry.insert(request.id.clone(), request.key.clone(), owners, tx))
+    })?;
     let displaced_request_id = displaced.map(|(request_id, sender)| {
         let _ = sender.send(SecretResponse::cancelled());
         tracing::warn!(%request_id, key = %request.key, "replaced duplicate pending SecretAgent request");
         request_id
     });
-    (
+    Ok((
         PendingRegistration {
             request_id: request.id.clone(),
             receiver: rx,
         },
         displaced_request_id,
-    )
+    ))
 }
 
 fn remove_pending(request_id: &str) -> Option<Sender<SecretResponse>> {
@@ -686,6 +764,7 @@ fn owned_value(value: String) -> zbus::fdo::Result<OwnedValue> {
 }
 
 struct PendingSecretRequest {
+    nm_owner: Option<String>,
     id: String,
     key: String,
     connection_path: String,
@@ -705,6 +784,7 @@ impl PendingSecretRequest {
         let connection_path = connection_path.to_string();
         let secret_keys = secret_keys_for(setting_name, &hints);
         Self {
+            nm_owner: None,
             id: crate::daemon_runtime::next_request_id("secret"),
             key: Self::key_for(&connection_path, setting_name),
             connection_path,
@@ -833,10 +913,15 @@ struct PendingEntry {
 
 #[derive(Default)]
 struct PendingRegistry {
+    nm_owner: Option<String>,
     requests: HashMap<String, PendingEntry>,
 }
 
 impl PendingRegistry {
+    fn is_current_owner(&self, owner: Option<&str>) -> bool {
+        self.nm_owner.as_deref() == owner
+    }
+
     fn insert(
         &mut self,
         request_id: String,
@@ -989,7 +1074,7 @@ mod tests {
     #[test]
     fn pending_secret_delivery_observes_delay_and_timeout_cleanup() {
         let delivered = pending_request("timed-delivery", "timed-delivery-key");
-        let (registration, displaced) = register_pending(&delivered, vec![":1.1".into()]);
+        let (registration, displaced) = register_pending(&delivered, vec![":1.1".into()]).unwrap();
         assert!(displaced.is_none());
         let sender = std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(20));
@@ -1014,7 +1099,7 @@ mod tests {
         drop(registration);
 
         let timed_out = pending_request("timed-out", "timed-out-key");
-        let (registration, displaced) = register_pending(&timed_out, vec![":1.1".into()]);
+        let (registration, displaced) = register_pending(&timed_out, vec![":1.1".into()]).unwrap();
         assert!(displaced.is_none());
         assert!(matches!(
             registration.recv_timeout(Duration::from_millis(10)),
@@ -1026,6 +1111,7 @@ mod tests {
     #[test]
     fn secret_response_applies_only_requested_named_values() {
         let request = PendingSecretRequest {
+            nm_owner: None,
             id: "named-values".to_string(),
             key: "named-values-key".to_string(),
             connection_path: "/test/connection".to_string(),
@@ -1059,6 +1145,7 @@ mod tests {
 
     fn pending_request(id: &str, key: &str) -> PendingSecretRequest {
         PendingSecretRequest {
+            nm_owner: None,
             id: id.to_string(),
             key: key.to_string(),
             connection_path: "/test/connection".to_string(),

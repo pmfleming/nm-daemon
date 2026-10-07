@@ -45,6 +45,7 @@
             cargoLock.lockFile = ./Cargo.lock;
             checkFlags = [ "--test-threads=1" ];
             nativeBuildInputs = with pkgs; [ pkg-config ];
+            nativeCheckInputs = [ pkgs.dbus ];
             postInstall = ''
               install -Dm644 ${./packaging/systemd/nm-daemon.service} $out/share/systemd/user/nm-daemon.service
               install -Dm644 ${./packaging/dbus/org.laufan.NmDaemon.service} \

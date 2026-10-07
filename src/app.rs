@@ -147,6 +147,8 @@ pub fn report_error(err: &anyhow::Error) {
 }
 
 fn with_nm<T>(f: impl FnOnce(&Nm) -> Result<T>) -> Result<T> {
-    let nm = Nm::new()?;
-    f(&nm)
+    let nm = Nm::new()?.scoped()?;
+    let result = f(&nm)?;
+    nm.ensure_current_owner()?;
+    Ok(result)
 }

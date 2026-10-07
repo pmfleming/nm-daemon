@@ -54,5 +54,31 @@ installation checks passed. NixOS evaluation selected 1.58.1 without enabling
 the service. Runtime IWD/EAP and cross-version tests belong to the VM gate; this
 build alone is not evidence of successful live Wi-Fi authentication.
 
+## Daemon continuity across NetworkManager restarts
+
+The user daemon exports its SecretAgent once, subscribes to `NameOwnerChanged`
+before discovering NM, and re-registers against each new **unique bus owner**.
+Registration has a five-second deadline and a two-second retry interval. Only
+`UnknownMethod` permits falling back from `RegisterWithCapabilities` to `Register`;
+authorization and transport errors do not downgrade capabilities. Owner loss
+clears the registered flag and cancels pending requests. Agent calls authenticate
+the current NM sender; delayed prompts/responses from an old owner are rejected.
+Blocking keyring/prompt work runs outside the async D-Bus executor.
+
+Each queued operation captures an owner-specific NM scope. Retries, rollback and
+cancellation retain that endpoint, never a replacement's reused object path.
+New owners receive fresh scan/statistics/radio-restore state; health signals and
+status caches carry owner identity. Successful connect proof is checked against
+the current owner even before the lifecycle watcher processes its signal.
+Property reads in these scopes are uncached, trading some D-Bus traffic for
+restart-safe observations. Direct CLI operations use the same owner fence.
+
+The private-bus regression suite covers absence at startup, pending secret
+cancellation, owner replacement, denied/legacy/hung registration, stale cleanup,
+late terminal success, and recovery without restarting the adapter. It does not
+restart the host's system bus. Recovery from a **system D-Bus daemon restart**
+requires restarting nm-daemon; this is distinct from NetworkManager restarting
+on the same bus. VM checks cover the system companion's fail-closed lifecycle.
+
 No tool in this repository automatically switches the host, restarts its
 NetworkManager, repairs private files, or migrates live connection profiles.

@@ -127,7 +127,10 @@ fn run_vpn_worker(
     );
     events.phase("progress", "activating");
 
-    match Application::new(nm).connect_vpn(selector, timeout, Some(cancellation)) {
+    match Application::new(nm)
+        .connect_vpn(selector, timeout, Some(cancellation))
+        .and_then(|result| nm.ensure_current_owner().map(|()| result))
+    {
         Ok(result) if cancellation.load(Ordering::Relaxed) => {
             let _ = Application::new(nm).disconnect_vpn(selector);
             tracing::info!(%request_id, id = %result.vpn.id, "disconnected VPN that connected after cancellation");

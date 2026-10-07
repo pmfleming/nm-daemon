@@ -7,7 +7,6 @@ use zbus::MatchRule;
 use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Type;
 
-use super::NM_DEST;
 use crate::generated::NETWORKMANAGER_EVENT_RETRY_DELAY;
 
 const DEVICE_IFACE: &str = "org.freedesktop.NetworkManager.Device";
@@ -36,6 +35,7 @@ impl HealthSubject {
 /// only ever reports on the signal itself.
 #[derive(Debug, Clone)]
 pub(crate) struct HealthSignal {
+    pub(crate) owner: String,
     pub(crate) subject: HealthSubject,
     pub(crate) path: String,
     pub(crate) state: u32,
@@ -57,13 +57,13 @@ pub(super) struct NetworkEvents {
 }
 
 impl NetworkEvents {
-    pub(super) fn start(connection: Connection) -> Arc<Self> {
+    pub(super) fn start(connection: Connection, destination: String) -> Arc<Self> {
         let events = Arc::new(Self::default());
         let monitor_events = Arc::clone(&events);
         if let Err(error) = std::thread::Builder::new()
             .name("nm-events".to_string())
             .spawn(move || loop {
-                if let Err(error) = monitor_signals(connection.clone(), &monitor_events) {
+                if let Err(error) = monitor_signals(connection.clone(), &destination, &monitor_events) {
                     tracing::warn!(error = %crate::error::err_chain(&error), "NetworkManager event monitor interrupted; retrying");
                 }
                 std::thread::sleep(NETWORKMANAGER_EVENT_RETRY_DELAY);
@@ -125,6 +125,12 @@ impl NetworkEvents {
             .cloned()
     }
 
+    pub(super) fn clear_health(&self) {
+        recover_lock(&self.latest_health).clear();
+        recover_lock(&self.latest_detailed_health).clear();
+        self.notify();
+    }
+
     pub(super) fn notify(&self) {
         let mut generation = recover_lock(&self.generation);
         *generation = generation.wrapping_add(1);
@@ -141,10 +147,14 @@ fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn monitor_signals(connection: Connection, events: &NetworkEvents) -> Result<()> {
+fn monitor_signals(
+    connection: Connection,
+    destination: &str,
+    events: &NetworkEvents,
+) -> Result<()> {
     let rule = MatchRule::builder()
         .msg_type(Type::Signal)
-        .sender(NM_DEST)
+        .sender(destination)
         .context("match NetworkManager signal sender")?
         .build();
     let mut messages = MessageIterator::for_match_rule(rule, &connection, Some(64))
@@ -168,11 +178,13 @@ fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
     let interface = header.interface()?.as_str().to_string();
     let member = header.member()?.as_str().to_string();
     let path = header.path()?.as_str().to_string();
+    let owner = header.sender()?.as_str().to_owned();
     let body = message.body();
     match (interface.as_str(), member.as_str()) {
         (DEVICE_IFACE, "StateChanged") => {
             let (state, previous_state, reason): (u32, u32, u32) = body.deserialize().ok()?;
             Some(HealthSignal {
+                owner,
                 subject: HealthSubject::Device,
                 path,
                 state,
@@ -184,6 +196,7 @@ fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
         (ACTIVE_CONNECTION_IFACE, "StateChanged") => {
             let (state, reason): (u32, u32) = body.deserialize().ok()?;
             Some(HealthSignal {
+                owner,
                 subject: HealthSubject::ActiveConnection,
                 path,
                 state,
@@ -195,6 +208,7 @@ fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
         (VPN_CONNECTION_IFACE, "VpnStateChanged") => {
             let (state, reason): (u32, u32) = body.deserialize().ok()?;
             Some(HealthSignal {
+                owner,
                 subject: HealthSubject::Vpn,
                 path,
                 state,
@@ -215,9 +229,37 @@ mod tests {
     use super::{HealthSignal, HealthSubject, NetworkEvents};
 
     #[test]
+    fn owner_loss_clears_both_health_caches_and_wakes_waiters() {
+        let events = NetworkEvents::default();
+        events.notify_health(HealthSignal {
+            owner: ":1.0".into(),
+            subject: HealthSubject::Device,
+            path: "/devices/1".into(),
+            state: 120,
+            previous_state: Some(70),
+            reason: 17,
+            observed_at: Instant::now(),
+        });
+        let before = events.generation();
+        events.clear_health();
+        assert!(
+            events
+                .latest_health(HealthSubject::Device, "/devices/1")
+                .is_none()
+        );
+        assert!(
+            events
+                .latest_detailed_health(HealthSubject::Device, "/devices/1")
+                .is_none()
+        );
+        assert_ne!(events.generation(), before);
+    }
+
+    #[test]
     fn neutral_followup_does_not_erase_recent_detailed_health_reason() {
         let events = NetworkEvents::default();
         let signal = |reason| HealthSignal {
+            owner: ":1.0".into(),
             subject: HealthSubject::Device,
             path: "/devices/1".to_string(),
             state: 30,

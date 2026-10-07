@@ -11,7 +11,7 @@ impl Nm {
     /// Read a current verdict, fenced against primary changes and NM restarts.
     pub(crate) fn portal_snapshot(&self) -> Result<(String, ConnectivityStatus)> {
         let bus = zbus::blocking::fdo::DBusProxy::new(&self.conn)?;
-        let destination = zbus::names::BusName::try_from(self.destination.as_str())?;
+        let destination = zbus::names::BusName::try_from(self.service_name.as_str())?;
         let owner = bus.get_name_owner(destination.clone())?.to_string();
         // Ordinary status proxies cache properties asynchronously. A launch
         // fence must perform real reads against this specific NM owner.

@@ -76,7 +76,10 @@ fn run_band_worker(
             }),
         );
     }
-    match Application::new(nm).select_band(params.path.as_str(), params.band, Some(cancellation)) {
+    match Application::new(nm)
+        .select_band(params.path.as_str(), params.band, Some(cancellation))
+        .and_then(|result| nm.ensure_current_owner().map(|()| result))
+    {
         Ok(result) => emit_band_success(&events, &params, cancellation, result),
         Err(error) => emit_band_error(&events, &params, &error),
     }

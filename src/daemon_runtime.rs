@@ -76,6 +76,7 @@ impl CancelOutcome {
 }
 
 struct TaskHandle {
+    nm: Arc<Nm>,
     started: Instant,
     progress: Option<Value>,
     timed_out: bool,
@@ -118,11 +119,13 @@ impl TaskRegistration {
         kind: TaskKind,
         owner: Option<String>,
         target_ssid: Option<Vec<u8>>,
+        nm: Arc<Nm>,
     ) -> Self {
         let cancellation = Arc::new(AtomicBool::new(false));
         recover_lock(&runtime.tasks, "daemon task map").insert(
             request_id.clone(),
             TaskHandle {
+                nm,
                 started: Instant::now(),
                 progress: None,
                 timed_out: false,
@@ -158,11 +161,13 @@ impl Drop for TaskRegistration {
 }
 
 struct CancelledTask {
+    nm: Arc<Nm>,
     kind: TaskKind,
     target_ssid: Option<Arc<[u8]>>,
 }
 
 struct CachedStatus {
+    nm_owner: String,
     recorded_at: Instant,
     response: Value,
 }
@@ -186,6 +191,9 @@ pub(crate) struct DaemonRuntime {
 impl DaemonRuntime {
     pub(crate) fn start(nm: Nm, tokio: tokio::runtime::Handle) -> Result<Arc<Self>> {
         let nm = Arc::new(nm);
+        // start() runs off the async executor. Absence is supported; the owner
+        // watcher primes a new scope when NM appears.
+        let _ = nm.scoped();
         let work = BlockingLane::start(&tokio, "work", WORK_QUEUE_CAPACITY, WORKER_COUNT);
         let fast_work =
             BlockingLane::start(&tokio, "fast-work", WORK_QUEUE_CAPACITY, FAST_WORKER_COUNT);
@@ -231,6 +239,26 @@ impl DaemonRuntime {
         self.nm.connection()
     }
 
+    pub(crate) fn refresh_network_manager_scope(&self) -> Result<()> {
+        self.nm.scoped()?.ensure_current_owner()?;
+        let _ = self.control.try_send(Control::NetworkChanged);
+        Ok(())
+    }
+
+    pub(crate) fn network_manager_owner_changed(&self, owner: Option<&str>) {
+        self.nm.invalidate_owner_state(owner);
+        self.invalidate_status();
+        for task in recover_lock(&self.tasks, "daemon task map").values() {
+            if Some(task.nm.destination()) != owner {
+                task.cancellation.store(true, Ordering::Release);
+                task.nm.wake_waiters();
+            }
+        }
+        // Do not enqueue a disconnect against the replacement owner. Existing
+        // workers retain their old endpoint for any cleanup they need to attempt.
+        let _ = self.control.try_send(Control::NetworkChanged);
+    }
+
     pub(crate) fn store_terminal_result(
         &self,
         request_id: &str,
@@ -238,6 +266,12 @@ impl DaemonRuntime {
         stream: Stream,
         mut event: Value,
     ) -> Value {
+        // Check outside the task lock: a D-Bus owner lookup must not block cancel.
+        let bound_nm = recover_lock(&self.tasks, "daemon task map")
+            .get(request_id)
+            .map(|task| Arc::clone(&task.nm));
+        let owner_changed = event["event"] == "succeeded"
+            && bound_nm.is_some_and(|nm| nm.ensure_current_owner().is_err());
         // Completion and cancellation share one linearization point. If the
         // cancellation won, a just-computed success cannot authorize portal
         // launch while the queued abort disconnects its link.
@@ -245,7 +279,7 @@ impl DaemonRuntime {
         if let Some(task) = tasks.get(request_id)
             && task.owner == owner
             && task.kind == TaskKind::Connect
-            && task.cancellation.load(Ordering::Acquire)
+            && (owner_changed || task.cancellation.load(Ordering::Acquire))
             && event["event"] == "succeeded"
         {
             event["event"] = serde_json::json!("cancelled");
@@ -333,6 +367,7 @@ impl DaemonRuntime {
             task.timed_out = true;
             task.cancellation.store(true, Ordering::Release);
             CancelledTask {
+                nm: Arc::clone(&task.nm),
                 kind: task.kind,
                 target_ssid: task.target_ssid.clone(),
             }
@@ -405,6 +440,7 @@ impl DaemonRuntime {
             Box::new(move |nm| {
                 let application = Application::new(nm);
                 match application.status_snapshot().and_then(|status| {
+                    nm.ensure_current_owner()?;
                     let response = api_data_value(
                         Method::WifiStatus.spec().response_key,
                         &status,
@@ -414,7 +450,7 @@ impl DaemonRuntime {
                 }) {
                     Ok((response, status)) => {
                         if let Some(runtime) = runtime.upgrade() {
-                            runtime.store_status(generation, response.clone());
+                            runtime.store_status(generation, response.clone(), nm.destination());
                         }
                         // Release the interactive response before filesystem
                         // cache maintenance, which is only best-effort state.
@@ -433,20 +469,22 @@ impl DaemonRuntime {
     }
 
     fn cached_status(&self) -> Option<Value> {
+        let owner = self.nm.current_owner().ok();
         let mut cached = recover_lock(&self.status_cache, "Wi-Fi status cache");
-        if cached
-            .as_ref()
-            .is_some_and(|status| status.recorded_at.elapsed() <= STATUS_CACHE_TTL)
-        {
+        if cached.as_ref().is_some_and(|status| {
+            Some(status.nm_owner.as_str()) == owner.as_deref()
+                && status.recorded_at.elapsed() <= STATUS_CACHE_TTL
+        }) {
             return cached.as_ref().map(|status| status.response.clone());
         }
         cached.take();
         None
     }
 
-    fn store_status(&self, generation: usize, response: Value) {
+    fn store_status(&self, generation: usize, response: Value, nm_owner: &str) {
         if self.status_generation.load(Ordering::Acquire) == generation {
             *recover_lock(&self.status_cache, "Wi-Fi status cache") = Some(CachedStatus {
+                nm_owner: nm_owner.to_owned(),
                 recorded_at: Instant::now(),
                 response,
             });
@@ -489,8 +527,12 @@ impl DaemonRuntime {
     where
         T: Send + 'static,
     {
-        let nm = Arc::clone(&self.nm);
-        lane.call(operation, move || task(&nm))
+        let nm = self.nm.scoped()?;
+        lane.call(operation, move || {
+            let result = task(&nm)?;
+            nm.ensure_current_owner()?;
+            Ok(result)
+        })
     }
 
     pub(crate) fn begin_connect_attempt(
@@ -508,18 +550,23 @@ impl DaemonRuntime {
         target_ssid: Option<Vec<u8>>,
         task: impl FnOnce(&Nm, &AtomicBool, &str) + Send + 'static,
     ) -> Result<String> {
+        let nm = self.nm.scoped()?;
         let registration = TaskRegistration::new(
             self,
             next_request_id(request_prefix),
             kind,
             owner,
             target_ssid,
+            Arc::clone(&nm),
         );
         let request_id = registration.request_id.clone();
-        self.submit(
+        self.work.try_submit(
             kind.operation(),
-            Box::new(move |nm| {
-                task(nm, &registration.cancellation, &registration.request_id);
+            Box::new(move || {
+                if nm.ensure_current_owner().is_err() {
+                    registration.cancellation.store(true, Ordering::Release);
+                }
+                task(&nm, &registration.cancellation, &registration.request_id);
             }),
         )?;
         if kind == TaskKind::Connect {
@@ -634,6 +681,7 @@ impl DaemonRuntime {
             .map(|task| {
                 task.cancellation.store(true, Ordering::Relaxed);
                 CancelledTask {
+                    nm: Arc::clone(&task.nm),
                     kind: task.kind,
                     target_ssid: task.target_ssid.as_ref().map(Arc::clone),
                 }
@@ -641,24 +689,33 @@ impl DaemonRuntime {
     }
 
     fn abort_cancelled_connect(&self, request_id: &str, task: Option<&CancelledTask>) {
-        let Some(target_ssid) = task
-            .filter(|task| task.kind == TaskKind::Connect)
-            .and_then(|task| task.target_ssid.as_ref().map(Arc::clone))
-        else {
+        let Some(task) = task.filter(|task| task.kind == TaskKind::Connect) else {
             return;
         };
-        if let Err(error) = self.submit_activation_abort(request_id.to_string(), target_ssid) {
+        let Some(target_ssid) = task.target_ssid.as_ref().map(Arc::clone) else {
+            return;
+        };
+        if let Err(error) =
+            self.submit_activation_abort(request_id.to_string(), target_ssid, Arc::clone(&task.nm))
+        {
             tracing::warn!(error = %crate::error::err_chain(&error), "could not queue activation abort");
         }
     }
 
-    fn submit_activation_abort(&self, request_id: String, target_ssid: Arc<[u8]>) -> Result<()> {
-        self.submit_fast(
+    fn submit_activation_abort(
+        &self,
+        request_id: String,
+        target_ssid: Arc<[u8]>,
+        nm: Arc<Nm>,
+    ) -> Result<()> {
+        self.fast_work.try_submit(
             ErrorOperation::Disconnect,
-            Box::new(move |nm| {
+            Box::new(move || {
                 log_activation_abort(
                     &request_id,
-                    Application::new(nm).disconnect_wifi_for_ssid(&target_ssid),
+                    nm.ensure_current_owner().and_then(|()| {
+                        Application::new(&nm).disconnect_wifi_for_ssid(&target_ssid)
+                    }),
                 )
             }),
         )
@@ -706,6 +763,7 @@ impl DaemonRuntime {
                 (
                     request_id.clone(),
                     CancelledTask {
+                        nm: Arc::clone(&task.nm),
                         kind: task.kind,
                         target_ssid: task.target_ssid.as_ref().map(Arc::clone),
                     },
@@ -841,7 +899,16 @@ impl DaemonRuntime {
         operation: ErrorOperation,
         job: Job,
     ) -> Result<()> {
-        let nm = Arc::clone(&self.nm);
+        // This path is also called by the async subscription loop. Never make
+        // blocking D-Bus calls there; the lifecycle worker primes this scope.
+        let nm = self.nm.cached_scope().ok_or_else(|| {
+            crate::error::DomainError::new(
+                crate::error::ErrorCode::NetworkmanagerUnavailable,
+                operation,
+                crate::error::ErrorSource::NetworkManager,
+                "NetworkManager is unavailable",
+            )
+        })?;
         lane.try_submit(operation, Box::new(move || job(&nm)))
     }
 }
@@ -1033,6 +1100,7 @@ mod tests {
                 super::TaskKind::Scan,
                 None,
                 None,
+                runtime.nm.scoped().unwrap(),
             )
         };
         let stale = register();

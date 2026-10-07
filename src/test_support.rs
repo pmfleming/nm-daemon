@@ -1,6 +1,7 @@
 use std::os::unix::net::UnixStream;
 use std::thread;
 
+pub(crate) mod bus;
 pub(crate) mod performance;
 pub(crate) mod workflows;
 

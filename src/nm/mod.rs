@@ -90,8 +90,12 @@ pub(super) struct RadioRestoreState {
 pub(crate) struct Nm {
     conn: Connection,
     destination: String,
-    root_proxy: Proxy<'static>,
-    settings_proxy: Proxy<'static>,
+    service_name: String,
+    scope: Mutex<Option<Arc<Nm>>>,
+    // Store async handles so dropping an owner scope on an async control path
+    // cannot invoke the blocking proxy destructor's nested runtime.
+    root_proxy: zbus::Proxy<'static>,
+    settings_proxy: zbus::Proxy<'static>,
     commands: Arc<dyn CommandRunner>,
     events: Arc<events::NetworkEvents>,
     wireless_telemetry: Arc<dyn WirelessTelemetry>,
@@ -124,21 +128,34 @@ impl Nm {
         wireless_telemetry: Arc<dyn WirelessTelemetry>,
     ) -> Result<Self> {
         let destination = destination.into();
-        let proxy = |path: &str, interface: &str| {
-            Proxy::new_owned(
-                conn.clone(),
-                destination.clone(),
-                path.to_string(),
-                interface.to_string(),
-            )
-            .map_err(|error| ensure_domain(ErrorOperation::CreateDbusProxy, error.into()))
-        };
-        let root_proxy = proxy(NM_PATH, NM_IFACE)?;
-        let settings_proxy = proxy(SETTINGS_PATH, SETTINGS_IFACE)?;
+        let events = events::NetworkEvents::start(conn.clone(), destination.clone());
+        Self::from_parts(
+            conn,
+            commands,
+            destination.clone(),
+            destination,
+            wireless_telemetry,
+            events,
+        )
+    }
+
+    fn from_parts(
+        conn: Connection,
+        commands: Arc<dyn CommandRunner>,
+        destination: String,
+        service_name: String,
+        wireless_telemetry: Arc<dyn WirelessTelemetry>,
+        events: Arc<events::NetworkEvents>,
+    ) -> Result<Self> {
+        let root_proxy = uncached_proxy(&conn, &destination, NM_PATH, NM_IFACE)?.into_inner();
+        let settings_proxy =
+            uncached_proxy(&conn, &destination, SETTINGS_PATH, SETTINGS_IFACE)?.into_inner();
         Ok(Self {
-            events: events::NetworkEvents::start(conn.clone()),
+            events,
             conn,
             destination,
+            service_name,
+            scope: Mutex::new(None),
             root_proxy,
             settings_proxy,
             commands,
@@ -148,6 +165,69 @@ impl Nm {
             statistics: statistics::StatisticsRefresh::default(),
             scan_schedule: scan_schedule::ScanScheduler::default(),
         })
+    }
+
+    /// Resolve without activating NM. An operation retains this unique owner
+    /// through retries, cancellation and rollback, including time spent queued.
+    pub(crate) fn scoped(&self) -> Result<Arc<Self>> {
+        let owner = self.current_owner()?;
+        let mut scope = recover_lock(&self.scope);
+        if let Some(nm) = scope.as_ref().filter(|nm| nm.destination == owner) {
+            return Ok(Arc::clone(nm));
+        }
+        let nm = Arc::new(Self::from_parts(
+            self.conn.clone(),
+            Arc::clone(&self.commands),
+            owner,
+            self.service_name.clone(),
+            Arc::clone(&self.wireless_telemetry),
+            Arc::clone(&self.events),
+        )?);
+        *scope = Some(Arc::clone(&nm));
+        Ok(nm)
+    }
+
+    pub(crate) fn current_owner(&self) -> Result<String> {
+        // An explicitly supplied unique peer cannot be replaced. This also
+        // supports point-to-point test transports without a bus daemon.
+        if self.service_name.starts_with(':') {
+            return Ok(self.service_name.clone());
+        }
+        let bus = zbus::blocking::fdo::DBusProxy::new(&self.conn)?;
+        Ok(bus
+            .get_name_owner(self.service_name.as_str().try_into()?)?
+            .to_string())
+    }
+
+    pub(crate) fn destination(&self) -> &str {
+        &self.destination
+    }
+
+    pub(crate) fn ensure_current_owner(&self) -> Result<()> {
+        if self.destination.starts_with(':') && self.current_owner()? != self.destination {
+            return Err(crate::error::DomainError::cancelled(
+                "NetworkManager changed during the operation",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cached_scope(&self) -> Option<Arc<Self>> {
+        recover_lock(&self.scope).as_ref().map(Arc::clone)
+    }
+
+    pub(crate) fn invalidate_owner_state(&self, owner: Option<&str>) {
+        self.events.clear_health();
+        let mut scope = recover_lock(&self.scope);
+        if scope
+            .as_ref()
+            .is_some_and(|nm| Some(nm.destination()) != owner)
+        {
+            scope.take();
+        }
+        drop(scope);
+        self.wake_waiters();
     }
 
     pub(crate) fn connection(&self) -> Connection {
@@ -191,7 +271,9 @@ impl Nm {
         subject: HealthSubject,
         path: &str,
     ) -> Option<HealthSignal> {
-        self.events.latest_health(subject, path)
+        self.events
+            .latest_health(subject, path)
+            .filter(|signal| signal.owner == self.destination)
     }
 
     pub(crate) fn latest_detailed_health_signal(
@@ -199,7 +281,9 @@ impl Nm {
         subject: HealthSubject,
         path: &str,
     ) -> Option<HealthSignal> {
-        self.events.latest_detailed_health(subject, path)
+        self.events
+            .latest_detailed_health(subject, path)
+            .filter(|signal| signal.owner == self.destination)
     }
 
     pub(crate) fn wake_waiters(&self) {
@@ -208,26 +292,21 @@ impl Nm {
     }
 
     pub(super) fn root_proxy(&self) -> Proxy<'static> {
-        self.root_proxy.clone()
+        self.root_proxy.clone().into()
     }
 
     pub(super) fn settings_proxy(&self) -> Proxy<'static> {
-        self.settings_proxy.clone()
+        self.settings_proxy.clone().into()
     }
 
     pub(super) fn proxy<'a>(&'a self, path: &'a str, iface: &'a str) -> Result<Proxy<'a>> {
-        Proxy::new(&self.conn, self.destination.as_str(), path, iface)
-            .map_err(|error| ensure_domain(ErrorOperation::CreateDbusProxy, error.into()))
+        self.ensure_current_owner()?;
+        uncached_proxy(&self.conn, &self.destination, path, iface)
     }
 
     pub(super) fn owned_proxy(&self, path: &str, iface: &str) -> Result<Proxy<'static>> {
-        Proxy::new_owned(
-            self.conn.clone(),
-            self.destination.clone(),
-            path.to_string(),
-            iface.to_string(),
-        )
-        .map_err(|error| ensure_domain(ErrorOperation::CreateDbusProxy, error.into()))
+        self.ensure_current_owner()?;
+        uncached_proxy(&self.conn, &self.destination, path, iface)
     }
 
     pub(super) fn proxy_path<'a>(
@@ -237,6 +316,21 @@ impl Nm {
     ) -> Result<Proxy<'a>> {
         self.proxy(path.as_str(), iface)
     }
+}
+
+fn uncached_proxy(
+    conn: &Connection,
+    destination: &str,
+    path: &str,
+    interface: &str,
+) -> Result<Proxy<'static>> {
+    zbus::blocking::proxy::Builder::new(conn)
+        .destination(destination.to_owned())?
+        .path(path.to_owned())?
+        .interface(interface.to_owned())?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .map_err(|error| ensure_domain(ErrorOperation::CreateDbusProxy, error.into()))
 }
 
 fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

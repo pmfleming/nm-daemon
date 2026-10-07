@@ -80,7 +80,10 @@ fn run_hotspot_worker(
     events.phase("started", "preparing");
     events.phase("progress", "activating");
 
-    match Application::new(nm).start_hotspot(request, Some(cancellation)) {
+    match Application::new(nm)
+        .start_hotspot(request, Some(cancellation))
+        .and_then(|result| nm.ensure_current_owner().map(|()| result))
+    {
         Ok(result) if cancellation.load(Ordering::Relaxed) => {
             // A late success must not leave a cancelled hotspot broadcasting.
             let stopped = Application::new(nm).stop_hotspot();

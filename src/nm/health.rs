@@ -72,6 +72,10 @@ pub(crate) struct NetworkHealthEvent {
 
 impl Nm {
     pub(crate) fn network_health_event(&self, signal: &HealthSignal) -> Result<NetworkHealthEvent> {
+        anyhow::ensure!(
+            signal.owner == self.destination,
+            "health signal belongs to an old NetworkManager owner"
+        );
         let (state_name, previous_state_name, reason) = describe(signal);
         let transition_kind = classify_transition(signal, reason);
         let mut event = NetworkHealthEvent {
@@ -382,6 +386,7 @@ mod tests {
         reason: u32,
     ) -> HealthSignal {
         HealthSignal {
+            owner: ":1.0".into(),
             subject,
             path: "/object/1".to_string(),
             state,
