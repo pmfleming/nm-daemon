@@ -345,12 +345,17 @@ fn emit_connect_event(
     if let Some(runtime) = terminal_runtime.upgrade() {
         let event = event_value(STREAM, Some(request_id), name, data.clone());
         if terminal {
-            runtime.store_terminal_result(
+            let stored = runtime.store_terminal_result(
                 request_id,
                 terminal_owner.map(ToString::to_string),
                 STREAM,
                 event,
             );
+            let terminal_name = stored["event"].as_str().unwrap_or(name).to_string();
+            // Delivery failure must not overwrite authoritative completion with
+            // an unrelated transport error; operation.status can replay it.
+            emit_json_event_nonfatal(emitter, STREAM, Some(request_id), &terminal_name, stored);
+            return Ok(());
         } else {
             runtime.store_connect_progress(request_id, terminal_owner, event);
         }

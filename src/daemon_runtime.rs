@@ -336,14 +336,39 @@ impl DaemonRuntime {
         request_id: &str,
         owner: Option<String>,
         stream: Stream,
-        event: Value,
-    ) {
+        mut event: Value,
+    ) -> Value {
+        // Completion and cancellation share one linearization point. If the
+        // cancellation won, a just-computed success cannot authorize portal
+        // launch while the queued abort disconnects its link.
+        let tasks = recover_lock(&self.tasks, "daemon task map");
+        if let Some(task) = tasks.get(request_id)
+            && task.owner == owner
+            && task.kind == TaskKind::Connect
+            && task.cancellation.load(Ordering::Acquire)
+            && event["event"] == "succeeded"
+        {
+            event["event"] = serde_json::json!("cancelled");
+            event["phase"] = serde_json::json!("cancelled");
+            event["message"] = serde_json::json!(if task.timed_out {
+                "Connection attempt timed out and was cancelled"
+            } else {
+                "Connection cancelled"
+            });
+            if let Some(object) = event.as_object_mut() {
+                object.remove("result");
+            }
+        }
         let mut results = recover_lock(&self.terminal_results, "terminal request results");
         results.record(
             request_id.to_string(),
             owner,
-            TerminalRequestResult { stream, event },
+            TerminalRequestResult {
+                stream,
+                event: event.clone(),
+            },
         );
+        event
     }
 
     pub(crate) fn request_status(&self, request_id: &str, owner: Option<&str>) -> Value {
@@ -740,6 +765,11 @@ impl DaemonRuntime {
         recover_lock(&self.tasks, "daemon task map")
             .get(request_id)
             .filter(|task| task.owner.as_deref() == owner)
+            .filter(|task| {
+                recover_lock(&self.terminal_results, "terminal request results")
+                    .get_owned(request_id, task.owner.as_deref())
+                    .is_none()
+            })
             .map(|task| {
                 task.cancellation.store(true, Ordering::Relaxed);
                 CancelledTask {
@@ -804,7 +834,12 @@ impl DaemonRuntime {
     fn cancel_tasks_for_owner(&self, owner: &str) -> Vec<(String, CancelledTask)> {
         recover_lock(&self.tasks, "daemon task map")
             .iter()
-            .filter(|(_, task)| task.owner.as_deref() == Some(owner))
+            .filter(|(request_id, task)| {
+                task.owner.as_deref() == Some(owner)
+                    && recover_lock(&self.terminal_results, "terminal request results")
+                        .get_owned(request_id, Some(owner))
+                        .is_none()
+            })
             .map(|(request_id, task)| {
                 task.cancellation.store(true, Ordering::Relaxed);
                 (
@@ -1105,11 +1140,19 @@ mod tests {
                 assert_eq!(status["status"], "running");
                 assert_eq!(status["timed_out"], true);
                 assert_eq!(status["cancellation_requested"], true);
-                runtime.store_terminal_result(
+                let terminal = runtime.store_terminal_result(
                     &id,
                     Some("owner".into()),
                     Stream::WifiConnect,
-                    json!({"request_id":id, "event":"cancelled"}),
+                    json!({"request_id":id, "event":"succeeded", "result":{"suggest_open_portal":true}}),
+                );
+                assert_eq!(
+                    terminal["event"], "cancelled",
+                    "deadline won the completion race"
+                );
+                assert!(
+                    terminal.get("result").is_none(),
+                    "cancelled operation cannot authorize a portal"
                 );
                 runtime.expire_connect(&id);
                 assert_eq!(
@@ -1137,12 +1180,21 @@ mod tests {
                     json!({"request_id":completed, "event":"succeeded"}),
                 );
                 runtime.expire_connect(&completed);
+                assert!(runtime.cancel_task(&completed, Some("owner")).is_none());
+                assert!(
+                    runtime
+                        .cancel_tasks_for_owner("owner")
+                        .iter()
+                        .all(|(id, _)| id != &completed)
+                );
                 assert!(
                     !super::recover_lock(&runtime.tasks, "test tasks")[&completed]
                         .cancellation
                         .load(std::sync::atomic::Ordering::Acquire)
                 );
                 release.send(())?;
+                tokio::runtime::Handle::current().block_on(runtime.shutdown());
+                drop(runtime);
                 Ok(())
             },
         )

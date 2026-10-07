@@ -33,7 +33,11 @@ queues the existing target-scoped activation abort. It does **not** discard the
 task or admit another attempt before the worker unwinds. A stuck underlying D-Bus
 call may still delay acknowledgement; clients must report that honestly rather
 than infer completion from the deadline. Completed requests are never cancelled
-by the later deadline timer.
+by the later deadline timer. Completion and cancellation share a task-map
+linearization point: if cancellation wins, a concurrently computed success is
+published/stored as cancelled without portal proof; if completion wins, late
+cancellation cannot queue an activation abort. Terminal signal delivery failure
+does not replace the retained outcome with a transport error.
 
 Clients can recover after event gaps or a quiet interval using `operation.status`.
 Only an owned terminal result releases their pending connection state. Unknown,
