@@ -1117,6 +1117,32 @@ mod tests {
                     "finished"
                 );
                 release.send(())?;
+
+                // A terminal signal can precede worker teardown. Its later
+                // deadline must not disconnect the successfully established link.
+                let (release, wait) = std::sync::mpsc::channel();
+                let completed = runtime.start_cancellable(
+                    "connect",
+                    TaskKind::Connect,
+                    Some("owner".into()),
+                    None,
+                    move |_, _, _| {
+                        let _ = wait.recv_timeout(std::time::Duration::from_secs(5));
+                    },
+                )?;
+                runtime.store_terminal_result(
+                    &completed,
+                    Some("owner".into()),
+                    Stream::WifiConnect,
+                    json!({"request_id":completed, "event":"succeeded"}),
+                );
+                runtime.expire_connect(&completed);
+                assert!(
+                    !super::recover_lock(&runtime.tasks, "test tasks")[&completed]
+                        .cancellation
+                        .load(std::sync::atomic::Ordering::Acquire)
+                );
+                release.send(())?;
                 Ok(())
             },
         )
