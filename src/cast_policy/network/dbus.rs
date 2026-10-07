@@ -17,7 +17,7 @@ fn path(value: &str) -> OwnedObjectPath {
     value.try_into().unwrap()
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct State {
     saved: i32,
     applied: i32,
@@ -25,7 +25,20 @@ struct State {
     reads: u64,
     version_race: bool,
     active_race: bool,
+    state_race: bool,
+    zero_version: bool,
     fail: bool,
+}
+
+impl State {
+    fn enabled() -> Self {
+        Self {
+            saved: 1,
+            applied: 1,
+            state: 100,
+            ..Self::default()
+        }
+    }
 }
 
 struct Bus;
@@ -54,7 +67,12 @@ impl Device {
     }
     #[zbus(property)]
     fn state(&self) -> u32 {
-        self.0.lock().unwrap().state
+        let state = self.0.lock().unwrap();
+        if state.state_race && state.reads > 0 {
+            110
+        } else {
+            state.state
+        }
     }
     #[zbus(property)]
     fn active_connection(&self) -> OwnedObjectPath {
@@ -71,7 +89,13 @@ impl Device {
         state.reads += 1;
         (
             settings(state.applied),
-            if state.version_race { state.reads } else { 7 },
+            if state.zero_version {
+                0
+            } else if state.version_race {
+                state.reads
+            } else {
+                7
+            },
         )
     }
 }
@@ -108,79 +132,115 @@ fn snapshots_use_fresh_saved_and_applied_policy_and_reject_races() -> Result<()>
     )
 }
 
-fn run() -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let _entered = runtime.enter();
-    // org.freedesktop.DBus is treated as a reserved unique name by zbus. This
-    // peer serves both the name-owner lookup and the scripted NM objects.
-    let peer = TestPeer::new("org.freedesktop.DBus", ":1.1");
-    let state = Arc::new(Mutex::new(State::default()));
-    peer.server
-        .object_server()
-        .at("/org/freedesktop/DBus", Bus)?;
-    peer.server.object_server().at(NM_PATH, Manager)?;
-    peer.server
-        .object_server()
-        .at(DEVICE, Device(state.clone()))?;
-    peer.server.object_server().at(ACTIVE, Active)?;
-    peer.server
-        .object_server()
-        .at(PROFILE, Saved(state.clone()))?;
-    let wifi = BTreeSet::from(["wlan0".to_string()]);
-    // Reuse the connection across policy changes to detect accidental property caching.
-    for (saved, applied, device_state, version_race, active_race, fail, expected) in [
-        (1, 1, 100, false, false, false, true),
-        (0, 1, 100, false, false, false, false),
-        (1, 0, 100, false, false, false, false),
-        (2, 2, 100, false, false, false, true),
-        (-1, 1, 100, false, false, false, false),
-        (1, 1, 90, false, false, false, false),
-        (1, 1, 110, false, false, false, false),
-        (1, 1, 100, true, false, false, false),
-        (1, 1, 100, false, true, false, false),
-        (1, 1, 100, false, false, true, false),
-    ] {
-        *state.lock().unwrap() = State {
-            saved,
-            applied,
-            state: device_state,
-            reads: 0,
-            version_race,
-            active_race,
-            fail,
-        };
-        let result = runtime.block_on(async {
+struct Fixture {
+    peer: TestPeer,
+    state: Arc<Mutex<State>>,
+    wifi: BTreeSet<String>,
+}
+
+impl Fixture {
+    fn new() -> Result<Self> {
+        // The isolated test harness owns the Tokio runtime. The reserved unique
+        // name lets this peer serve both owner lookup and scripted NM objects.
+        let peer = TestPeer::new("org.freedesktop.DBus", ":1.1");
+        let state = Arc::new(Mutex::new(State::enabled()));
+        let server = peer.server.object_server();
+        server.at("/org/freedesktop/DBus", Bus)?;
+        server.at(NM_PATH, Manager)?;
+        server.at(DEVICE, Device(Arc::clone(&state)))?;
+        server.at(ACTIVE, Active)?;
+        server.at(PROFILE, Saved(Arc::clone(&state)))?;
+        drop(server);
+        Ok(Self {
+            peer,
+            state,
+            wifi: BTreeSet::from(["wlan0".to_string()]),
+        })
+    }
+
+    fn snapshot(&self, wifi: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+        tokio::runtime::Handle::current().block_on(async {
             tokio::time::timeout(
                 std::time::Duration::from_secs(4),
-                enabled_interfaces(peer.client.inner(), &wifi),
+                enabled_interfaces(self.peer.client.inner(), wifi),
             )
-            .await
-        })?;
-        if fail {
-            assert!(result.is_err());
-        } else {
-            assert_eq!(
-                result?,
-                if expected {
-                    wifi.clone()
-                } else {
-                    BTreeSet::new()
-                }
-            );
-        }
+            .await?
+        })
     }
-    // A NM device not identified as a Linux Wi-Fi interface cannot be enabled.
-    let result = runtime.block_on(enabled_interfaces(peer.client.inner(), &BTreeSet::new()))?;
-    assert!(result.is_empty());
-    peer.server
+
+    fn check(&self, state: State, enabled: bool) -> Result<()> {
+        *self.state.lock().unwrap() = state;
+        let actual = self.snapshot(&self.wifi)?;
+        let empty = BTreeSet::new();
+        assert_eq!(
+            &actual,
+            if enabled { &self.wifi } else { &empty },
+            "{:?}",
+            self.state.lock().unwrap()
+        );
+        Ok(())
+    }
+}
+
+fn run() -> Result<()> {
+    let fixture = Fixture::new()?;
+    // Reusing the same connection detects accidental property caching.
+    for (saved, applied, enabled) in [
+        (1, 1, true),
+        (0, 1, false),
+        (1, 0, false),
+        (2, 2, true),
+        (-1, 1, false),
+    ] {
+        fixture.check(
+            State {
+                saved,
+                applied,
+                ..State::enabled()
+            },
+            enabled,
+        )?;
+    }
+    for state in [
+        State {
+            state: 90,
+            ..State::enabled()
+        },
+        State {
+            state: 110,
+            ..State::enabled()
+        },
+        State {
+            version_race: true,
+            ..State::enabled()
+        },
+        State {
+            active_race: true,
+            ..State::enabled()
+        },
+        State {
+            state_race: true,
+            ..State::enabled()
+        },
+        State {
+            zero_version: true,
+            ..State::enabled()
+        },
+    ] {
+        fixture.check(state, false)?;
+    }
+    *fixture.state.lock().unwrap() = State {
+        fail: true,
+        ..State::enabled()
+    };
+    assert!(fixture.snapshot(&fixture.wifi).is_err());
+    // Unknown Linux interfaces stay closed even if the saved-profile read fails.
+    assert!(fixture.snapshot(&BTreeSet::new())?.is_empty());
+    fixture
+        .peer
+        .server
         .object_server()
         .remove::<Bus, _>("/org/freedesktop/DBus")?;
-    assert!(
-        runtime
-            .block_on(enabled_interfaces(peer.client.inner(), &wifi))
-            .is_err()
-    );
+    assert!(fixture.snapshot(&fixture.wifi).is_err());
     Ok(())
 }

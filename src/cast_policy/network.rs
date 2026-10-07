@@ -180,5 +180,17 @@ mod tests {
             ));
         }
         assert!(!mdns_enabled(&ConnectionSettings::new()));
+        for value in [
+            owned_value(1_u32).unwrap(),
+            owned_value(true).unwrap(),
+            owned_value("1".to_string()).unwrap(),
+        ] {
+            let malformed =
+                ConnectionSettings::from([("connection".into(), [("mdns".into(), value)].into())]);
+            assert!(
+                !mdns_enabled(&malformed),
+                "wrong D-Bus types must fail closed"
+            );
+        }
     }
 }
