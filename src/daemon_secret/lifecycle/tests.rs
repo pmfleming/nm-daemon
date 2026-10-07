@@ -6,7 +6,10 @@ use anyhow::Result;
 use zbus::blocking::{Connection, Proxy};
 use zvariant::OwnedObjectPath;
 
-use super::super::{REGISTERED, SECRET_AGENT_OBJECT_PATH, with_pending_registry};
+use super::super::{REGISTERED, with_pending_registry};
+
+// Independent NM ABI expectation: do not reuse the production constant here.
+const SECRET_AGENT_OBJECT_PATH: &str = "/org/freedesktop/NetworkManager/SecretAgent";
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::ErrorOperation;
 use crate::nm::{ConnectionSettings, NM_DEST, Nm};

@@ -1459,7 +1459,7 @@ fn forget_result_fixture() -> Value {
 fn secret_capabilities_fixture() -> Value {
     json!({
         "registered": true,
-        "agent_path": "/org/laufan/NmDaemon/SecretAgent",
+        "agent_path": crate::daemon_secret::SECRET_AGENT_OBJECT_PATH,
         "keyring": {
             "available": true,
             "persistence_supported": true,

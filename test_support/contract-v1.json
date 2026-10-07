@@ -932,7 +932,7 @@
   },
   "secret_capabilities": {
     "secret_agent": {
-      "agent_path": "/org/laufan/NmDaemon/SecretAgent",
+      "agent_path": "/org/freedesktop/NetworkManager/SecretAgent",
       "events": {
         "implemented": true,
         "persistence_outcomes": true,

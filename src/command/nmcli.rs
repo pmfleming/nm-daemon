@@ -15,6 +15,18 @@ impl<'a> Nmcli<'a> {
         Self { runner }
     }
 
+    pub(crate) fn version(&self) -> Result<String> {
+        let request = CommandRequest::new("nmcli", ErrorOperation::Status, NMCLI_QUERY_TIMEOUT)
+            .args(["--version"]);
+        let output = self
+            .runner
+            .run(&request, None)
+            .map_err(|failure| failure.into_domain())?;
+        parse_nmcli_version(&output.stdout)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("nmcli returned an unrecognized version string"))
+    }
+
     pub(crate) fn device_ip4(
         &self,
         iface: &str,
@@ -129,6 +141,17 @@ fn split_fields(line: &str) -> Vec<String> {
     fields
 }
 
+fn parse_nmcli_version(output: &str) -> Option<&str> {
+    // The explanatory prefix is localized; NM_VERSION itself is not.
+    (output.trim().lines().count() == 1).then_some(())?;
+    output.split_whitespace().last().filter(|version| {
+        version.as_bytes().first().is_some_and(u8::is_ascii_digit)
+            && version
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-+_~".contains(&byte))
+    })
+}
+
 fn parse_cidr(value: &str) -> (String, Option<u32>) {
     let (address, prefix) = value.split_once('/').unwrap_or((value, ""));
     (address.to_string(), prefix.parse().ok())
@@ -136,7 +159,27 @@ fn parse_cidr(value: &str) -> (String, Option<u32>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_active_wifi_row, parse_device_ip4};
+    use super::{parse_active_wifi_row, parse_device_ip4, parse_nmcli_version};
+
+    #[test]
+    fn version_output_preserves_development_suffix_and_tolerates_localized_prefix() {
+        assert_eq!(
+            parse_nmcli_version("nmcli tool, version 1.59.2-dev\n"),
+            Some("1.59.2-dev")
+        );
+        assert_eq!(
+            parse_nmcli_version("nmcli Werkzeug, Version 1.58.1"),
+            Some("1.58.1")
+        );
+        for output in [
+            "",
+            "nmcli tool, version",
+            "1.58.1\n1.59.2",
+            "version 1.58.1/other",
+        ] {
+            assert_eq!(parse_nmcli_version(output), None);
+        }
+    }
 
     #[test]
     fn ip4_addresses_keep_primary_and_skip_only_invalid_prefix_entries() {

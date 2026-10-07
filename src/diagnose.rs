@@ -1,3 +1,5 @@
+mod versions;
+
 use anyhow::{Context, Result};
 use serde::Serialize;
 
@@ -9,6 +11,7 @@ use crate::nm::Nm;
 #[derive(Serialize)]
 struct ParityReport {
     summary: ParitySummary,
+    versions: versions::Versions,
     checks: Vec<ParityCheck>,
     nm_api: NmApiSnapshot,
     nmcli: NmcliSnapshot,
@@ -89,10 +92,14 @@ fn build_report(nm: &Nm) -> Result<ParityReport> {
         active_network,
         remembered_network_count,
     };
-    let checks = parity_checks(&nm_api, &nmcli);
+    let versions =
+        versions::Versions::collect(nm.version(), Nmcli::new(nm.command_runner()).version());
+    let mut checks = parity_checks(&nm_api, &nmcli);
+    checks.push(versions.check());
     let summary = summarize(&checks);
     Ok(ParityReport {
         summary,
+        versions,
         checks,
         nm_api,
         nmcli,
@@ -320,6 +327,22 @@ fn print_text_report(report: &ParityReport) {
         report.summary.fail,
         report.summary.unknown
     );
+    println!(
+        "running NetworkManager: {}; installed nmcli: {}",
+        report
+            .versions
+            .running_networkmanager
+            .as_deref()
+            .unwrap_or("unknown"),
+        report
+            .versions
+            .installed_nmcli
+            .as_deref()
+            .unwrap_or("unknown")
+    );
+    for error in &report.versions.errors {
+        println!("version warning: {error}");
+    }
     for check in &report.checks {
         println!(
             "{}\t{}\t{}\tnm-daemon={}\tnmcli={}\t{}",

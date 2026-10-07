@@ -54,6 +54,14 @@ installation checks passed. NixOS evaluation selected 1.58.1 without enabling
 the service. Runtime IWD/EAP and cross-version tests belong to the VM gate; this
 build alone is not evidence of successful live Wi-Fi authentication.
 
+## Compatibility and diagnostics
+
+See the [pinned compatibility gates](networkmanager-compatibility.md) for minimum,
+patched-stable and development targets across wpa_supplicant/IWD, test scope and
+commands. `debug diagnose` now reports running D-Bus NM and installed nmcli
+versions separately. The development package is test-only **1.59.2-dev**, not a
+released 1.60 or the production module's default.
+
 ## Legacy profiles and existing IWD files
 
 Use the [explicit migration runbook and read-only preflight](profile-migration.md)

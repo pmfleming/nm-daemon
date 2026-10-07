@@ -95,7 +95,7 @@ services.nm-cast-policy.enable = true;
 ```
 
 This installs the system service, system-bus policy and dispatcher hooks; starts
-it before NetworkManager and checks its readiness before NM starts; configures `dns=systemd-resolved`, default `mdns=0`, and
+it before NetworkManager and checks its readiness before NM starts; configures `dns=systemd-resolved`, default `connection.mdns=0` in NetworkManager.conf's `[connection]` section, and
 resolved `MulticastDNS=resolve`; and permits discovery replies through either
 NixOS firewall backend. `services.nm-cast-policy.openFirewall = false` leaves
 reply allowances to your own host firewall. No inbound Cast TCP ports are opened.
@@ -113,7 +113,10 @@ requires nftables/kernel support for inet input/output hooks and timed ifname se
 
 The global resolved setting is a ceiling: `no` vetoes per-link discovery; `resolve`
 permits resolution without hostname advertising. Inspect
-`NetworkManager --print-config` for conflicting connection overrides. Filename
+`NetworkManager --print-config` for conflicting connection overrides. The NixOS
+option is `networking.networkmanager.connectionConfig."connection.mdns" = 0`:
+bare `mdns=0` is valid in a profile keyfile but is ignored as an unknown global
+default key. Filename
 precedence is bytewise/ASCII, not numeric. Do not configure other firewall managers
 to flush the entire nft ruleset; NixOS module validation rejects
 `networking.nftables.flushRuleset = true`.

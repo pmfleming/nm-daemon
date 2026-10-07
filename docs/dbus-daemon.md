@@ -440,7 +440,7 @@ Validation is real, not cosmetic:
 
 ### `wifi.secret`
 
-SecretAgent registration is live when NetworkManager is available on the system bus. The daemon exports `/org/laufan/NmDaemon/SecretAgent` on the system bus, registers it with `org.freedesktop.NetworkManager.AgentManager`, and bridges `GetSecrets` to Shelllist through `wifi.secret` events. A frontend must hold an active `wifi.secret` subscription before the request begins; prompt events are directed only to those subscribers, and only an owner that received the prompt may answer it.
+SecretAgent registration is live when NetworkManager is available on the system bus. The daemon exports NetworkManager's required `/org/freedesktop/NetworkManager/SecretAgent` path on the system bus (registration alone does not validate that path), registers it with `org.freedesktop.NetworkManager.AgentManager`, and bridges `GetSecrets` to Shelllist through `wifi.secret` events. A frontend must hold an active `wifi.secret` subscription before the request begins; prompt events are directed only to those subscribers, and only an owner that received the prompt may answer it.
 
 Events:
 

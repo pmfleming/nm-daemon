@@ -78,6 +78,10 @@
         {
           default = nmDaemon;
           networkmanagerStable = import ./nix/networkmanager.nix { inherit pkgs; };
+          networkmanagerDevelopment = import ./nix/networkmanager.nix {
+            inherit pkgs;
+            development = true;
+          };
           upgradePreflight = pkgs.writeShellApplication {
             name = "nm-daemon-upgrade-preflight";
             runtimeInputs = [ pkgs.networkmanager ];
@@ -113,7 +117,42 @@
       nixosModules.networkManager = import ./nix/nixos-networkmanager.nix { inherit self; };
 
       checks = forAllSystems (
-        system: pkgs: {
+        system: pkgs:
+        let
+          targets = {
+            minimum =
+              assert pkgs.lib.assertMsg (
+                pkgs.networkmanager.version == "1.56.0"
+              ) "Update the minimum NM compatibility policy explicitly when changing Nixpkgs";
+              pkgs.networkmanager;
+            stable = self.packages.${system}.networkmanagerStable;
+            development = self.packages.${system}.networkmanagerDevelopment;
+          };
+          compatibility = builtins.listToAttrs (
+            pkgs.lib.concatMap (
+              target:
+              map
+                (backend: {
+                  name = "compat-${target}-${backend}";
+                  value = import ./nix/tests/compatibility.nix {
+                    inherit
+                      self
+                      pkgs
+                      target
+                      backend
+                      ;
+                    nmPackage = targets.${target};
+                  };
+                })
+                [
+                  "wpa_supplicant"
+                  "iwd"
+                ]
+            ) (builtins.attrNames targets)
+          );
+        in
+        compatibility
+        // {
           package = self.packages.${system}.default;
           connectParityProbe = self.packages.${system}.connectParityProbe;
           castPolicy = import ./nix/tests/cast-policy.nix { inherit self pkgs; };

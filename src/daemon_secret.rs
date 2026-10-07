@@ -22,7 +22,9 @@ use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
 use crate::variant::value_string;
 
-pub(crate) const SECRET_AGENT_OBJECT_PATH: &str = "/org/laufan/NmDaemon/SecretAgent";
+// AgentManager.Register accepts an identifier, not an object path. NM always
+// calls agents at this standardized path, even when registration succeeded.
+pub(crate) const SECRET_AGENT_OBJECT_PATH: &str = "/org/freedesktop/NetworkManager/SecretAgent";
 
 const AGENT_MANAGER_PATH: &str = "/org/freedesktop/NetworkManager/AgentManager";
 const AGENT_MANAGER_IFACE: &str = "org.freedesktop.NetworkManager.AgentManager";

@@ -13,7 +13,7 @@ Current status: the first high-impact parity gaps are closed. `debug diagnose` i
 | Active SSID | `nmcli -t -f IN-USE,SSID ... dev wifi list --rescan no` | `data.status.access_point.ssid` | Shelllist must highlight the connected network. |
 | Active BSSID | same | `data.status.access_point.bssid` | Exact AP selection among same-SSID APs. |
 | Active frequency | same | `data.status.access_point.frequency` | Detail pane should show the actual connected AP frequency. |
-| Active band | `nmcli -t -f IN-USE,BAND ... dev wifi list --rescan no` | `data.status.access_point.band` | Keeps the 2.4/5/6 GHz label aligned with nmcli 1.58. |
+| Active band | Derived from nmcli `FREQ` (also works on 1.56) | `data.status.access_point.band` | Keeps 2.4/5/6 GHz labels aligned without requiring the newer `BAND` field. |
 | Signal | same | `data.status.access_point.strength` | UI list/detail signal should agree with NetworkManager. |
 | IPv4 address | `nmcli -t device show <iface>` | `data.status.ip4.address` | Connection details card. |
 | Gateway | same | `data.status.ip4.gateway` | Connection details card. |
@@ -42,7 +42,18 @@ just connect-parity-probe --execute --order alternate --skip-needs-secret
 
 ## NetworkManager 1.58/1.60 review
 
-Latest review: GitHub `main` through [`8835a2f61f`](https://github.com/NetworkManager/NetworkManager/commit/8835a2f61faa41782b7e46428c43e4076a84f20e), fetched September 7, 2026 (`1.59.2-dev`, the 1.60 development cycle). The delta from the previous baseline `4f92885b8a` contains no changes to public D-Bus introspection or libnm public headers.
+Latest review: GitHub `main` through [`ed1f38cd449b`](https://github.com/NetworkManager/NetworkManager/commit/ed1f38cd449b32e935d994eed61600230cf4004b), reviewed October 7, 2026. This is still **1.59.2-dev**, not released 1.60. The delta from the September 7 baseline `8835a2f61f` changes no infrastructure-Wi-Fi D-Bus method signatures used here; P2P documentation and ifcfg-rh removal are separate concerns.
+
+### October upgrade alignment
+
+- [Pinned stable package](networkmanager-upgrade.md): released 1.58.1 with the IWD atomic-0600 creation and explicit PEAP-label-zero fixes. Those fixes require the host NM package, not just adapter changes. Existing IWD files need a separate metadata audit.
+- QR output removes all-hex wrapper quoting while retaining delimiter escaping and legacy quoted-input parsing.
+- NM owner replacement clears/re-registers SecretAgent state, cancels stale secrets and fences queued work, retries, rollback and terminal success to one unique owner. It neither replays mutations nor auto-starts deliberately stopped NM.
+- Enterprise creation/editing preserves explicit `phase1_peaplabel="0"`, supports deliberate empty clearing, and keeps private trust restrictions. A missing login identity can no longer silently turn a private creation request public.
+- [Explicit ifcfg-rh migration](profile-migration.md) happens on the old daemon; no adapter storage reimplementation or automatic migration.
+- [Compatibility gates](networkmanager-compatibility.md) cover pinned minimum/stable/development NM and both Wi-Fi backends, with additional PEAP and migration VMs. `debug diagnose` distinguishes the running D-Bus daemon version from installed nmcli; equal strings do not certify backports.
+
+The earlier September review followed.
 
 ### September 7 alignment
 
@@ -53,15 +64,15 @@ Latest review: GitHub `main` through [`8835a2f61f`](https://github.com/NetworkMa
 - **Volatile initrd profiles** ([`d1dad523c8`](https://github.com/NetworkManager/NetworkManager/commit/d1dad523c89544f31cec49b7094552cc467e62e0)): profile enumeration tolerates disappearance between `ListConnections` and `GetSettings`, confirming removal with a fresh list. It still reports authorization/transport errors for profiles that remain present; explicit lookups of deleted profiles still fail. nm-daemon does not enable `initrd-connections=volatile` or delete boot profiles itself.
 - **DHCP Router-option logging** (`5802110055`): core-owned. Gateway reporting continues to use NetworkManager's effective IP configuration/routes, not the raw DHCP Router option, which may be ignored when classless routes are supplied.
 - **Configuration precedence** (`d719485ade`): `conf.d` filenames are compared byte-by-byte, not numerically; later files override earlier values. See [mDNS discovery](mdns-discovery.md) for checking the effective default rather than assuming a snippet wins.
-- Bluetooth NAP normalization/DUN lifetime fixes, the `initrd`/eBPF build-option changes, PPC64 BPF ABI handling, GLib shadow-variable fixes, and contributor/security-policy tooling are NetworkManager-owned. nm-daemon does not build NetworkManager or reimplement those internals.
+- Bluetooth NAP normalization/DUN lifetime fixes, the `initrd`/eBPF build-option changes, PPC64 BPF ABI handling, GLib shadow-variable fixes, and contributor/security-policy tooling are NetworkManager-owned. nm-daemon does not reimplement those internals; the later optional Nix package recipe is a host/test package choice, not adapter-side emulation.
 
-These adapter changes are **not a substitute for upgrading the system NetworkManager package**, particularly for the security and crash fixes. Tests use fake D-Bus peers and settings fixtures; they do not certify a running host's NetworkManager version. The `nm-api` v1 contract remains unchanged except for the optional `enterprise.phase2_ca_path` detail/update field (omitted from details when absent).
+These adapter changes are **not a substitute for upgrading the system NetworkManager package**, particularly for the security and crash fixes. Tests use fake D-Bus peers/settings fixtures and the isolated real-NM VM gates above; they do not certify an arbitrary running host's package. The `nm-api` v1 contract remains unchanged except for the optional `enterprise.phase2_ca_path` detail/update field (omitted from details when absent).
 
 ### Earlier 1.58/1.60 alignment
 
 The prior review covered changes through `4f92885b8a`:
 
-- nmcli's new AP `BAND` field is queried by `debug diagnose`; nm-daemon generates NetworkManager-compatible 2.4/5/6 GHz bounds and channel tables from `data/wifi-channels.csv` at build time.
+- nmcli adds an AP `BAND` field. Diagnosis now derives band from the older `FREQ` field to retain the 1.56 baseline; nm-daemon generates NetworkManager-compatible 2.4/5/6 GHz bounds and channel tables from `data/wifi-channels.csv` at build time.
 - OWE transition-mode BSSes are reported as `OWE-TM` but treated as the open half of a transition network; only a real OWE BSS creates an `owe` profile.
 - Supplying replacement credentials for a compatible saved profile now updates that profile with `Update2(BLOCK_AUTOCONNECT)` before activation. This follows nmcli's fixed ordering, preserves security options, avoids duplicate profiles, and prevents an old-password autoconnect retry from racing the update.
 - QR sharing suppresses secured-network payloads when NetworkManager cannot return a password and emits `nopass` for open/OWE profiles. Exports now omit hex-only wrapper quotes, following upstream [`b81dbe326556`](https://github.com/NetworkManager/NetworkManager/commit/b81dbe326556770362e2e8bc26647263a41c04f5); some scanners interpret those quotes literally. Intake still accepts older quoted codes. Consequently hex-only export strings intentionally differ from unpatched nmcli 1.58; compare decoded credentials rather than demanding byte-identical old/new output.

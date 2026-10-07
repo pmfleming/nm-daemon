@@ -234,6 +234,14 @@ impl Nm {
         self.conn.clone()
     }
 
+    /// Version of the running D-Bus peer, not the installed client/package.
+    pub(crate) fn version(&self) -> Result<String> {
+        self.ensure_current_owner()?;
+        let version = self.root_proxy().get_property("Version")?;
+        self.ensure_current_owner()?;
+        Ok(version)
+    }
+
     pub(crate) fn command_runner(&self) -> &dyn CommandRunner {
         self.commands.as_ref()
     }

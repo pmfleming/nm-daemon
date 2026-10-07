@@ -35,12 +35,14 @@ def storage_kind(filename):
     path = Path(filename)
     if not path.is_absolute():
         return "unknown"
-    if path.suffix == ".nmconnection" or path.parent.parts[-2:] == (
-        "NetworkManager", "system-connections"
-    ):
+    if path.parent.parts[-2:] == ("NetworkManager", "system-connections"):
         return "keyfile"
+    # A legacy connection name can itself end in .nmconnection. The prefix
+    # remains a migration candidate outside the known keyfile directories.
     if path.name.startswith("ifcfg-"):
         return "ifcfg-rh"
+    if path.suffix == ".nmconnection":
+        return "keyfile"
     return "unknown"
 
 

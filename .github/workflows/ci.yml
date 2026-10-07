@@ -28,6 +28,8 @@ jobs:
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y dbus-daemon
+      - run: python3 -B -m unittest discover -s tools/tests -v
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -46,5 +48,14 @@ jobs:
           ref: main
           path: daemon-framework
       - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+            max-jobs = 2
       - uses: dtolnay/rust-toolchain@stable
+      - name: Enable KVM for isolated radio/network tests
+        run: test -c /dev/kvm && sudo chmod a+rw /dev/kvm
+      - name: Record co-development framework revision
+        run: git -C ../daemon-framework rev-parse HEAD
+      # Includes all six NM/backend combinations, enterprise, migration and Cast.
       - run: ../daemon-framework/tools/local-build check . --print-build-logs

@@ -1,20 +1,32 @@
-# Production baseline: released 1.58.1 plus narrowly scoped upstream fixes.
+# Stable production baseline or pinned development compatibility target.
 # Importing this derivation never changes the host's running service.
-{ pkgs }:
+{
+  pkgs,
+  development ? false,
+}:
 let
-  revision = "7406dfbcc35beed79bf2734e3e7376ead320bd99";
-  fixes = [
-    {
-      revision = "f84bd5115485a78a5f8c12e910c5b7a0674bd0e3";
-      hash = "sha256-8B4MwgbkKyVqyylKp0zRyG3gy6dfWhLwtsMURAtEf0k=";
-      purpose = "Create new IWD mirrored profiles atomically with mode 0600";
-    }
-    {
-      revision = "cca7761701c6c727bcfdf2e7517a73220ba6df4c";
-      hash = "sha256-NQcPQKBZEW86+bwSnieUU/ln9Hp/GR65k7CvbyGcds8=";
-      purpose = "Accept peaplabel=0 in supplicant configuration verification";
-    }
-  ];
+  version = if development then "1.59.2-dev" else "1.58.1";
+  revision =
+    if development then
+      "ed1f38cd449b32e935d994eed61600230cf4004b"
+    else
+      "7406dfbcc35beed79bf2734e3e7376ead320bd99";
+  fixes =
+    if development then
+      [ ]
+    else
+      [
+        {
+          revision = "f84bd5115485a78a5f8c12e910c5b7a0674bd0e3";
+          hash = "sha256-8B4MwgbkKyVqyylKp0zRyG3gy6dfWhLwtsMURAtEf0k=";
+          purpose = "Create new IWD mirrored profiles atomically with mode 0600";
+        }
+        {
+          revision = "cca7761701c6c727bcfdf2e7517a73220ba6df4c";
+          hash = "sha256-NQcPQKBZEW86+bwSnieUU/ln9Hp/GR65k7CvbyGcds8=";
+          purpose = "Accept peaplabel=0 in supplicant configuration verification";
+        }
+      ];
   # BPF cannot accept the host compiler wrapper's stack/zero-register hardening
   # flags. Only this BPF compiler drops them; NM's native C build stays hardened.
   bpfClang = pkgs.writeShellScript "clang-bpf" ''
@@ -22,18 +34,21 @@ let
   '';
   provenance = pkgs.writeText "networkmanager-provenance.json" (
     builtins.toJSON {
-      version = "1.58.1";
-      inherit revision fixes;
+      inherit version revision fixes;
       upstream = "https://github.com/NetworkManager/NetworkManager";
     }
   );
 in
 pkgs.networkmanager.overrideAttrs (old: {
-  version = "1.58.1";
+  inherit version;
   src = pkgs.fetchurl {
-    name = "NetworkManager-1.58.1.tar.gz";
+    name = "NetworkManager-${version}.tar.gz";
     url = "https://codeload.github.com/NetworkManager/NetworkManager/tar.gz/${revision}";
-    hash = "sha256-hDMGrVSjAG73pgumKTKjogFcyH1GvUOP1ayQbZUsiNY=";
+    hash =
+      if development then
+        "sha256-KF4atwJMobKqjJwfy89HTVA6rAtAcB5ojDaTSc1kMdM="
+      else
+        "sha256-hDMGrVSjAG73pgumKTKjogFcyH1GvUOP1ayQbZUsiNY=";
   };
   patches =
     (builtins.filter (patch: !(pkgs.lib.hasSuffix "-fix-paths.patch" (toString patch))) (
@@ -79,6 +94,13 @@ pkgs.networkmanager.overrideAttrs (old: {
     install -Dm444 ${provenance} $out/share/nm-daemon/networkmanager-provenance.json
   '';
   passthru = (old.passthru or { }) // {
-    nmDaemonProvenance = { inherit revision fixes; };
+    nmDaemonProvenance = {
+      inherit
+        version
+        revision
+        fixes
+        development
+        ;
+    };
   };
 })

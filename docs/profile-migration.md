@@ -21,8 +21,10 @@ python3 tools/nm-upgrade-preflight.py --iwd-dir /configured/iwd/directory
 The installed command is `nm-daemon-upgrade-preflight`. It queries only
 `nmcli --terse --escape yes --fields UUID,FILENAME connection show`, inventories
 legacy filenames (including unloaded ones), and optionally stats IWD profiles.
-It never reads profile contents, displays passwords, follows directory symlinks,
-repairs permissions, or executes the migration commands it suggests. Existing
+It never reads profile contents, displays passwords, repairs permissions, or
+executes the migration commands it suggests. Selected directory symlinks are
+rejected and profile-entry symlinks are inspected without dereferencing them;
+ancestor path resolution still follows normal OS semantics. Existing
 IWD files are **not** fixed by upgrading the code that creates new ones.
 
 Exit status:

@@ -26,7 +26,7 @@ in
     networking.networkmanager = {
       enable = true;
       dns = "systemd-resolved";
-      connectionConfig.mdns = 0;
+      connectionConfig."connection.mdns" = 0;
       dispatcherScripts = [
         {
           source = "${cfg.package}/lib/NetworkManager/dispatcher.d/90-nm-cast-policy";
@@ -74,7 +74,7 @@ in
     assertions = [
       {
         assertion = config.networking.networkmanager.dns == "systemd-resolved"
-          && config.networking.networkmanager.connectionConfig.mdns == 0
+          && config.networking.networkmanager.connectionConfig."connection.mdns" == 0
           && config.services.resolved.settings.Resolve.MulticastDNS == "resolve";
         message = "nm-cast-policy requires default-off NetworkManager mDNS and resolve-only systemd-resolved.";
       }

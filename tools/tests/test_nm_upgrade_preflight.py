@@ -23,6 +23,8 @@ class PreflightTests(unittest.TestCase):
             ("/etc/NetworkManager/system-connections/Café.nmconnection", "keyfile"),
             ("/run/NetworkManager/system-connections/generated", "keyfile"),
             ("/etc/sysconfig/network-scripts/ifcfg-home", "ifcfg-rh"),
+            ("/custom/ifcfg-home.nmconnection", "ifcfg-rh"),
+            ("/etc/NetworkManager/system-connections/ifcfg-home.nmconnection", "keyfile"),
             ("", "memory"), ("--", "unknown"), ("/other/file", "unknown"),
         ]:
             profiles = preflight.parse_inventory(f"{UUID}:{filename}\n")
