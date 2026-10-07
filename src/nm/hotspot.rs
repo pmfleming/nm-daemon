@@ -111,7 +111,12 @@ impl Nm {
         );
         let (profile_path, active_path) = self.add_and_activate_hotspot(&resolved, settings)?;
         match self.await_hotspot_activation(&active_path, cancellation) {
-            Ok(()) => Ok(self.started_hotspot_result(request, resolved, profile_path, active_path)),
+            Ok(()) => Ok(Self::started_hotspot_result(
+                request,
+                resolved,
+                profile_path,
+                active_path,
+            )),
             Err(error) => {
                 self.roll_back_hotspot(&profile_path, &active_path);
                 Err(error)
@@ -351,7 +356,6 @@ impl Nm {
     }
 
     fn started_hotspot_result(
-        &self,
         request: &HotspotRequest,
         resolved: ResolvedHotspot,
         profile_path: OwnedObjectPath,
@@ -689,6 +693,39 @@ mod tests {
             assert_eq!(text("ipv6", "method").as_deref(), Some("ignore"));
         }
         Ok(())
+    }
+
+    #[test]
+    fn hotspot_sharing_uses_unquoted_hex_export() {
+        let request = HotspotRequest {
+            ssid: None,
+            passphrase: None,
+            device: None,
+            security: HotspotSecurity::WpaPsk,
+            band: WifiBand::Auto,
+            channel: None,
+            hidden: true,
+        };
+        let resolved = ResolvedHotspot {
+            ssid: "CAFE".into(),
+            ssid_bytes: b"CAFE".to_vec(),
+            passphrase: "ABCD1234".into(),
+            generated_passphrase: false,
+            generated_ssid: false,
+            device: device("wlan0", true, false),
+            band: WifiBand::Auto,
+            channel: None,
+        };
+        let result = super::Nm::started_hotspot_result(
+            &request,
+            resolved,
+            "/test/profile".try_into().unwrap(),
+            "/test/active".try_into().unwrap(),
+        );
+        assert_eq!(
+            result.hotspot.share.unwrap().qr_payload,
+            "WIFI:T:WPA;S:CAFE;P:ABCD1234;H:true;;"
+        );
     }
 
     #[test]

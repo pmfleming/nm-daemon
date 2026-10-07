@@ -61,19 +61,14 @@ mod render_tests {
 }
 
 fn wifi_qr_value(value: &str) -> String {
-    let escaped: String = value
+    value
         .chars()
         .flat_map(|ch| match ch {
             '\\' | ';' | ',' | ':' | '"' => [Some('\\'), Some(ch)],
             ch => [None, Some(ch)],
         })
         .flatten()
-        .collect();
-    if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        format!("\"{escaped}\"")
-    } else {
-        escaped
-    }
+        .collect()
 }
 
 /// A validated `WIFI:` payload, ready to hand to a connect request.
@@ -155,7 +150,7 @@ pub(crate) fn parse_wifi_qr(payload: &str) -> Result<ParsedWifiQr> {
 }
 
 /// Splits `key:value;` fields, honouring MECARD backslash escapes and the
-/// optional quoting NetworkManager uses for hex-looking values.
+/// optional quoting older NetworkManager versions used for hex-looking values.
 fn split_fields(body: &str) -> Result<BTreeMap<String, String>> {
     let mut fields = BTreeMap::new();
     let mut current = String::new();
@@ -196,8 +191,8 @@ fn insert_field(fields: &mut BTreeMap<String, String>, field: String) -> Result<
     Ok(())
 }
 
-/// NetworkManager wraps values that are entirely hex digits in quotes so they
-/// are not mistaken for a raw key.
+/// Accept legacy wrapper quotes on intake only. New exports omit them: scanners
+/// can interpret them literally (NetworkManager upstream b81dbe326556).
 fn unquote(value: &str) -> &str {
     value
         .strip_prefix('"')
@@ -283,6 +278,78 @@ mod tests {
     fn parse_error(payload: &str) -> ErrorReport {
         let error = parse_wifi_qr(payload).expect_err("rejected payload");
         ErrorReport::from_error(&error, ErrorOperation::Unknown)
+    }
+
+    #[test]
+    fn exported_payloads_match_independent_interoperability_vectors() {
+        for (auth, ssid, password, hidden, expected) in [
+            (
+                "WPA",
+                "CAFE",
+                Some("ABCD1234"),
+                false,
+                "WIFI:T:WPA;S:CAFE;P:ABCD1234;;",
+            ),
+            (
+                "WPA",
+                "deadbeef",
+                Some("0123456789abcdef"),
+                true,
+                "WIFI:T:WPA;S:deadbeef;P:0123456789abcdef;H:true;;",
+            ),
+            ("nopass", "CAFE", None, false, "WIFI:T:nopass;S:CAFE;;"),
+            (
+                "WPA",
+                "Café;Guest",
+                Some(r#"pass:word1\,\""#),
+                true,
+                r#"WIFI:T:WPA;S:Café\;Guest;P:pass\:word1\\\,\\\";H:true;;"#,
+            ),
+            (
+                "WPA",
+                r#""CAFE""#,
+                Some(r#""ABCD1234""#),
+                false,
+                r#"WIFI:T:WPA;S:\"CAFE\";P:\"ABCD1234\";;"#,
+            ),
+        ] {
+            assert_eq!(wifi_qr_payload(auth, ssid, password, hidden), expected);
+        }
+        let raw_psk = "0123456789abcdef".repeat(4);
+        assert_eq!(
+            wifi_qr_payload("WPA", "CAFE", Some(&raw_psk), false),
+            format!("WIFI:T:WPA;S:CAFE;P:{raw_psk};;")
+        );
+    }
+
+    #[test]
+    fn old_and_new_hex_codes_remain_accepted() {
+        let old = parse_wifi_qr(r#"WIFI:T:WPA;S:"CAFE";P:"ABCD1234";;"#).unwrap();
+        let new = parse_wifi_qr("WIFI:T:WPA;S:CAFE;P:ABCD1234;;").unwrap();
+        assert_eq!(old, new);
+        assert_eq!(new.ssid, "CAFE");
+        assert_eq!(new.password.as_deref(), Some("ABCD1234"));
+    }
+
+    #[test]
+    fn saved_profile_sharing_uses_unquoted_hex_export() {
+        let profile = crate::model::SavedWifiConnection {
+            path: "/test/profile".into(),
+            id: "test".into(),
+            ssid: "CAFE".into(),
+            ssid_bytes: b"CAFE".to_vec(),
+            autoconnect: false,
+            casting_enabled: false,
+            privacy: Default::default(),
+        };
+        let share =
+            crate::model::WifiSharePayload::shareable(&profile, "WPA", Some("ABCD1234"), true);
+        assert!(share.shareable);
+        assert!(share.qr_svg.is_some());
+        assert_eq!(
+            share.qr_payload.as_deref(),
+            Some("WIFI:T:WPA;S:CAFE;P:ABCD1234;H:true;;")
+        );
     }
 
     #[test]

@@ -423,7 +423,7 @@ Call("wifi.qr.parse", "{\"payload\":\"WIFI:T:WPA;S:Example;P:...;;\"}")   -> dat
 Call("wifi.qr.connect", "{\"payload\":\"WIFI:...\",\"ifname\":null}")     -> data.result.request_id
 ```
 
-`wifi.qr.parse` validates a scanned payload and returns `ssid`, `ssid_bytes`, `ssid_hex`, the typed `auth` (`open`, `wpa`, `sae`, or `wep`), the raw `auth_token`, `hidden`, `has_password`, and — for WEP — the detected `wep_key_type`. It honours MECARD backslash escapes and NetworkManager's quoting of hex-only values, so an SSID or passphrase containing `;`, `:`, `,`, `\\`, or `"` round-trips exactly.
+`wifi.qr.parse` validates a scanned payload and returns `ssid`, `ssid_bytes`, `ssid_hex`, the typed `auth` (`open`, `wpa`, `sae`, or `wep`), the raw `auth_token`, `hidden`, `has_password`, and — for WEP — the detected `wep_key_type`. It honours MECARD backslash escapes and legacy NetworkManager quoting of hex-only values (new exports omit those wrapper quotes), so an SSID or passphrase containing `;`, `:`, `,`, `\\`, or `"` round-trips exactly.
 
 Validation is real, not cosmetic:
 
