@@ -1,12 +1,24 @@
 use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Error;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::model::ConnectFailureReason;
+
+/// Recover runtime bookkeeping after a worker panic, retaining the diagnostic.
+pub(crate) fn recover_lock<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!(resource = name, "recovering poisoned daemon runtime lock");
+            poisoned.into_inner()
+        }
+    }
+}
 
 pub(crate) struct ErrorChain<'a, E: ?Sized>(&'a E);
 

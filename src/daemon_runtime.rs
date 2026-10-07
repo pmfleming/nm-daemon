@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -12,14 +11,17 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, BackgroundScanScheduler, ScanRequest};
-use crate::error::{DomainError, ErrorOperation};
+use crate::error::{DomainError, ErrorOperation, recover_lock};
 use crate::generated::{CONTROL_QUEUE_CAPACITY, WORK_QUEUE_CAPACITY, WORKER_COUNT};
 use crate::nm::Nm;
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
 
+mod admission;
 mod lanes;
 mod subscriptions;
+use admission::ConnectAttempts;
+pub(crate) use admission::{ConnectAttemptGuard, ConnectAttemptKey};
 use lanes::BlockingLane;
 use subscriptions::Control;
 
@@ -35,7 +37,6 @@ const FAST_WORKER_COUNT: usize = 1;
 const READ_WORKER_COUNT: usize = 4;
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const WRONG_PASSWORD_RETRY_DELAY: Duration = Duration::from_secs(10);
 const TERMINAL_RESULT_TTL: Duration = Duration::from_secs(300);
 const TERMINAL_RESULT_LIMIT: usize = 256;
 
@@ -110,14 +111,48 @@ struct TaskRegistration {
     cancellation: Arc<AtomicBool>,
 }
 
+impl TaskRegistration {
+    fn new(
+        runtime: &Arc<DaemonRuntime>,
+        request_id: String,
+        kind: TaskKind,
+        owner: Option<String>,
+        target_ssid: Option<Vec<u8>>,
+    ) -> Self {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        recover_lock(&runtime.tasks, "daemon task map").insert(
+            request_id.clone(),
+            TaskHandle {
+                started: Instant::now(),
+                progress: None,
+                timed_out: false,
+                kind,
+                owner,
+                target_ssid: target_ssid.map(Arc::from),
+                cancellation: Arc::clone(&cancellation),
+            },
+        );
+        Self {
+            runtime: Arc::downgrade(runtime),
+            request_id,
+            cancellation,
+        }
+    }
+}
+
 impl Drop for TaskRegistration {
     fn drop(&mut self) {
         let Some(runtime) = self.runtime.upgrade() else {
             return;
         };
-        recover_lock(&runtime.tasks, "daemon task map").retain(|request_id, handle| {
-            request_id != &self.request_id || !Arc::ptr_eq(&handle.cancellation, &self.cancellation)
-        });
+        let mut tasks = recover_lock(&runtime.tasks, "daemon task map");
+        if tasks
+            .get(&self.request_id)
+            .is_some_and(|handle| Arc::ptr_eq(&handle.cancellation, &self.cancellation))
+        {
+            tasks.remove(&self.request_id);
+        }
+        drop(tasks);
         runtime.tasks_changed.notify_all();
     }
 }
@@ -125,140 +160,6 @@ impl Drop for TaskRegistration {
 struct CancelledTask {
     kind: TaskKind,
     target_ssid: Option<Arc<[u8]>>,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(crate) struct ConnectAttemptKey {
-    identity: String,
-    credential_fingerprint: u64,
-    supplied_credentials: bool,
-}
-
-impl ConnectAttemptKey {
-    pub(crate) fn new(
-        identity: String,
-        credential_material: &[u8],
-        supplied_credentials: bool,
-    ) -> Self {
-        let mut fingerprint = DefaultHasher::new();
-        credential_material.hash(&mut fingerprint);
-        Self {
-            identity,
-            credential_fingerprint: fingerprint.finish(),
-            supplied_credentials,
-        }
-    }
-}
-
-#[derive(Default)]
-struct ConnectAttemptPolicy {
-    active_identities: HashSet<String>,
-    blocked_until: HashMap<(String, u64), Instant>,
-    stale_credentials: HashSet<String>,
-}
-
-enum ConnectAdmission {
-    Active,
-    RetryAfter(Duration),
-    CredentialsRequired,
-}
-
-impl ConnectAttemptPolicy {
-    fn admit(
-        &mut self,
-        attempt: &ConnectAttemptKey,
-        now: Instant,
-    ) -> std::result::Result<(), ConnectAdmission> {
-        self.blocked_until.retain(|_, deadline| *deadline > now);
-        if self.active_identities.contains(&attempt.identity) {
-            return Err(ConnectAdmission::Active);
-        }
-        if self.stale_credentials.contains(&attempt.identity) && !attempt.supplied_credentials {
-            return Err(ConnectAdmission::CredentialsRequired);
-        }
-        if let Some(deadline) = self
-            .blocked_until
-            .get(&(attempt.identity.clone(), attempt.credential_fingerprint))
-        {
-            return Err(ConnectAdmission::RetryAfter(
-                deadline.saturating_duration_since(now),
-            ));
-        }
-        self.active_identities.insert(attempt.identity.clone());
-        Ok(())
-    }
-
-    fn complete(
-        &mut self,
-        attempt: &ConnectAttemptKey,
-        reason: Option<crate::model::ConnectFailureReason>,
-        succeeded: bool,
-        now: Instant,
-    ) {
-        self.active_identities.remove(&attempt.identity);
-        if succeeded {
-            self.stale_credentials.remove(&attempt.identity);
-            self.blocked_until
-                .retain(|(identity, _), _| identity != &attempt.identity);
-            return;
-        }
-        if matches!(
-            reason,
-            Some(
-                crate::model::ConnectFailureReason::WrongPassword
-                    | crate::model::ConnectFailureReason::PasswordUnavailable
-                    | crate::model::ConnectFailureReason::SecretRequired
-            )
-        ) {
-            self.stale_credentials.insert(attempt.identity.clone());
-        }
-        if reason == Some(crate::model::ConnectFailureReason::WrongPassword) {
-            self.blocked_until.insert(
-                (attempt.identity.clone(), attempt.credential_fingerprint),
-                now + WRONG_PASSWORD_RETRY_DELAY,
-            );
-        }
-    }
-
-    fn abandon(&mut self, attempt: &ConnectAttemptKey) {
-        self.active_identities.remove(&attempt.identity);
-    }
-}
-
-pub(crate) struct ConnectAttemptGuard {
-    runtime: Weak<DaemonRuntime>,
-    attempt: ConnectAttemptKey,
-    finished: bool,
-}
-
-impl ConnectAttemptGuard {
-    pub(crate) fn finish(
-        mut self,
-        reason: Option<crate::model::ConnectFailureReason>,
-        succeeded: bool,
-    ) {
-        if let Some(runtime) = self.runtime.upgrade() {
-            recover_lock(&runtime.connect_attempts, "Wi-Fi connect attempt policy").complete(
-                &self.attempt,
-                reason,
-                succeeded,
-                Instant::now(),
-            );
-        }
-        self.finished = true;
-    }
-}
-
-impl Drop for ConnectAttemptGuard {
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        if let Some(runtime) = self.runtime.upgrade() {
-            recover_lock(&runtime.connect_attempts, "Wi-Fi connect attempt policy")
-                .abandon(&self.attempt);
-        }
-    }
 }
 
 struct CachedStatus {
@@ -276,7 +177,7 @@ pub(crate) struct DaemonRuntime {
     tasks: Mutex<HashMap<String, TaskHandle>>,
     terminal_results: Mutex<RecentResults<TerminalRequestResult>>,
     tasks_changed: Condvar,
-    connect_attempts: Mutex<ConnectAttemptPolicy>,
+    connect_attempts: ConnectAttempts,
     status_cache: Mutex<Option<CachedStatus>>,
     status_generation: AtomicUsize,
     cache_refresh_pending: AtomicBool,
@@ -305,7 +206,7 @@ impl DaemonRuntime {
                 Some(TERMINAL_RESULT_TTL),
             )),
             tasks_changed: Condvar::new(),
-            connect_attempts: Mutex::new(ConnectAttemptPolicy::default()),
+            connect_attempts: ConnectAttempts::default(),
             status_cache: Mutex::new(None),
             status_generation: AtomicUsize::new(0),
             cache_refresh_pending: AtomicBool::new(false),
@@ -596,31 +497,7 @@ impl DaemonRuntime {
         self: &Arc<Self>,
         attempt: ConnectAttemptKey,
     ) -> Result<ConnectAttemptGuard> {
-        let admission = recover_lock(&self.connect_attempts, "Wi-Fi connect attempt policy")
-            .admit(&attempt, Instant::now());
-        if let Err(admission) = admission {
-            let error = match admission {
-                ConnectAdmission::Active => DomainError::connect(
-                    crate::model::ConnectFailureReason::ActivationFailed,
-                    "A connection attempt for this network is already running",
-                ),
-                ConnectAdmission::CredentialsRequired => DomainError::connect(
-                    crate::model::ConnectFailureReason::SecretRequired,
-                    "The saved Wi-Fi credentials failed; provide replacement credentials",
-                ),
-                ConnectAdmission::RetryAfter(delay) => DomainError::connect(
-                    crate::model::ConnectFailureReason::WrongPassword,
-                    "NetworkManager is temporarily ignoring this access point after a failed password",
-                )
-                .with_detail("retry_after_ms", delay.as_millis() as u64),
-            };
-            return Err(error.into());
-        }
-        Ok(ConnectAttemptGuard {
-            runtime: Arc::downgrade(self),
-            attempt,
-            finished: false,
-        })
+        self.connect_attempts.begin(attempt)
     }
 
     pub(crate) fn start_cancellable(
@@ -631,33 +508,18 @@ impl DaemonRuntime {
         target_ssid: Option<Vec<u8>>,
         task: impl FnOnce(&Nm, &AtomicBool, &str) + Send + 'static,
     ) -> Result<String> {
-        let request_id = next_request_id(request_prefix);
-        let cancellation = Arc::new(AtomicBool::new(false));
-        let target_ssid = target_ssid.map(Arc::from);
-        recover_lock(&self.tasks, "daemon task map").insert(
-            request_id.clone(),
-            TaskHandle {
-                started: Instant::now(),
-                progress: None,
-                timed_out: false,
-                kind,
-                owner,
-                target_ssid,
-                cancellation: Arc::clone(&cancellation),
-            },
+        let registration = TaskRegistration::new(
+            self,
+            next_request_id(request_prefix),
+            kind,
+            owner,
+            target_ssid,
         );
-        let registration = TaskRegistration {
-            runtime: Arc::downgrade(self),
-            request_id: request_id.clone(),
-            cancellation: Arc::clone(&cancellation),
-        };
-        let worker_request_id = request_id.clone();
-        let operation = kind.operation();
+        let request_id = registration.request_id.clone();
         self.submit(
-            operation,
+            kind.operation(),
             Box::new(move |nm| {
-                let _registration = registration;
-                task(nm, &cancellation, &worker_request_id);
+                task(nm, &registration.cancellation, &registration.request_id);
             }),
         )?;
         if kind == TaskKind::Connect {
@@ -1013,16 +875,6 @@ fn pending_task_ids(tasks: &HashMap<String, TaskHandle>, request_ids: &[String])
     pending
 }
 
-fn recover_lock<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::error!(resource = name, "recovering poisoned daemon runtime lock");
-            poisoned.into_inner()
-        }
-    }
-}
-
 fn log_activation_abort(request_id: &str, result: Result<crate::model::DisconnectResult>) {
     match result {
         Ok(result) if result.status == "disconnected" => {
@@ -1062,43 +914,8 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{
-        ConnectAdmission, ConnectAttemptKey, ConnectAttemptPolicy, TERMINAL_RESULT_TTL,
-        TerminalRequestResult, WRONG_PASSWORD_RETRY_DELAY, terminal_request_status,
-    };
-    use crate::model::ConnectFailureReason;
+    use super::{TERMINAL_RESULT_TTL, TerminalRequestResult, terminal_request_status};
     use crate::protocol::Stream;
-    #[test]
-    fn connect_attempt_policy_owns_duplicate_retry_and_stale_secret_rules() {
-        let now = std::time::Instant::now();
-        let saved = ConnectAttemptKey::new("network".into(), b"saved", false);
-        let wrong = ConnectAttemptKey::new("network".into(), b"wrong", true);
-        let replacement = ConnectAttemptKey::new("network".into(), b"replacement", true);
-        let mut policy = ConnectAttemptPolicy::default();
-
-        assert!(policy.admit(&wrong, now).is_ok());
-        assert!(matches!(
-            policy.admit(&wrong, now),
-            Err(ConnectAdmission::Active)
-        ));
-        policy.complete(
-            &wrong,
-            Some(ConnectFailureReason::WrongPassword),
-            false,
-            now,
-        );
-        assert!(matches!(
-            policy.admit(&wrong, now),
-            Err(ConnectAdmission::RetryAfter(delay)) if delay == WRONG_PASSWORD_RETRY_DELAY
-        ));
-        assert!(matches!(
-            policy.admit(&saved, now),
-            Err(ConnectAdmission::CredentialsRequired)
-        ));
-        assert!(policy.admit(&replacement, now).is_ok());
-        policy.complete(&replacement, None, true, now);
-        assert!(policy.admit(&saved, now).is_ok());
-    }
 
     #[test]
     fn deadline_requests_cancellation_without_forging_completion() -> anyhow::Result<()> {
@@ -1112,6 +929,7 @@ mod tests {
                 use crate::test_support::workflows::FakeNm;
                 let fake = FakeNm::new([], false)?;
                 let runtime = DaemonRuntime::start(fake.nm, tokio::runtime::Handle::current())?;
+                registration_lifetimes(&runtime);
                 let (release, wait) = std::sync::mpsc::channel();
                 let id = runtime.start_cancellable(
                     "connect",
@@ -1193,10 +1011,42 @@ mod tests {
                 );
                 release.send(())?;
                 tokio::runtime::Handle::current().block_on(runtime.shutdown());
+                assert!(
+                    runtime
+                        .start_cancellable("closed", TaskKind::Scan, None, None, |_, _, _| panic!(
+                            "closed lane ran a task"
+                        ))
+                        .is_err()
+                );
+                assert!(super::recover_lock(&runtime.tasks, "test tasks").is_empty());
                 drop(runtime);
                 Ok(())
             },
         )
+    }
+
+    fn registration_lifetimes(runtime: &std::sync::Arc<super::DaemonRuntime>) {
+        let register = || {
+            super::TaskRegistration::new(
+                runtime,
+                "reused".into(),
+                super::TaskKind::Scan,
+                None,
+                None,
+            )
+        };
+        let stale = register();
+        let current = register();
+        drop(stale);
+        assert_eq!(runtime.request_status("reused", None)["status"], "running");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _current = current;
+                panic!("worker unwound");
+            }))
+            .is_err()
+        );
+        assert_eq!(runtime.request_status("reused", None)["status"], "unknown");
     }
 
     #[test]
