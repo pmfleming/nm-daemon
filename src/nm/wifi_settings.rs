@@ -281,6 +281,10 @@ fn enterprise_dot1x_section(
     enterprise: &EnterpriseAuth,
     password: Option<&str>,
 ) -> Result<HashMap<String, OwnedValue>> {
+    super::profile_policy::validate_peaplabel(
+        enterprise.phase1_peaplabel.as_deref(),
+        ErrorOperation::Connect,
+    )?;
     let eap = enterprise_eap_methods(enterprise);
     let mut dot1x = HashMap::from([("eap".to_string(), owned_value(eap)?)]);
     insert_required_string(&mut dot1x, "identity", enterprise.identity.as_deref())?;

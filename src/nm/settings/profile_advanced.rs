@@ -272,6 +272,10 @@ fn apply_enterprise(
     update: &ProfileEnterpriseUpdate,
 ) -> Result<()> {
     validate_eap_methods(update.eap.as_deref())?;
+    crate::nm::profile_policy::validate_peaplabel(
+        update.phase1_peaplabel.as_deref(),
+        ErrorOperation::ProfileOperation,
+    )?;
     let section = settings.entry(ENTERPRISE.to_string()).or_default();
     set_list(section, "eap", update.eap.as_deref())?;
     set_list(
@@ -472,6 +476,70 @@ mod tests {
             ]),
         )])
     }
+    #[test]
+    fn peap_label_edits_preserve_zero_omission_and_explicit_clearing() -> anyhow::Result<()> {
+        for (json, expected) in [
+            (r#"{}"#, Some("0")),
+            (r#"{"phase1_peaplabel":null}"#, Some("0")),
+            (r#"{"phase1_peaplabel":""}"#, None),
+            (r#"{"phase1_peaplabel":"0"}"#, Some("0")),
+            (r#"{"phase1_peaplabel":"1"}"#, Some("1")),
+        ] {
+            let mut profile = settings();
+            let seed = WifiProfileAdvancedUpdate {
+                permissions: Some(vec!["user:alice:".into()]),
+                enterprise: Some(ProfileEnterpriseUpdate {
+                    phase1_peaplabel: Some("0".into()),
+                    ca_cert: Some("file:///test/ca.pem".into()),
+                    phase2_ca_cert: Some("pkcs11:object=phase2-ca".into()),
+                    domain_suffix_match: Some("radius.example".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            apply_advanced(&mut profile, &seed)?;
+            let before = profile.clone();
+            apply_advanced(
+                &mut profile,
+                &WifiProfileAdvancedUpdate {
+                    enterprise: Some(serde_json::from_str(json)?),
+                    ..Default::default()
+                },
+            )?;
+            let read = super::read_enterprise(&profile).unwrap();
+            assert_eq!(read.phase1_peaplabel.as_deref(), expected);
+            assert_eq!(
+                profile["connection"]["permissions"],
+                before["connection"]["permissions"]
+            );
+            for field in ["ca-cert", "phase2-ca-cert", "domain-suffix-match"] {
+                assert_eq!(profile["802-1x"][field], before["802-1x"][field]);
+            }
+            assert_eq!(
+                Vec::<u8>::try_from(profile["802-1x"]["ca-cert"].try_clone()?)?,
+                b"file:///test/ca.pem\0"
+            );
+        }
+        for rejected in ["false", "true", "2", " 0", "0\0"] {
+            let error = apply_advanced(
+                &mut settings(),
+                &WifiProfileAdvancedUpdate {
+                    enterprise: Some(ProfileEnterpriseUpdate {
+                        phase1_peaplabel: Some(rejected.into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
+            assert_eq!(report.code, ErrorCode::ValidationError);
+            assert_eq!(report.operation, ErrorOperation::ProfileOperation);
+            assert_eq!(report.details["field"], "802-1x.phase1-peaplabel");
+        }
+        Ok(())
+    }
+
     #[test]
     fn private_ca_directories_are_rejected_and_can_be_explicitly_repaired() {
         for (nm_key, api_key) in [("ca-path", "ca_path"), ("phase2-ca-path", "phase2_ca_path")] {

@@ -110,6 +110,7 @@
           package = self.packages.${system}.default;
           connectParityProbe = self.packages.${system}.connectParityProbe;
           castPolicy = import ./nix/tests/cast-policy.nix { inherit self pkgs; };
+          enterprise = import ./nix/tests/enterprise.nix { inherit self pkgs; };
         }
       );
 

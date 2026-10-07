@@ -6,6 +6,19 @@ use zvariant::OwnedValue;
 use super::ConnectionSettings;
 use crate::error::{DomainError, ErrorOperation};
 
+/// PEAP label selection is a string enum, not a boolean. In particular "0"
+/// must survive unchanged; omission/empty have separate edit semantics.
+pub(super) fn validate_peaplabel(value: Option<&str>, operation: ErrorOperation) -> Result<()> {
+    if matches!(value, None | Some("" | "0" | "1")) {
+        return Ok(());
+    }
+    Err(
+        DomainError::validation(operation, "phase1_peaplabel must be empty, 0, or 1")
+            .with_detail("field", "802-1x.phase1-peaplabel")
+            .into(),
+    )
+}
+
 /// NM's certificate/key properties use `ay`, not D-Bus strings. URI references
 /// are NUL-terminated; embedded NULs must not silently truncate the trust path.
 pub(super) fn set_certificate_reference(

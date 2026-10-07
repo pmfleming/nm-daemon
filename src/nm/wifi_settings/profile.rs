@@ -27,16 +27,14 @@ fn apply_connection_name(settings: &mut ConnectionSettings, name: Option<&str>) 
 }
 
 fn apply_private_connection(settings: &mut ConnectionSettings, private: bool) -> Result<()> {
-    let Some(user) = private.then(current_user_name).flatten() else {
+    let user = current_user_name();
+    let Some(permissions) = private_permissions(private, user.as_deref())? else {
         return Ok(());
     };
     settings
         .entry("connection".to_string())
         .or_default()
-        .insert(
-            "permissions".to_string(),
-            owned_value(vec![format!("user:{user}:")])?,
-        );
+        .insert("permissions".to_string(), owned_value(permissions)?);
     Ok(())
 }
 
@@ -89,6 +87,22 @@ fn apply_connection_settings(
     Ok(())
 }
 
+fn private_permissions(private: bool, user: Option<&str>) -> Result<Option<Vec<String>>> {
+    if !private {
+        return Ok(None);
+    }
+    let user = user
+        .filter(|user| !user.trim().is_empty() && !user.contains([':', '\n', '\r', '\0']))
+        .ok_or_else(|| {
+            DomainError::validation(
+                ErrorOperation::Connect,
+                "cannot create a private connection without a valid current user name",
+            )
+            .with_detail("field", "private")
+        })?;
+    Ok(Some(vec![format!("user:{user}:")]))
+}
+
 fn current_user_name() -> Option<String> {
     ["USER", "LOGNAME"]
         .into_iter()
@@ -139,4 +153,25 @@ fn apply_hostname_policy(
         ip_settings::set_send_hostname(settings, "ipv6", enabled)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn missing_identity_never_silently_makes_a_private_profile_public() {
+        for user in [
+            None,
+            Some(""),
+            Some(" "),
+            Some("user:other:"),
+            Some("user\0"),
+        ] {
+            assert!(super::private_permissions(true, user).is_err());
+            assert!(super::private_permissions(false, user).unwrap().is_none());
+        }
+        assert_eq!(
+            super::private_permissions(true, Some("alice")).unwrap(),
+            Some(vec!["user:alice:".into()])
+        );
+    }
 }

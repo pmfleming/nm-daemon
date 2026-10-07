@@ -54,6 +54,33 @@ installation checks passed. NixOS evaluation selected 1.58.1 without enabling
 the service. Runtime IWD/EAP and cross-version tests belong to the VM gate; this
 build alone is not evidence of successful live Wi-Fi authentication.
 
+## Enterprise compatibility
+
+`phase1_peaplabel` remains a string enum: `"0"` and `"1"` are preserved exactly.
+On profile edits, omission or JSON `null` preserves the old value, while `""`
+explicitly clears it. New connections omit an empty value. Other strings are
+rejected as typed validation errors naming `802-1x.phase1-peaplabel` before a
+save/activation. Boolean/numeric coercion is not supported. Unsent trust fields,
+private permissions, NUL-terminated certificate URIs and saved activation
+settings remain intact. A private connection request with no valid `USER`/
+`LOGNAME` now fails closed instead of silently creating a public profile; minimal
+service environments must provide the intended login identity.
+
+An unpatched NM may accept the profile then reject `peaplabel=0` while preparing
+supplicant configuration. That is not an invalid adapter input or evidence of a
+wrong password. Install the backport; do not silently switch the label, retry a
+different authentication method, drop certificate validation, or make the
+profile public. Vendor backports mean version strings alone cannot establish
+whether this core bug is present.
+
+`checks.x86_64-linux.enterprise` uses mac80211_hwsim and a private hostapd PEAP/
+MSCHAPv2 server, with a generated test CA and synthetic credentials. It activates
+a private profile through nm-daemon with explicit label `"0"`, checks trust and
+permissions, and round-trips `"1"`, `"0"`, and clearing through real NM settings.
+Pure adapter tests separately cover creation, hidden networks, saved activation,
+advanced editing/readback and invalid values. These are not live enterprise
+network or hardware certification.
+
 ## Daemon continuity across NetworkManager restarts
 
 The user daemon exports its SecretAgent once, subscribes to `NameOwnerChanged`

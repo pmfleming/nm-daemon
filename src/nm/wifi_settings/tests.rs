@@ -204,6 +204,71 @@ fn saved_profile_password_update_preserves_security_options() {
 }
 
 #[test]
+fn enterprise_creation_preserves_explicit_peap_zero_and_validates_the_enum() -> anyhow::Result<()> {
+    use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
+    for label in [None, Some(""), Some("0"), Some("1")] {
+        let auth = EnterpriseAuth {
+            identity: Some("test".into()),
+            phase1_peaplabel: label.map(str::to_owned),
+            ca_cert: Some("file:///test/ca.pem".into()),
+            ..Default::default()
+        };
+        let settings = enterprise_wifi_connection_settings(
+            &test_ap(NM_AP_SEC_KEY_MGMT_802_1X),
+            &auth,
+            Some("test-password"),
+        )?;
+        let dot1x = &settings["802-1x"];
+        assert_eq!(
+            setting::<String>(dot1x, "phase1-peaplabel").as_deref(),
+            label.filter(|value| !value.is_empty())
+        );
+        assert_eq!(
+            setting::<Vec<u8>>(dot1x, "ca-cert").unwrap(),
+            b"file:///test/ca.pem\0"
+        );
+    }
+    for rejected in ["false", "true", "2", " 0", "0\0"] {
+        let auth = EnterpriseAuth {
+            identity: Some("test".into()),
+            phase1_peaplabel: Some(rejected.into()),
+            ..Default::default()
+        };
+        let error =
+            enterprise_wifi_connection_settings(&test_ap(NM_AP_SEC_KEY_MGMT_802_1X), &auth, None)
+                .unwrap_err();
+        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
+        assert_eq!(report.code, ErrorCode::ValidationError);
+        assert_eq!(report.operation, ErrorOperation::Connect);
+        assert_eq!(report.details["field"], "802-1x.phase1-peaplabel");
+    }
+    Ok(())
+}
+
+#[test]
+fn hidden_enterprise_and_saved_reactivation_preserve_peap_zero_and_trust() -> anyhow::Result<()> {
+    let mut target = example_connect_target(true);
+    target.enterprise = Some(EnterpriseAuth {
+        identity: Some("test".into()),
+        phase1_peaplabel: Some("0".into()),
+        ca_cert: Some("file:///test/ca.pem".into()),
+        domain_suffix_match: Some("radius.example".into()),
+        ..Default::default()
+    });
+    let mut settings =
+        super::hidden_wifi_connection_settings(&target, Some("test-password"), None)?;
+    let before = settings["802-1x"].clone();
+    target.enterprise = None;
+    apply_saved_activation_settings(&mut settings, &target, None, None, None)?;
+    assert_eq!(settings["802-1x"], before);
+    assert_eq!(
+        setting::<String>(&settings["802-1x"], "phase1-peaplabel").as_deref(),
+        Some("0")
+    );
+    Ok(())
+}
+
+#[test]
 fn enterprise_wifi_settings_include_8021x_credentials() {
     let mut auth = EnterpriseAuth {
         eap: vec!["peap".to_string()],
