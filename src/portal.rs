@@ -234,9 +234,9 @@ pub(crate) fn complete(owner: Option<&str>, params: CompleteParams) -> Result<Va
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::model::PrimaryConnectionIdentity;
-    use serde_json::json;
+    use super::{Mode, PrepareParams, episode, safe_url, validate};
+    use crate::model::{ConnectivityStatus, PrimaryConnectionIdentity};
+    use serde_json::{Value, json};
 
     pub(super) fn status() -> ConnectivityStatus {
         ConnectivityStatus::from_nm_code(2).with_portal_context(

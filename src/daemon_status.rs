@@ -6,19 +6,23 @@ use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, NetworksRequest};
 use crate::daemon_event::emit_json_event_nonfatal;
-use crate::daemon_runtime::SharedPayloads;
 use crate::nm::Nm;
 use crate::protocol::{Method, Stream};
+
+#[derive(Default)]
+pub(crate) struct SharedPayloads {
+    pub(crate) status: Option<Value>,
+    pub(crate) connectivity: Option<Value>,
+    pub(crate) inventory: Option<Value>,
+    pub(crate) networks: Option<Value>,
+}
 
 pub(crate) struct SubscriptionState {
     id: String,
     owner: Option<String>,
     streams: Vec<Stream>,
     emitter: SignalEmitter<'static>,
-    last_status: Option<Value>,
-    last_connectivity: Option<Value>,
-    last_inventory: Option<Value>,
-    last_networks: Option<Value>,
+    last: SharedPayloads,
 }
 
 impl SubscriptionState {
@@ -33,10 +37,7 @@ impl SubscriptionState {
             owner,
             streams,
             emitter,
-            last_status: None,
-            last_connectivity: None,
-            last_inventory: None,
-            last_networks: None,
+            last: SharedPayloads::default(),
         }
     }
 
@@ -52,63 +53,42 @@ impl SubscriptionState {
         self.owner.as_deref()
     }
 
-    pub(crate) fn owned_by(&self, owner: &str) -> bool {
-        self.owner.as_deref() == Some(owner)
-    }
-
     pub(crate) fn emit_external(&self, stream: Stream, request_id: &str, event: &str, data: Value) {
-        if self.watches(stream) {
-            emit_json_event_nonfatal(&self.emitter, stream, Some(request_id), event, data);
-        }
+        emit_json_event_nonfatal(&self.emitter, stream, Some(request_id), event, data);
     }
 
     pub(crate) fn emit_changes(&mut self, payloads: &SharedPayloads) {
-        emit_payload_change(
-            &self.emitter,
-            &self.id,
-            self.watches(Stream::WifiStatus),
-            Stream::WifiStatus,
-            Method::WifiStatus,
-            &mut self.last_status,
-            payloads.status.as_ref(),
-        );
-        emit_payload_change(
-            &self.emitter,
-            &self.id,
-            self.watches(Stream::NetworkConnectivity),
-            Stream::NetworkConnectivity,
-            Method::NetworkConnectivity,
-            &mut self.last_connectivity,
-            payloads.connectivity.as_ref(),
-        );
-        emit_payload_change(
-            &self.emitter,
-            &self.id,
-            self.watches(Stream::NetworkInventory),
-            Stream::NetworkInventory,
-            Method::NetworkInventory,
-            &mut self.last_inventory,
-            payloads.inventory.as_ref(),
-        );
+        for (stream, method, previous, value) in [
+            (
+                Stream::WifiStatus,
+                Method::WifiStatus,
+                &mut self.last.status,
+                &payloads.status,
+            ),
+            (
+                Stream::NetworkConnectivity,
+                Method::NetworkConnectivity,
+                &mut self.last.connectivity,
+                &payloads.connectivity,
+            ),
+            (
+                Stream::NetworkInventory,
+                Method::NetworkInventory,
+                &mut self.last.inventory,
+                &payloads.inventory,
+            ),
+        ] {
+            if self.streams.contains(&stream)
+                && let Some(value) = value
+            {
+                emit_on_change(&self.emitter, stream, &self.id, method, previous, value);
+            }
+        }
         if self.watches(Stream::WifiNetworks)
             && let Some(value) = &payloads.networks
         {
-            emit_network_changes(&self.emitter, &self.id, &mut self.last_networks, value);
+            emit_network_changes(&self.emitter, &self.id, &mut self.last.networks, value);
         }
-    }
-}
-
-fn emit_payload_change(
-    emitter: &SignalEmitter<'static>,
-    id: &str,
-    watched: bool,
-    stream: Stream,
-    method: Method,
-    previous: &mut Option<Value>,
-    value: Option<&Value>,
-) {
-    if watched && let Some(value) = value {
-        emit_on_change(emitter, stream, id, method, previous, value);
     }
 }
 
@@ -124,19 +104,22 @@ pub(crate) fn refresh_payloads(
     let status = need_status
         .then(|| application.status())
         .and_then(log_typed_refresh_error);
-    let connectivity_from_status = status
-        .as_ref()
-        .and_then(|status| status.connectivity.clone());
-    let payloads = SharedPayloads {
-        status: status.map(|status| json!(status)),
-        connectivity: need_connectivity
-            .then(|| match connectivity_from_status {
+    let connectivity = need_connectivity
+        .then(|| {
+            match status
+                .as_ref()
+                .and_then(|status| status.connectivity.as_ref())
+            {
                 Some(connectivity) => Ok(json!(connectivity)),
                 None => nm
                     .connectivity_snapshot()
                     .map(|connectivity| json!(connectivity)),
-            })
-            .and_then(log_typed_refresh_error),
+            }
+        })
+        .and_then(log_typed_refresh_error);
+    let payloads = SharedPayloads {
+        status: status.map(|status| json!(status)),
+        connectivity,
         inventory: need_inventory
             .then(|| {
                 application
@@ -226,23 +209,18 @@ fn network_delta(previous: Option<&Value>, current: &Value) -> Option<Map<String
         .filter(|network| {
             network_key(network).is_some_and(|key| !previous_by_key.contains_key(key))
         })
-        .cloned()
         .collect::<Vec<_>>();
     let changed = current_networks
         .iter()
         .filter(|network| {
-            network_key(network).is_some_and(|key| {
-                previous_by_key
-                    .get(key)
-                    .is_some_and(|previous| network_entry_changed(previous, network))
-            })
+            network_key(network)
+                .and_then(|key| previous_by_key.get(key))
+                .is_some_and(|previous| network_entry_changed(previous, network))
         })
-        .cloned()
         .collect::<Vec<_>>();
     let removed = previous_networks
         .iter()
         .filter(|network| network_key(network).is_some_and(|key| !current_by_key.contains_key(key)))
-        .cloned()
         .collect::<Vec<_>>();
 
     if previous.is_some() && added.is_empty() && removed.is_empty() && changed.is_empty() {
@@ -274,26 +252,39 @@ fn network_key(network: &Value) -> Option<&str> {
 }
 
 fn network_entry_changed(previous: &Value, current: &Value) -> bool {
-    comparable_network_entry(previous) != comparable_network_entry(current)
+    !equal_network_fields(previous, current, |key, previous, current| {
+        match (key, previous, current) {
+            ("access_points", Value::Array(previous), Value::Array(current)) => {
+                previous.len() == current.len()
+                    && previous.iter().zip(current).all(|(previous, current)| {
+                        equal_network_fields(previous, current, |_, a, b| a == b)
+                    })
+            }
+            _ => previous == current,
+        }
+    })
 }
 
-fn comparable_network_entry(network: &Value) -> Value {
-    let mut network = network.clone();
-    let Some(object) = network.as_object_mut() else {
-        return network;
+// Ignore age only at the network and AP object boundaries, not in arbitrary
+// nested metadata. Compare borrowed values without copying either JSON tree.
+fn equal_network_fields(
+    previous: &Value,
+    current: &Value,
+    equal: impl Fn(&str, &Value, &Value) -> bool,
+) -> bool {
+    let (Value::Object(previous), Value::Object(current)) = (previous, current) else {
+        return previous == current;
     };
-    object.remove("last_seen_age_ms");
-    if let Some(access_points) = object
-        .get_mut("access_points")
-        .and_then(Value::as_array_mut)
-    {
-        for access_point in access_points {
-            if let Some(access_point) = access_point.as_object_mut() {
-                access_point.remove("last_seen_age_ms");
-            }
-        }
-    }
-    network
+    stable_fields(previous).count() == stable_fields(current).count()
+        && stable_fields(previous).all(|(key, value)| {
+            current
+                .get(key)
+                .is_some_and(|current| equal(key, value, current))
+        })
+}
+
+fn stable_fields(object: &Map<String, Value>) -> impl Iterator<Item = (&String, &Value)> {
+    object.iter().filter(|(key, _)| *key != "last_seen_age_ms")
 }
 
 fn emit_on_change(
@@ -351,7 +342,7 @@ fn emit_on_change(
 mod tests {
     use serde_json::json;
 
-    use super::network_delta;
+    use super::{network_delta, network_entry_changed};
 
     #[test]
     fn network_delta_reports_added_removed_and_changed_entries() {
@@ -415,5 +406,25 @@ mod tests {
         });
 
         assert_eq!(network_delta(Some(&previous), &current), None);
+        // Only the two documented age fields are volatile; preserve all other
+        // differences, including missing/null fields and AP order/length.
+        for changed in [
+            json!({"key":"same", "strength":41}),
+            json!({"key":"same", "strength":40, "access_points":null}),
+            json!({"key":"same", "strength":40, "access_points":[]}),
+            json!({"key":"same", "strength":40, "access_points":[{"path":"/ap/2"}]}),
+            json!({"key":"same", "strength":40, "access_points":[{"path":"/ap/1", "extra":null}]}),
+        ] {
+            assert!(network_entry_changed(&previous["networks"][0], &changed));
+            assert!(network_entry_changed(&changed, &previous["networks"][0]));
+        }
+        assert!(!network_entry_changed(
+            &json!({"key":"x"}),
+            &json!({"key":"x", "last_seen_age_ms":1})
+        ));
+        assert!(network_entry_changed(
+            &json!({"key":"x", "metadata":{"last_seen_age_ms":1}}),
+            &json!({"key":"x", "metadata":{"last_seen_age_ms":2}})
+        ));
     }
 }

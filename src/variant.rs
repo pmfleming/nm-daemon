@@ -100,13 +100,16 @@ where
     Ok(())
 }
 
-pub(crate) fn insert_optional_u32s(
+pub(crate) fn insert_optional_values<'a, T>(
     section: &mut HashMap<String, OwnedValue>,
-    values: &[(&str, Option<u32>)],
-) -> Result<()> {
+    values: impl IntoIterator<Item = (&'a str, Option<T>)>,
+) -> Result<()>
+where
+    T: Into<Value<'static>> + DynamicType,
+{
     values
-        .iter()
-        .try_for_each(|(key, value)| insert_optional_value(section, key, *value))
+        .into_iter()
+        .try_for_each(|(key, value)| insert_optional_value(section, key, value))
 }
 
 #[cfg(test)]

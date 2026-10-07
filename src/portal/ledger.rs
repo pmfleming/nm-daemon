@@ -230,7 +230,8 @@ impl Ledger {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{FALLBACKS, Intent, Ledger, Mode, Outcome};
+    use std::path::PathBuf;
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {

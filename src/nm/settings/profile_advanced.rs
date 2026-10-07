@@ -14,7 +14,9 @@ use crate::model::{
     ProfileEnterpriseSettings, ProfileEnterpriseUpdate, SecretFlags, WifiBand,
     WifiProfileAdvancedUpdate,
 };
-use crate::variant::{insert_optional_value, setting, setting_strings as strings};
+use crate::variant::{
+    insert_optional_value, insert_optional_values, setting, setting_strings as strings,
+};
 
 const WIRELESS: &str = "802-11-wireless";
 const ENTERPRISE: &str = "802-1x";
@@ -231,15 +233,25 @@ fn apply_ip_fields(
         update.ipv4_dhcp_client_id.as_deref(),
     )?;
     set_clearable_text(ipv4, "dhcp-hostname", update.ipv4_dhcp_hostname.as_deref())?;
-    insert_optional_value(ipv4, "never-default", update.ipv4_never_default)?;
-    insert_optional_value(ipv4, "ignore-auto-routes", update.ipv4_ignore_auto_routes)?;
-    insert_optional_value(ipv4, "may-fail", update.ipv4_may_fail)?;
+    insert_optional_values(
+        ipv4,
+        [
+            ("never-default", update.ipv4_never_default),
+            ("ignore-auto-routes", update.ipv4_ignore_auto_routes),
+            ("may-fail", update.ipv4_may_fail),
+        ],
+    )?;
     insert_optional_value(ipv4, "dad-timeout", update.ipv4_dad_timeout)?;
 
     let ipv6 = settings.entry("ipv6".to_string()).or_default();
-    insert_optional_value(ipv6, "never-default", update.ipv6_never_default)?;
-    insert_optional_value(ipv6, "ignore-auto-routes", update.ipv6_ignore_auto_routes)?;
-    insert_optional_value(ipv6, "may-fail", update.ipv6_may_fail)?;
+    insert_optional_values(
+        ipv6,
+        [
+            ("never-default", update.ipv6_never_default),
+            ("ignore-auto-routes", update.ipv6_ignore_auto_routes),
+            ("may-fail", update.ipv6_may_fail),
+        ],
+    )?;
     if let Some(privacy) = update.ipv6_privacy {
         if !(-1..=2).contains(&privacy) {
             return Err(DomainError::validation(
@@ -304,27 +316,27 @@ fn apply_enterprise(
         set_certificate(section, key, value.as_deref())?;
     }
     insert_optional_value(section, "system-ca-certs", update.system_ca_certs)?;
-    for (key, value) in [
-        ("phase1-auth-flags", update.phase1_auth_flags),
-        ("password-flags", update.password_flags),
-        (
-            "private-key-password-flags",
-            update.private_key_password_flags,
-        ),
-        (
-            "phase2-private-key-password-flags",
-            update.phase2_private_key_password_flags,
-        ),
-        ("ca-cert-password-flags", update.ca_cert_password_flags),
-        (
-            "client-cert-password-flags",
-            update.client_cert_password_flags,
-        ),
-        ("pin-flags", update.pin_flags),
-    ] {
-        insert_optional_value(section, key, value)?;
-    }
-    Ok(())
+    insert_optional_values(
+        section,
+        [
+            ("phase1-auth-flags", update.phase1_auth_flags),
+            ("password-flags", update.password_flags),
+            (
+                "private-key-password-flags",
+                update.private_key_password_flags,
+            ),
+            (
+                "phase2-private-key-password-flags",
+                update.phase2_private_key_password_flags,
+            ),
+            ("ca-cert-password-flags", update.ca_cert_password_flags),
+            (
+                "client-cert-password-flags",
+                update.client_cert_password_flags,
+            ),
+            ("pin-flags", update.pin_flags),
+        ],
+    )
 }
 
 /// NetworkManager stores certificates as bytes; a `file://`/`pkcs11:` URI is
@@ -582,27 +594,24 @@ mod tests {
 
         let connection = &settings["connection"];
         assert_eq!(
-            i32::try_from(connection["autoconnect-priority"].clone()).unwrap(),
+            i32::try_from(&connection["autoconnect-priority"]).unwrap(),
             30
         );
         assert!(connection.contains_key("id"), "unsent fields are preserved");
-        assert_eq!(i32::try_from(connection["mdns"].clone()).unwrap(), 1);
+        assert_eq!(i32::try_from(&connection["mdns"]).unwrap(), 1);
         assert!(
             !connection.contains_key("zone"),
             "unsent fields are not created"
         );
         let wireless = &settings["802-11-wireless"];
         assert_eq!(
-            String::try_from(wireless["bssid"].clone()).unwrap(),
+            <&str>::try_from(&wireless["bssid"]).unwrap(),
             "00:11:22:33:44:55"
         );
-        assert_eq!(String::try_from(wireless["band"].clone()).unwrap(), "a");
-        assert_eq!(u32::try_from(wireless["channel"].clone()).unwrap(), 36);
-        assert!(!bool::try_from(settings["ipv4"]["may-fail"].clone()).unwrap());
-        assert_eq!(
-            i32::try_from(settings["ipv6"]["ip6-privacy"].clone()).unwrap(),
-            2
-        );
+        assert_eq!(<&str>::try_from(&wireless["band"]).unwrap(), "a");
+        assert_eq!(u32::try_from(&wireless["channel"]).unwrap(), 36);
+        assert!(!bool::try_from(&settings["ipv4"]["may-fail"]).unwrap());
+        assert_eq!(i32::try_from(&settings["ipv6"]["ip6-privacy"]).unwrap(), 2);
 
         apply_advanced(
             &mut settings,

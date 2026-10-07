@@ -112,7 +112,7 @@ impl AddressFamily {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct DiscoverySnapshot {
     pub(crate) source: &'static str,
     pub(crate) service_type: String,
@@ -125,7 +125,7 @@ pub(crate) struct DiscoverySnapshot {
     pub(crate) warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct DiscoveredService {
     pub(crate) instance: String,
     pub(crate) service_type: String,
@@ -139,7 +139,7 @@ pub(crate) struct DiscoveredService {
     pub(crate) txt: Vec<DiscoveryTxtRecord>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct DiscoveryAddress {
     pub(crate) interface_index: i32,
     pub(crate) family: &'static str,

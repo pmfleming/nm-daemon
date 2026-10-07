@@ -1386,30 +1386,21 @@ fn candidate_matches_profile_restrictions(
     candidate: &ConnectCandidate,
     profile: &WifiProfileDetails,
 ) -> bool {
-    if let Some(bssid) = profile.bssid.as_deref()
-        && !candidate
+    profile.bssid.as_deref().is_none_or(|bssid| {
+        candidate
             .target
             .bssid
             .as_ref()
             .is_some_and(|candidate| candidate.as_str().eq_ignore_ascii_case(bssid))
-    {
-        return false;
-    }
-    if profile.band != WifiBand::Auto
-        && candidate
+    }) && (profile.band == WifiBand::Auto
+        || candidate
             .band
             .as_deref()
             .and_then(WifiBand::from_frequency_label)
-            != Some(profile.band)
-    {
-        return false;
-    }
-    if let Some(channel) = profile.channel
-        && candidate.channel != Some(channel)
-    {
-        return false;
-    }
-    true
+            == Some(profile.band))
+        && profile
+            .channel
+            .is_none_or(|channel| candidate.channel == Some(channel))
 }
 
 fn scan_cancelled_error() -> anyhow::Error {

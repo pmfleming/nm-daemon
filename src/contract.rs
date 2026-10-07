@@ -1604,221 +1604,112 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(covered_methods, registered_methods);
         assert!(value["wifi-networks.saved"]["networks"].is_array());
-        assert_eq!(value["wifi-networks.saved"]["snapshot"]["source"], "cache");
-        assert_eq!(
-            value["wifi-networks.saved"]["snapshot"]["refresh_requested"],
-            true
-        );
-        assert_eq!(
-            value["wifi-networks.saved"]["networks"][0]["security_class"],
-            "personal"
-        );
-        assert_eq!(
-            value["wifi-networks.password-required"]["networks"][0]["capabilities"]["needs_password"],
-            true
-        );
-        assert_eq!(
-            value["wifi-networks.enterprise-required"]["networks"][0]["capabilities"]["needs_credentials"],
-            true
-        );
-        assert_eq!(
-            value["wifi-networks.enterprise-required"]["networks"][0]["connect_prompt"]["kind"],
-            "enterprise"
-        );
-        assert_eq!(value["wifi-status.inactive"]["status"]["active"], false);
-        assert_eq!(value["wifi-status.inactive"]["status"]["enabled"], false);
-        assert_eq!(value["wifi-set-enabled.success"]["result"]["enabled"], true);
-        assert_eq!(value["wifi-band.status"]["band"]["selected"], "5");
-        assert_eq!(
-            value["wifi-band.set"]["result"]["request_id"],
-            "band-contract"
-        );
-        assert_eq!(value["wifi-saved.profiles"]["profiles"][0]["id"], "Example");
-        assert_eq!(
-            value["wifi-connect.secret-required"]["result"]["reason"],
-            "secret-required"
-        );
-        assert_eq!(value["wifi-scan.stream"]["events"][0]["protocol"], "nm-api");
-        assert_eq!(
-            value["network-connectivity.full"]["connectivity"]["state"],
-            "full"
-        );
-        assert_eq!(
-            value["network-devices.list"]["devices"][0]["type_name"],
-            "wifi"
-        );
-        assert_eq!(
-            value["network-connections.list"]["connections"][1]["type_name"],
-            "vpn"
-        );
-        assert_eq!(
-            value["network-status.connected"]["network"]["state_name"],
-            "connected-global"
-        );
-        assert_eq!(
-            value["network-inventory.snapshot"]["inventory"]["active_connections"][0]["default4"],
-            true
-        );
-        assert_eq!(
-            value["network-activate-profile.started"]["result"]["status"],
-            "activating"
-        );
-        assert_eq!(
-            value["network-deactivate.success"]["result"]["status"],
-            "deactivated"
-        );
-        assert_eq!(
-            value["network-health.stream"]["events"][1]["health"]["reason"]["name"],
-            "no-secrets"
-        );
-        assert_eq!(
-            value["network-health.stream"]["events"][1]["health"]["unexpected"],
-            true
-        );
-        assert_eq!(
-            value["network-health.stream"]["events"][1]["health"]["transition_kind"],
-            "failure"
-        );
-        assert_eq!(
-            value["network-health.stream"]["events"][1]["health"]["notification_recommended"],
-            true
-        );
-        assert_eq!(
-            value["network-health.stream"]["events"][1]["health"]["severity"],
-            "error"
-        );
-        assert_eq!(
-            value["network-health.stream"]["events"][2]["health"]["user_requested"],
-            true
-        );
-        assert_eq!(
-            value["continuous.streams"]["events"][4]["stream"],
-            "network.inventory"
-        );
-        assert_eq!(
-            value["continuous.streams"]["events"][6]["stream"],
-            "wifi.networks"
-        );
-        assert_eq!(
-            value["continuous.streams"]["events"][7]["snapshot"]["refresh_requested"],
-            false
-        );
-        assert_eq!(
-            value["wifi-disconnect.success"]["result"]["status"],
-            "disconnected"
-        );
-        assert_eq!(
-            value["wifi-profile.details"]["result"]["security_type"],
-            "WPA Enterprise"
-        );
-        assert_eq!(
-            value["wifi-profile.details"]["result"]["enterprise"]["eap"][0],
-            "peap"
-        );
-        assert_eq!(
-            value["wifi-profile.details"]["result"]["enterprise"]["password_flags"]["agent_owned"],
-            true
-        );
-        assert_eq!(value["wifi-profile.details"]["result"]["band"], "5");
+        let expectations = [
+            serde_json::json!({
+                "/wifi-networks.saved/snapshot/source": "cache",
+                "/wifi-networks.saved/snapshot/refresh_requested": true,
+                "/wifi-networks.saved/networks/0/security_class": "personal",
+                "/wifi-networks.password-required/networks/0/capabilities/needs_password": true,
+                "/wifi-networks.enterprise-required/networks/0/capabilities/needs_credentials": true,
+                "/wifi-networks.enterprise-required/networks/0/connect_prompt/kind": "enterprise",
+                "/wifi-status.inactive/status/active": false,
+                "/wifi-status.inactive/status/enabled": false,
+                "/wifi-set-enabled.success/result/enabled": true,
+                "/wifi-band.status/band/selected": "5",
+                "/wifi-band.set/result/request_id": "band-contract",
+                "/wifi-saved.profiles/profiles/0/id": "Example",
+                "/wifi-connect.secret-required/result/reason": "secret-required",
+                "/wifi-scan.stream/events/0/protocol": "nm-api",
+                "/network-connectivity.full/connectivity/state": "full",
+                "/network-devices.list/devices/0/type_name": "wifi",
+                "/network-connections.list/connections/1/type_name": "vpn",
+                "/network-status.connected/network/state_name": "connected-global",
+                "/network-inventory.snapshot/inventory/active_connections/0/default4": true,
+                "/network-activate-profile.started/result/status": "activating",
+                "/network-deactivate.success/result/status": "deactivated",
+                "/network-health.stream/events/1/health/reason/name": "no-secrets",
+                "/network-health.stream/events/1/health/unexpected": true,
+                "/network-health.stream/events/1/health/transition_kind": "failure",
+                "/network-health.stream/events/1/health/notification_recommended": true,
+                "/network-health.stream/events/1/health/severity": "error",
+                "/network-health.stream/events/2/health/user_requested": true,
+                "/continuous.streams/events/4/stream": "network.inventory",
+                "/continuous.streams/events/6/stream": "wifi.networks",
+                "/continuous.streams/events/7/snapshot/refresh_requested": false,
+                "/wifi-disconnect.success/result/status": "disconnected",
+                "/wifi-profile.details/result/security_type": "WPA Enterprise",
+                "/wifi-profile.details/result/enterprise/eap/0": "peap",
+                "/wifi-profile.details/result/enterprise/password_flags/agent_owned": true,
+                "/wifi-profile.details/result/band": "5",
+            }),
+            serde_json::json!({
+                "/wifi-profile.update-conflict/error/code": "conflict",
+                "/wifi-profile.reveal-secret/result/primary_secret_key": "password",
+                "/wifi-profile.reveal-secret/result/values/private-key-password": "private-key-secret",
+                "/wifi-profile.forget/result/status": "forgotten",
+                "/wifi-profile.share/result/shareable": true,
+                "/wifi-secret.capabilities/secret_agent/keyring/prompt_handling": "unsupported",
+                "/wifi-secret.provide/result/persistence_status": "pending",
+                "/network-statistics.watch/result/interval_ms": 1000,
+                "/wifi-qr.parse/qr/auth": "wpa",
+                "/wifi-qr.parse/qr/has_password": true,
+                "/wifi-qr.parse-open/qr/auth": "open",
+                "/wifi-qr.parse-open/qr/hidden": true,
+                "/wifi-qr.connect/result/stream": "wifi.connect",
+                "/vpn.list/vpns/0/plugin": "openconnect",
+                "/vpn.list/vpns/1/plugin": "wireguard",
+                "/vpn.list/vpns/1/secret_names/0": "private-key",
+                "/vpn.status-connected/vpn/active/0/vpn_state_name": "activated",
+                "/vpn.stream/events/4/details/reason": "no-secrets",
+                "/hotspot.capabilities/hotspot/supported": true,
+                "/hotspot.capabilities-unsupported/hotspot/unsupported_reason": "ap-mode-unsupported",
+                "/hotspot.status-active/hotspot/active": true,
+                "/hotspot.status-inactive/hotspot/active": false,
+                "/hotspot.stop/result/status": "stopped",
+                "/network-statistics.stream/events/2/statistics/rx_bytes_per_second": 125000.0,
+            }),
+        ];
+        for (path, expected) in expectations
+            .iter()
+            .flat_map(|group| group.as_object().unwrap())
+        {
+            assert_eq!(value.pointer(path), Some(expected), "{path}");
+        }
         assert!(
             value["wifi-profile.details"]["result"]["version"]
                 .as_str()
                 .is_some_and(|version| version.len() == 16)
         );
-        assert_eq!(
-            value["wifi-profile.update-conflict"]["error"]["code"],
-            "conflict"
-        );
-        assert_eq!(
-            value["wifi-profile.reveal-secret"]["result"]["primary_secret_key"],
-            "password"
-        );
-        assert_eq!(
-            value["wifi-profile.reveal-secret"]["result"]["values"]["private-key-password"],
-            "private-key-secret"
-        );
-        assert_eq!(
-            value["wifi-profile.forget"]["result"]["status"],
-            "forgotten"
-        );
-        assert_eq!(value["wifi-profile.share"]["result"]["shareable"], true);
-        assert_eq!(
-            value["wifi-secret.capabilities"]["secret_agent"]["keyring"]["prompt_handling"],
-            "unsupported"
-        );
-        assert_eq!(
-            value["wifi-secret.provide"]["result"]["persistence_status"],
-            "pending"
-        );
-        assert_eq!(
-            value["network-statistics.watch"]["result"]["interval_ms"],
-            1_000
-        );
-        assert_eq!(value["wifi-qr.parse"]["qr"]["auth"], "wpa");
-        assert_eq!(value["wifi-qr.parse"]["qr"]["has_password"], true);
         assert!(
             value["wifi-qr.parse"]["qr"].get("password").is_none(),
             "a QR fixture must never carry the scanned secret"
-        );
-        assert_eq!(value["wifi-qr.parse-open"]["qr"]["auth"], "open");
-        assert_eq!(value["wifi-qr.parse-open"]["qr"]["hidden"], true);
-        assert_eq!(value["wifi-qr.connect"]["result"]["stream"], "wifi.connect");
-        assert_eq!(value["vpn.list"]["vpns"][0]["plugin"], "openconnect");
-        assert_eq!(value["vpn.list"]["vpns"][1]["plugin"], "wireguard");
-        assert_eq!(
-            value["vpn.list"]["vpns"][1]["secret_names"][0],
-            "private-key"
-        );
-        assert_eq!(
-            value["vpn.status-connected"]["vpn"]["active"][0]["vpn_state_name"],
-            "activated"
         );
         assert!(
             value["vpn.status-idle"]["vpn"]["active"]
                 .as_array()
                 .is_some_and(Vec::is_empty)
         );
-        assert_eq!(
-            value["vpn.stream"]["events"][4]["details"]["reason"],
-            "no-secrets"
-        );
-        assert_eq!(value["hotspot.capabilities"]["hotspot"]["supported"], true);
-        assert_eq!(
-            value["hotspot.capabilities-unsupported"]["hotspot"]["unsupported_reason"],
-            "ap-mode-unsupported"
-        );
-        assert_eq!(value["hotspot.status-active"]["hotspot"]["active"], true);
-        assert_eq!(value["hotspot.status-inactive"]["hotspot"]["active"], false);
-        assert_eq!(value["hotspot.stop"]["result"]["status"], "stopped");
         assert!(
             value["hotspot.stream"]["events"][3]["result"]["hotspot"]["share"]["qr_payload"]
                 .as_str()
                 .is_some_and(|payload| payload.starts_with("WIFI:T:WPA;S:laufan-hotspot;"))
         );
-        assert_eq!(
-            value["network-statistics.stream"]["events"][2]["statistics"]["rx_bytes_per_second"],
-            125_000.0
-        );
-        for fixture in [
-            "wifi-connect.stream",
-            "wifi-band.stream",
-            "wifi-scan.stream",
-            "wifi-secret.stream",
-            "network-statistics.stream",
-            "hotspot.stream",
-            "vpn.stream",
-            "network-health.stream",
+        for (fixture, stream) in [
+            ("wifi-connect.stream", crate::protocol::Stream::WifiConnect),
+            ("wifi-band.stream", crate::protocol::Stream::WifiBand),
+            ("wifi-scan.stream", crate::protocol::Stream::WifiScan),
+            ("wifi-secret.stream", crate::protocol::Stream::WifiSecret),
+            (
+                "network-statistics.stream",
+                crate::protocol::Stream::NetworkStatistics,
+            ),
+            ("hotspot.stream", crate::protocol::Stream::Hotspot),
+            ("vpn.stream", crate::protocol::Stream::Vpn),
+            (
+                "network-health.stream",
+                crate::protocol::Stream::NetworkHealth,
+            ),
         ] {
-            let stream = match fixture {
-                "wifi-connect.stream" => crate::protocol::Stream::WifiConnect,
-                "wifi-band.stream" => crate::protocol::Stream::WifiBand,
-                "wifi-scan.stream" => crate::protocol::Stream::WifiScan,
-                "network-statistics.stream" => crate::protocol::Stream::NetworkStatistics,
-                "hotspot.stream" => crate::protocol::Stream::Hotspot,
-                "vpn.stream" => crate::protocol::Stream::Vpn,
-                "network-health.stream" => crate::protocol::Stream::NetworkHealth,
-                _ => crate::protocol::Stream::WifiSecret,
-            };
             let actual = value[fixture]["events"]
                 .as_array()
                 .expect("stream fixture events")

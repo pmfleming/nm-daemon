@@ -231,20 +231,38 @@ fn emit_connect_event(
     terminal_runtime: &Weak<DaemonRuntime>,
     terminal_owner: Option<&str>,
 ) -> Result<()> {
-    let (name, data) = match event {
+    let (name, data) = connect_event_payload(request_id, event);
+    let terminal = matches!(name, "succeeded" | "failed" | "cancelled");
+    // Publish recovery/portal proof before notifying clients that may immediately
+    // prepare a portal intent or recover a missed event.
+    if let Some(runtime) = terminal_runtime.upgrade() {
+        let event = event_value(STREAM, Some(request_id), name, data);
+        if terminal {
+            let stored = runtime.store_terminal_result(
+                request_id,
+                terminal_owner.map(ToString::to_string),
+                STREAM,
+                event,
+            );
+            let terminal_name = stored["event"].as_str().unwrap_or(name).to_string();
+            // Delivery failure must not overwrite authoritative completion with
+            // an unrelated transport error; operation.status can replay it.
+            emit_json_event_nonfatal(emitter, STREAM, Some(request_id), &terminal_name, stored);
+            return Ok(());
+        }
+        runtime.store_connect_progress(request_id, terminal_owner, event.clone());
+        return emit_json_event(emitter, STREAM, Some(request_id), name, event);
+    }
+    emit_json_event(emitter, STREAM, Some(request_id), name, data)
+}
+
+fn connect_event_payload(request_id: &str, event: &ConnectEvent) -> (&'static str, Value) {
+    let (name, phase, target, mut data) = match event {
         ConnectEvent::Started {
             phase,
             target,
             message,
-        } => (
-            "started",
-            json!({
-                "request_id": request_id,
-                "phase": phase,
-                "target": target,
-                "message": message,
-            }),
-        ),
+        } => ("started", phase, target, json!({ "message": message })),
         ConnectEvent::Progress {
             phase,
             target,
@@ -253,10 +271,9 @@ fn emit_connect_event(
             previous_reason,
         } => (
             "progress",
+            phase,
+            target,
             json!({
-                "request_id": request_id,
-                "phase": phase,
-                "target": target,
                 "message": message,
                 "candidate": candidate,
                 "previous_reason": previous_reason,
@@ -281,15 +298,7 @@ fn emit_connect_event(
                 suggest_open_portal = result.suggest_open_portal,
                 "emitting correlated Wi-Fi connection success"
             );
-            (
-                "succeeded",
-                json!({
-                    "request_id": request_id,
-                    "phase": phase,
-                    "target": target,
-                    "result": result,
-                }),
-            )
+            ("succeeded", phase, target, json!({ "result": result }))
         }
         ConnectEvent::Finished {
             phase,
@@ -305,10 +314,9 @@ fn emit_connect_event(
             );
             (
                 "failed",
+                phase,
+                target,
                 json!({
-                    "request_id": request_id,
-                    "phase": phase,
-                    "target": target,
                     "result": result,
                     "reason": result.reason,
                     "message": result.message,
@@ -328,39 +336,13 @@ fn emit_connect_event(
             outcome: ConnectOutcome::Cancelled { message },
         } => {
             tracing::info!(%request_id, "emitting correlated Wi-Fi connection cancellation");
-            (
-                "cancelled",
-                json!({
-                    "request_id": request_id,
-                    "phase": phase,
-                    "target": target,
-                    "message": message,
-                }),
-            )
+            ("cancelled", phase, target, json!({ "message": message }))
         }
     };
-    let terminal = matches!(name, "succeeded" | "failed" | "cancelled");
-    // Publish recovery/portal proof before notifying clients that may immediately
-    // prepare a portal intent or recover a missed event.
-    if let Some(runtime) = terminal_runtime.upgrade() {
-        let event = event_value(STREAM, Some(request_id), name, data.clone());
-        if terminal {
-            let stored = runtime.store_terminal_result(
-                request_id,
-                terminal_owner.map(ToString::to_string),
-                STREAM,
-                event,
-            );
-            let terminal_name = stored["event"].as_str().unwrap_or(name).to_string();
-            // Delivery failure must not overwrite authoritative completion with
-            // an unrelated transport error; operation.status can replay it.
-            emit_json_event_nonfatal(emitter, STREAM, Some(request_id), &terminal_name, stored);
-            return Ok(());
-        } else {
-            runtime.store_connect_progress(request_id, terminal_owner, event);
-        }
-    }
-    emit_json_event(emitter, STREAM, Some(request_id), name, data)
+    data["request_id"] = json!(request_id);
+    data["phase"] = json!(phase);
+    data["target"] = json!(target);
+    (name, data)
 }
 
 fn emit_connect_failure(
@@ -389,4 +371,119 @@ fn emit_connect_failure(
         );
     }
     emit_json_event_nonfatal(emitter, STREAM, Some(request_id), "failed", data);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ConnectEvent, ConnectOutcome, ConnectPhase, ConnectTargetIdentity, connect_event_payload,
+    };
+    use crate::error::{DomainError, ErrorOperation, ErrorReport};
+    use crate::model::{
+        ConnectEnginePath, ConnectFailureReason, ConnectResult, example_connect_target,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn connect_payloads_preserve_common_and_variant_specific_fields() {
+        let target =
+            ConnectTargetIdentity::from_target(&example_connect_target(false), Some("key"));
+        let phase = ConnectPhase::Starting;
+        let message = "message".to_string();
+        for (name, event, extra) in [
+            (
+                "started",
+                ConnectEvent::Started {
+                    phase,
+                    target: target.clone(),
+                    message: message.clone(),
+                },
+                json!({"message":message}),
+            ),
+            (
+                "progress",
+                ConnectEvent::Progress {
+                    phase,
+                    target: target.clone(),
+                    message: message.clone(),
+                    candidate: None,
+                    previous_reason: None,
+                },
+                json!({"message":message,"candidate":null,"previous_reason":null}),
+            ),
+            (
+                "cancelled",
+                ConnectEvent::Cancelled {
+                    phase,
+                    target: target.clone(),
+                    message: message.clone(),
+                },
+                json!({"message":message}),
+            ),
+            (
+                "cancelled",
+                ConnectEvent::Finished {
+                    phase,
+                    target: target.clone(),
+                    outcome: ConnectOutcome::Cancelled {
+                        message: message.clone(),
+                    },
+                },
+                json!({"message":message}),
+            ),
+        ] {
+            let mut expected = extra;
+            expected["request_id"] = json!("connect-test");
+            expected["phase"] = json!(phase);
+            expected["target"] = json!(target);
+            assert_eq!(
+                connect_event_payload("connect-test", &event),
+                (name, expected)
+            );
+        }
+        let error = ErrorReport::from_error(
+            &DomainError::validation(ErrorOperation::Connect, "bad target").into(),
+            ErrorOperation::Connect,
+        );
+        let succeeded =
+            ConnectResult::connected("Example", "connected", ConnectEnginePath::Dbus, None);
+        let failed = ConnectResult::failed(
+            "Example",
+            ConnectFailureReason::ValidationError,
+            "bad target",
+        );
+        let success_data = json!({"result": succeeded});
+        let failure_data = json!({"result":failed,"reason":failed.reason,"message":failed.message,"code":error.code,"details":error.api_details()});
+        for (name, phase, outcome, extra) in [
+            (
+                "succeeded",
+                ConnectPhase::Connected,
+                ConnectOutcome::Succeeded(succeeded),
+                success_data,
+            ),
+            (
+                "failed",
+                ConnectPhase::Failed,
+                ConnectOutcome::Failed {
+                    result: failed,
+                    error,
+                },
+                failure_data,
+            ),
+        ] {
+            let mut expected = extra;
+            expected["request_id"] = json!("connect-test");
+            expected["phase"] = json!(phase);
+            expected["target"] = json!(target);
+            let event = ConnectEvent::Finished {
+                phase,
+                target: target.clone(),
+                outcome,
+            };
+            assert_eq!(
+                connect_event_payload("connect-test", &event),
+                (name, expected)
+            );
+        }
+    }
 }

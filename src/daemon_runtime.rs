@@ -22,7 +22,6 @@ mod lanes;
 mod subscriptions;
 use lanes::BlockingLane;
 use subscriptions::Control;
-pub(crate) use subscriptions::SharedPayloads;
 
 type Job = Box<dyn FnOnce(&Nm) + Send + 'static>;
 

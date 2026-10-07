@@ -48,7 +48,7 @@ impl<'a> Nmcli<'a> {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct NmcliWifiRow {
     pub(crate) ssid: String,
     pub(crate) bssid: String,

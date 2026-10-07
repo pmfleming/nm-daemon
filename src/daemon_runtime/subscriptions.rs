@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use zbus::object_server::SignalEmitter;
 
 use super::{CancelOutcome, DaemonRuntime, next_request_id};
-use crate::daemon_status::{SubscriptionState, refresh_payloads};
+use crate::daemon_status::{SharedPayloads, SubscriptionState, refresh_payloads};
 use crate::error::ErrorOperation;
 use crate::protocol::Stream;
 
@@ -56,13 +56,6 @@ impl Control {
             reply,
         }
     }
-}
-
-pub(crate) struct SharedPayloads {
-    pub(crate) status: Option<Value>,
-    pub(crate) connectivity: Option<Value>,
-    pub(crate) inventory: Option<Value>,
-    pub(crate) networks: Option<Value>,
 }
 
 pub(super) fn start(
@@ -188,11 +181,13 @@ fn remove_subscription(
     let subscription = subscriptions
         .get(&id)
         .filter(|subscription| subscription.owner() == owner)
-        .map(|_| id.clone())
-        .and_then(|id| subscriptions.remove(&id));
+        .is_some();
+    if subscription {
+        subscriptions.remove(&id);
+    }
     let _ = reply.send(CancelOutcome {
         task: task_found,
-        subscription: subscription.is_some(),
+        subscription,
     });
 }
 
@@ -200,7 +195,7 @@ fn drop_subscriptions_for_owner(
     owner: &str,
     subscriptions: &mut HashMap<String, SubscriptionState>,
 ) {
-    subscriptions.retain(|_, subscription| !subscription.owned_by(owner));
+    subscriptions.retain(|_, subscription| subscription.owner() != Some(owner));
 }
 
 /// Resolve and fan out health only while somebody is watching.
@@ -248,7 +243,7 @@ fn emit_external_to_subscribers(
         .filter(|subscription| {
             subscription
                 .owner()
-                .is_some_and(|owner| emitted_owners.insert(owner.to_string()))
+                .is_some_and(|owner| emitted_owners.insert(owner))
         })
         .for_each(|subscription| {
             subscription.emit_external(stream, request_id, event, data.clone())
