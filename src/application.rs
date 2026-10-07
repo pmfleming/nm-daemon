@@ -335,9 +335,10 @@ impl<'a> Application<'a> {
                 let networks = self
                     .nm
                     .network_entries_for_access_points(self.nm.list_all_access_points()?)?;
+                let network = networks.iter().find(|network| network.key == key);
                 let (target, candidate, mut alternatives) =
-                    resolve_connect_candidates(&networks, key, enterprise_identity)?;
-                if let Some(network) = networks.iter().find(|network| network.key == key) {
+                    resolve_connect_candidates(network, key, enterprise_identity)?;
+                if let Some(network) = network {
                     constrain_alternatives_to_saved_profile(self.nm, network, &mut alternatives);
                 }
                 let request = ConnectRequest {
@@ -386,7 +387,7 @@ impl<'a> Application<'a> {
         let mut attempts = Vec::with_capacity(total);
         let mut candidate = primary.as_ref();
         let mut attempt = 1;
-        loop {
+        let outcome = loop {
             let candidate_info = candidate.info(attempt, total);
             emit_trying_candidate(&target_identity, &candidate_info, &mut emit)?;
             let started_at = Instant::now();
@@ -404,7 +405,7 @@ impl<'a> Application<'a> {
             }
             let error = match result {
                 Ok(result) => {
-                    let outcome = self.successful_connect_outcome(
+                    break self.successful_connect_outcome(
                         result,
                         candidate_info,
                         attempt,
@@ -412,8 +413,6 @@ impl<'a> Application<'a> {
                         started_at,
                         attempts,
                     );
-                    emit_finished_connect(request, &outcome, &mut emit)?;
-                    return Ok(outcome);
                 }
                 Err(error) => error,
             };
@@ -432,10 +431,10 @@ impl<'a> Application<'a> {
                 attempt += 1;
                 continue;
             }
-            let outcome = final_failed_connect_outcome(request, error, attempts, total > 1);
-            emit_finished_connect(request, &outcome, &mut emit)?;
-            return Ok(outcome);
-        }
+            break final_failed_connect_outcome(request, error, attempts, total > 1);
+        };
+        emit_finished_connect(request, &outcome, &mut emit)?;
+        Ok(outcome)
     }
 
     fn run_connect_candidate(
@@ -1295,7 +1294,7 @@ fn profile_updated(message: &'static str) -> ProfileOperationResult {
 }
 
 fn resolve_connect_candidates(
-    networks: &[NetworkEntry],
+    network: Option<&NetworkEntry>,
     key: &str,
     enterprise_identity: Option<String>,
 ) -> Result<(
@@ -1303,7 +1302,7 @@ fn resolve_connect_candidates(
     Option<ConnectCandidate>,
     Vec<ConnectCandidate>,
 )> {
-    let Some(network) = networks.iter().find(|network| network.key == key) else {
+    let Some(network) = network else {
         if !key.contains('|') {
             // Protocol-v1 SSID-only keys retain their generic fallback. It has
             // no trustworthy AP group from which to build alternate candidates.
@@ -1326,26 +1325,7 @@ fn resolve_connect_candidates(
         target.clone(),
         &network.access_point,
     ));
-    let primary_band = network.access_point.band.as_str();
-    let mut access_points = network
-        .access_points
-        .iter()
-        .filter(|access_point| {
-            access_point.path != network.access_point.path
-                || !access_point
-                    .bssid
-                    .eq_ignore_ascii_case(&network.access_point.bssid)
-        })
-        .collect::<Vec<_>>();
-    // After one AP fails, prefer a different radio band before another BSSID
-    // on the same band. Signal strength breaks ties within each class.
-    access_points.sort_by(|left, right| {
-        (left.band == primary_band)
-            .cmp(&(right.band == primary_band))
-            .then_with(|| right.strength.cmp(&left.strength))
-            .then_with(|| left.bssid.cmp(&right.bssid))
-    });
-    let alternatives = access_points
+    let alternatives = ranked_alternatives(&network.access_point, &network.access_points)
         .into_iter()
         .map(|access_point| {
             let target = connect_target_for_network_access_point(
@@ -1357,6 +1337,26 @@ fn resolve_connect_candidates(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((target, candidate, alternatives))
+}
+
+/// Selection order is independent of execution: another band first, then
+/// strongest signal, then BSSID. Execution still tries at most one alternate.
+fn ranked_alternatives<'a>(
+    primary: &AccessPoint,
+    access_points: &'a [AccessPoint],
+) -> Vec<&'a AccessPoint> {
+    let mut alternatives = access_points
+        .iter()
+        .filter(|ap| ap.path != primary.path || !ap.bssid.eq_ignore_ascii_case(&primary.bssid))
+        .collect::<Vec<_>>();
+    alternatives.sort_by_key(|ap| {
+        (
+            ap.band == primary.band,
+            std::cmp::Reverse(ap.strength),
+            &ap.bssid,
+        )
+    });
+    alternatives
 }
 
 fn constrain_alternatives_to_saved_profile(
@@ -1429,6 +1429,77 @@ mod tests {
 
     use super::{ScanRequest, recovery_message, retry_message, retryable_candidate_failure};
     use crate::model::{ConnectAttemptSummary, ConnectCandidateInfo, ConnectFailureReason};
+
+    #[test]
+    fn selection_orders_alternatives_without_relaxing_explicit_targets() {
+        use crate::model::AccessPoint;
+        let primary = AccessPoint {
+            path: "/ap/1".into(),
+            bssid: "AA".into(),
+            band: "5 GHz".into(),
+            ..Default::default()
+        };
+        let ap = |path: &str, bssid: &str, band: &str, strength| AccessPoint {
+            path: path.into(),
+            bssid: bssid.into(),
+            band: band.into(),
+            strength,
+            ..Default::default()
+        };
+        let points = [
+            ap("/ap/1", "aa", "5 GHz", 100),
+            ap("/ap/2", "BB", "5 GHz", 99),
+            ap("/ap/3", "DD", "2.4 GHz", 80),
+            ap("/ap/4", "CC", "2.4 GHz", 80),
+            ap("/ap/5", "EE", "2.4 GHz", 60),
+        ];
+        let ordered = super::ranked_alternatives(&primary, &points);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|ap| ap.bssid.as_str())
+                .collect::<Vec<_>>(),
+            ["CC", "DD", "EE", "BB"]
+        );
+        let (_, candidate, alternatives) =
+            super::resolve_connect_candidates(None, "ssid-hex:4578616d706c65", None).unwrap();
+        assert!(candidate.is_none() && alternatives.is_empty());
+        assert!(super::resolve_connect_candidates(None, "missing|group", None).is_err());
+    }
+
+    #[test]
+    fn candidate_restrictions_require_known_matching_radio_properties() {
+        use crate::model::{WifiBand, WifiProfileDetails, example_connect_target};
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../test_support/contract-v1.json")).unwrap();
+        let mut profile: WifiProfileDetails =
+            serde_json::from_value(fixture["profile_details"]["result"].clone()).unwrap();
+        let mut candidate = super::ConnectCandidate::from_target(example_connect_target(false));
+        profile.bssid = None;
+        profile.band = WifiBand::Auto;
+        profile.channel = None;
+        assert!(super::candidate_matches_profile_restrictions(
+            &candidate, &profile
+        ));
+        profile.band = WifiBand::Ghz5;
+        assert!(!super::candidate_matches_profile_restrictions(
+            &candidate, &profile
+        ));
+        candidate.band = Some("5 GHz".into());
+        profile.channel = Some(36);
+        assert!(!super::candidate_matches_profile_restrictions(
+            &candidate, &profile
+        ));
+        candidate.channel = Some(36);
+        candidate.target.bssid = Some("AA:BB:CC:DD:EE:FF".parse().unwrap());
+        for (bssid, expected) in [("aa:bb:cc:dd:ee:ff", true), ("AA:BB:CC:DD:EE:00", false)] {
+            profile.bssid = Some(bssid.into());
+            assert_eq!(
+                super::candidate_matches_profile_restrictions(&candidate, &profile),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn dhcp_failure_can_fall_back_from_5_ghz_to_2_4_ghz() {
