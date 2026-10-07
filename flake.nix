@@ -78,6 +78,13 @@
         {
           default = nmDaemon;
           networkmanagerStable = import ./nix/networkmanager.nix { inherit pkgs; };
+          upgradePreflight = pkgs.writeShellApplication {
+            name = "nm-daemon-upgrade-preflight";
+            runtimeInputs = [ pkgs.networkmanager ];
+            text = ''
+              exec ${pkgs.python3}/bin/python3 ${./tools/nm-upgrade-preflight.py} "$@"
+            '';
+          };
           connectParityProbe = pkgs.writeShellApplication {
             name = "nm-daemon-connect-parity-probe";
             runtimeInputs = [
@@ -111,6 +118,14 @@
           connectParityProbe = self.packages.${system}.connectParityProbe;
           castPolicy = import ./nix/tests/cast-policy.nix { inherit self pkgs; };
           enterprise = import ./nix/tests/enterprise.nix { inherit self pkgs; };
+          migration = import ./nix/tests/migration.nix { inherit self pkgs; };
+          upgradePreflight = pkgs.runCommand "nm-upgrade-preflight-tests" { } ''
+            mkdir -p tools/tests
+            cp ${./tools/nm-upgrade-preflight.py} tools/nm-upgrade-preflight.py
+            cp ${./tools/tests/test_nm_upgrade_preflight.py} tools/tests/test_nm_upgrade_preflight.py
+            ${pkgs.python3}/bin/python3 -B -m unittest discover -s tools/tests -v
+            touch $out
+          '';
         }
       );
 

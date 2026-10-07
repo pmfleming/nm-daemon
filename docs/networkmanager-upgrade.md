@@ -54,6 +54,13 @@ installation checks passed. NixOS evaluation selected 1.58.1 without enabling
 the service. Runtime IWD/EAP and cross-version tests belong to the VM gate; this
 build alone is not evidence of successful live Wi-Fi authentication.
 
+## Legacy profiles and existing IWD files
+
+Use the [explicit migration runbook and read-only preflight](profile-migration.md)
+before moving a system with `ifcfg-rh` profiles to the 1.60 development/release
+line. Migration remains an operator action on the old daemon. The preflight also
+supports metadata-only auditing of an explicitly supplied IWD mirror directory.
+
 ## Enterprise compatibility
 
 `phase1_peaplabel` remains a string enum: `"0"` and `"1"` are preserved exactly.
