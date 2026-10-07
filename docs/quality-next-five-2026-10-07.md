@@ -81,4 +81,26 @@ Additional functions contribute baseline cyclomatic points. Admission lookup eff
 - Evidence remains partial for generated module wiring and unexpanded item macros. Do not identify production/test scope from filenames alone, as the Cast fixture illustrates.
 - No host networking/firewall mutation, hardware lifecycle validation, coverage rerun, allocation benchmark or MSRV run was performed.
 
+### Generated-input setup follow-up
+
+`rqlens.toml` now explicitly trusts this checkout and its dependencies to run
+build scripts/procedural macros for rust-analyzer (`identity_build_macros = true`).
+Do not copy this opt-in to untrusted projects. The Wi-Fi CSV and all three
+`build.rs` configuration inputs are declared in `fingerprint_inputs`; changing
+these inputs must invalidate measurements even when no Rust source changes.
+
+A fresh locality probe in `target/trusted-generation-probe/` resolved all 2,012
+collected references, versus 39 unresolved in the saved prior run. However, the
+current resolver classified the 39 generated-file definitions as external rather
+than assigning a local module owner. This is not complete local architecture
+identity. All nine unsupported-pattern warnings remain and the outer artifact
+correctly stays partial. Resolving navigation targets is not exhaustive extraction
+of generated declarations/dependency edges. The probe used the existing RQLens
+binary with an equivalent scratch configuration pointing at a fresh output path;
+it did not replace the historical before/after evidence or weaken any gate.
+
+Remeasure both sides with the same analyzer, configuration and input fingerprints
+before making new metric comparisons. Keep each campaign in a fresh output
+directory rather than mixing artifacts from different runs.
+
 Reproduce with `rqlens measure <metric> --config rqlens.toml` for `hotspots`, `clones`, `escape-hatches`, `reliability`, `locality`, `leverage`, and `map`, then `rqlens verify --config rqlens.toml`. Copy the JSON artifacts before and after edits to preserve comparable evidence.

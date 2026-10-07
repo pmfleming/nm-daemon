@@ -1,7 +1,17 @@
 project_name = "nm-daemon"
 project_root = "."
+# Non-Rust inputs consumed by build.rs must invalidate generated-code evidence.
+fingerprint_inputs = [
+  "data/wifi-channels.csv",
+  "config/timeouts.conf",
+  "config/daemon-capacity.conf",
+  "config/storage-policy.conf",
+]
 source_roots = ["src"]
 output_dir = "target/analysis"
 
 [rust]
+# Explicit trust: rust-analyzer may execute this checkout's build scripts and
+# dependency procedural macros. This does not certify exhaustive extraction.
+identity_build_macros = true
 helper_manifest = "../rust-quality-lens/rust_helpers/Cargo.toml"
