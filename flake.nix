@@ -76,6 +76,7 @@
         in
         {
           default = nmDaemon;
+          networkmanagerStable = import ./nix/networkmanager.nix { inherit pkgs; };
           connectParityProbe = pkgs.writeShellApplication {
             name = "nm-daemon-connect-parity-probe";
             runtimeInputs = [
@@ -101,6 +102,7 @@
       );
 
       nixosModules.default = import ./nix/nixos.nix { inherit self; };
+      nixosModules.networkManager = import ./nix/nixos-networkmanager.nix { inherit self; };
 
       checks = forAllSystems (
         system: pkgs: {
