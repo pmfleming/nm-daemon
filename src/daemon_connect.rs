@@ -340,18 +340,20 @@ fn emit_connect_event(
         }
     };
     let terminal = matches!(name, "succeeded" | "failed" | "cancelled");
-    let stored = terminal.then(|| event_value(STREAM, Some(request_id), name, data.clone()));
     // Publish recovery/portal proof before notifying clients that may immediately
-    // prepare a portal intent in response to this terminal event.
-    if let Some(event) = stored
-        && let Some(runtime) = terminal_runtime.upgrade()
-    {
-        runtime.store_terminal_result(
-            request_id,
-            terminal_owner.map(ToString::to_string),
-            STREAM,
-            event,
-        );
+    // prepare a portal intent or recover a missed event.
+    if let Some(runtime) = terminal_runtime.upgrade() {
+        let event = event_value(STREAM, Some(request_id), name, data.clone());
+        if terminal {
+            runtime.store_terminal_result(
+                request_id,
+                terminal_owner.map(ToString::to_string),
+                STREAM,
+                event,
+            );
+        } else {
+            runtime.store_connect_progress(request_id, terminal_owner, event);
+        }
     }
     emit_json_event(emitter, STREAM, Some(request_id), name, data)
 }
@@ -373,13 +375,13 @@ fn emit_connect_failure(
         "message": report.message,
         "details": report.api_details(),
     });
-    emit_json_event_nonfatal(emitter, STREAM, Some(request_id), "failed", data.clone());
     if let Some(runtime) = terminal_runtime.upgrade() {
         runtime.store_terminal_result(
             request_id,
             terminal_owner.map(ToString::to_string),
             STREAM,
-            event_value(STREAM, Some(request_id), "failed", data),
+            event_value(STREAM, Some(request_id), "failed", data.clone()),
         );
     }
+    emit_json_event_nonfatal(emitter, STREAM, Some(request_id), "failed", data);
 }

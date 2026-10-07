@@ -145,6 +145,7 @@ fn generate_durations(path: &Path, generated: &mut String) {
         ("post_connect_status_wait_ms", "POST_CONNECT_STATUS_WAIT"),
         ("not_found_rescan_timeout_ms", "NOT_FOUND_RESCAN_TIMEOUT"),
         ("activation_timeout_ms", "ACTIVATION_TIMEOUT"),
+        ("connect_operation_timeout_ms", "CONNECT_OPERATION_TIMEOUT"),
         ("activation_failure_grace_ms", "ACTIVATION_FAILURE_GRACE"),
         ("wpa_wrong_key_retry_delay_ms", "WPA_WRONG_KEY_RETRY_DELAY"),
         ("secret_timeout_ms", "SECRET_TIMEOUT"),

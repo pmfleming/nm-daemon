@@ -76,6 +76,9 @@ impl CancelOutcome {
 }
 
 struct TaskHandle {
+    started: Instant,
+    progress: Option<Value>,
+    timed_out: bool,
     kind: TaskKind,
     owner: Option<String>,
     target_ssid: Option<Arc<[u8]>>,
@@ -266,6 +269,7 @@ struct CachedStatus {
 
 pub(crate) struct DaemonRuntime {
     nm: Arc<Nm>,
+    tokio: tokio::runtime::Handle,
     work: BlockingLane,
     fast_work: BlockingLane,
     read_work: BlockingLane,
@@ -291,6 +295,7 @@ impl DaemonRuntime {
 
         let runtime = Arc::new(Self {
             nm,
+            tokio: tokio.clone(),
             work,
             fast_work,
             read_work,
@@ -357,12 +362,59 @@ impl DaemonRuntime {
                 "request_id": request_id,
                 "status": "running",
                 "stream": task.kind.stream(),
+                "elapsed_ms": task.started.elapsed().as_millis() as u64,
+                "event": task.progress,
+                "cancellation_requested": task.cancellation.load(Ordering::Acquire),
+                "timed_out": task.timed_out,
             });
         }
         serde_json::json!({
             "request_id": request_id,
             "status": "unknown",
         })
+    }
+
+    pub(crate) fn store_connect_progress(
+        &self,
+        request_id: &str,
+        owner: Option<&str>,
+        event: Value,
+    ) {
+        if let Some(task) = recover_lock(&self.tasks, "daemon task map").get_mut(request_id)
+            && task.owner.as_deref() == owner
+            && task.kind == TaskKind::Connect
+        {
+            task.progress = Some(event);
+        }
+    }
+
+    /// Request cancellation, never fabricate completion. The task and admission
+    /// guard remain live until the worker acknowledges and unwinds.
+    fn expire_connect(&self, request_id: &str) {
+        let task = {
+            let mut tasks = recover_lock(&self.tasks, "daemon task map");
+            let Some(task) = tasks
+                .get_mut(request_id)
+                .filter(|t| t.kind == TaskKind::Connect)
+            else {
+                return;
+            };
+            if recover_lock(&self.terminal_results, "terminal request results")
+                .get_owned(request_id, task.owner.as_deref())
+                .is_some()
+            {
+                return;
+            }
+            task.timed_out = true;
+            task.cancellation.store(true, Ordering::Release);
+            CancelledTask {
+                kind: task.kind,
+                target_ssid: task.target_ssid.clone(),
+            }
+        };
+        tracing::warn!(%request_id, "Wi-Fi operation deadline reached; awaiting cancellation acknowledgement");
+        self.nm.wake_waiters();
+        self.abort_cancelled_connect(request_id, Some(&task));
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -561,6 +613,9 @@ impl DaemonRuntime {
         recover_lock(&self.tasks, "daemon task map").insert(
             request_id.clone(),
             TaskHandle {
+                started: Instant::now(),
+                progress: None,
+                timed_out: false,
                 kind,
                 owner,
                 target_ssid,
@@ -581,6 +636,16 @@ impl DaemonRuntime {
                 task(nm, &cancellation, &worker_request_id);
             }),
         )?;
+        if kind == TaskKind::Connect {
+            let runtime = Arc::downgrade(self);
+            let id = request_id.clone();
+            self.tokio.spawn(async move {
+                tokio::time::sleep(crate::generated::CONNECT_OPERATION_TIMEOUT).await;
+                if let Some(runtime) = runtime.upgrade() {
+                    runtime.expire_connect(&id);
+                }
+            });
+        }
         Ok(request_id)
     }
 
@@ -999,6 +1064,62 @@ mod tests {
         assert!(policy.admit(&replacement, now).is_ok());
         policy.complete(&replacement, None, true, now);
         assert!(policy.admit(&saved, now).is_ok());
+    }
+
+    #[test]
+    fn deadline_requests_cancellation_without_forging_completion() -> anyhow::Result<()> {
+        crate::test_support::workflows::isolated(
+            concat!(
+                module_path!(),
+                "::deadline_requests_cancellation_without_forging_completion"
+            ),
+            || {
+                use super::{DaemonRuntime, TaskKind};
+                use crate::test_support::workflows::FakeNm;
+                let fake = FakeNm::new([], false)?;
+                let runtime = DaemonRuntime::start(fake.nm, tokio::runtime::Handle::current())?;
+                let (release, wait) = std::sync::mpsc::channel();
+                let id = runtime.start_cancellable(
+                    "connect",
+                    TaskKind::Connect,
+                    Some("owner".into()),
+                    None,
+                    move |_, _, _| {
+                        let _ = wait.recv_timeout(std::time::Duration::from_secs(5));
+                    },
+                )?;
+                let progress = json!({"request_id":id, "event":"progress", "phase":"verifying", "message":"Verifying Wi-Fi activation"});
+                runtime.store_connect_progress(&id, Some("other"), progress.clone());
+                assert!(runtime.request_status(&id, Some("owner"))["event"].is_null());
+                runtime.store_connect_progress(&id, Some("owner"), progress.clone());
+                assert_eq!(
+                    runtime.request_status(&id, Some("owner"))["event"],
+                    progress
+                );
+                assert_eq!(
+                    runtime.request_status(&id, Some("other"))["status"],
+                    "unknown"
+                );
+                runtime.expire_connect(&id);
+                let status = runtime.request_status(&id, Some("owner"));
+                assert_eq!(status["status"], "running");
+                assert_eq!(status["timed_out"], true);
+                assert_eq!(status["cancellation_requested"], true);
+                runtime.store_terminal_result(
+                    &id,
+                    Some("owner".into()),
+                    Stream::WifiConnect,
+                    json!({"request_id":id, "event":"cancelled"}),
+                );
+                runtime.expire_connect(&id);
+                assert_eq!(
+                    runtime.request_status(&id, Some("owner"))["status"],
+                    "finished"
+                );
+                release.send(())?;
+                Ok(())
+            },
+        )
     }
 
     #[test]
