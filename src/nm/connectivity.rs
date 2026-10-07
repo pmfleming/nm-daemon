@@ -39,6 +39,17 @@ impl Nm {
         Ok((format!("{}:{owner}", self.conn.server_guid()), status))
     }
 
+    /// Passive telemetry must not issue an HTTP probe. NetworkManager owns
+    /// periodic checks and publishes Connectivity changes independently of link
+    /// activation; an explicit network.connectivity call may still request one.
+    pub(crate) fn connectivity_snapshot(&self) -> Result<ConnectivityStatus> {
+        let code = self
+            .root_proxy()
+            .get_property("Connectivity")
+            .context("read NetworkManager Connectivity")?;
+        Ok(self.with_portal_context(ConnectivityStatus::from_nm_code(code)))
+    }
+
     pub(crate) fn connectivity_check(&self) -> Result<ConnectivityStatus> {
         let started = Instant::now();
         let nm = self.root_proxy();

@@ -132,8 +132,8 @@ pub(crate) fn refresh_payloads(
         connectivity: need_connectivity
             .then(|| match connectivity_from_status {
                 Some(connectivity) => Ok(json!(connectivity)),
-                None => application
-                    .connectivity()
+                None => nm
+                    .connectivity_snapshot()
                     .map(|connectivity| json!(connectivity)),
             })
             .and_then(log_typed_refresh_error),

@@ -382,7 +382,7 @@ impl<'a> ConnectionMachine<'a> {
             .and_then(|status| status.connectivity.clone());
         let (connectivity, connectivity_source) = match connectivity_from_status {
             Some(connectivity) => (Some(connectivity), "wifi-status"),
-            None => (self.nm.connectivity_check().ok(), "fallback-check"),
+            None => (self.nm.connectivity_snapshot().ok(), "passive-snapshot"),
         };
         tracing::info!(
             ssid = %self.target.ssid,

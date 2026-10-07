@@ -40,6 +40,7 @@ pub(crate) struct State {
     pub(crate) activations: Vec<String>,
     pub(crate) deactivated: Vec<String>,
     pub(crate) deleted: usize,
+    pub(crate) connectivity_checks: usize,
     pub(crate) cancellation: Arc<AtomicBool>,
 }
 
@@ -102,6 +103,7 @@ impl FakeNm {
             activations: Vec::new(),
             deactivated: Vec::new(),
             deleted: 0,
+            connectivity_checks: 0,
             cancellation: Arc::new(AtomicBool::new(false)),
         }));
         let server = peer.server.object_server();
@@ -191,7 +193,13 @@ impl Manager {
         vec![path(DEVICE)]
     }
     fn check_connectivity(&self) -> u32 {
+        self.0.lock().unwrap().connectivity_checks += 1;
         4
+    }
+    #[zbus(property)]
+    fn connectivity(&self) -> u32 {
+        // Internet reachability may still be unknown when the link is ready.
+        0
     }
     #[zbus(property)]
     fn wireless_enabled(&self) -> bool {
@@ -425,6 +433,37 @@ impl Vpn {
             6
         }
     }
+}
+
+#[test]
+fn link_completion_and_status_never_wait_for_internet_probe() -> Result<()> {
+    isolated(
+        concat!(
+            module_path!(),
+            "::link_completion_and_status_never_wait_for_internet_probe"
+        ),
+        || {
+            use crate::application::{Application, ConnectOutcome, ConnectRequest};
+            let fake = FakeNm::new([Outcome::Connected], false)?;
+            let request =
+                ConnectRequest::single(crate::model::example_connect_target(false), None, None);
+            let outcome = Application::new(&fake.nm).connect(&request, None, |_| Ok(()))?;
+            let ConnectOutcome::Succeeded(result) = outcome else {
+                panic!("link did not finish")
+            };
+            assert_eq!(result.connectivity.unwrap().code, 0);
+            assert!(!result.suggest_open_portal);
+            assert!(fake.nm.wifi_status()?.active);
+            let payloads =
+                crate::daemon_status::refresh_payloads(&fake.nm, false, true, false, false);
+            assert_eq!(payloads.connectivity.unwrap()["code"], 0);
+            assert_eq!(fake.state.lock().unwrap().connectivity_checks, 0);
+            // Preserve the explicit diagnostic probe API.
+            assert_eq!(Application::new(&fake.nm).connectivity()?.code, 4);
+            assert_eq!(fake.state.lock().unwrap().connectivity_checks, 1);
+            Ok(())
+        },
+    )
 }
 
 #[test]

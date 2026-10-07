@@ -73,7 +73,7 @@ impl Nm {
         let radios = self.radio_status()?;
         let enabled = radios.wireless_enabled;
         let profiles = self.saved_wifi_connections()?;
-        let connectivity = self.connectivity_check().ok();
+        let connectivity = self.connectivity_snapshot().ok();
 
         for device in self.wifi_devices()? {
             if let Some(status) =
