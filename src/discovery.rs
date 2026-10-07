@@ -270,33 +270,43 @@ fn browse_instances(
     records: Vec<ResolvedRecord>,
     query: &ServiceQuery,
 ) -> (Vec<(i32, String)>, Vec<String>) {
-    let mut instances = Vec::new();
     let mut seen = HashSet::new();
     let mut warnings = Vec::new();
-    for (interface, class, record_type, bytes) in records {
-        if interface <= 0 || (query.interface_index != 0 && interface != query.interface_index) {
-            warnings.push("ignored a DNS-SD record from an unexpected interface".to_string());
-            continue;
-        }
-        if class != DNS_CLASS_IN || record_type != DNS_TYPE_PTR {
-            continue;
-        }
-        let Some(instance) = ptr_instance(&bytes, &query.service_type, MDNS_DOMAIN) else {
-            warnings.push("ignored one malformed DNS-SD PTR record".to_string());
-            continue;
-        };
-        if !seen.insert((interface, instance.to_ascii_lowercase())) {
-            continue;
-        }
-        if instances.len() == MAX_DISCOVERY_INSTANCES {
-            warnings.push(format!(
-                "limited DNS-SD resolution to {MAX_DISCOVERY_INSTANCES} instances"
-            ));
-            break;
-        }
-        instances.push((interface, instance));
+    let mut candidates = records
+        .into_iter()
+        .filter_map(|record| match browse_instance(record, query) {
+            Ok(instance) => instance,
+            Err(message) => {
+                warnings.push(message.to_string());
+                None
+            }
+        })
+        .filter(|(interface, instance)| seen.insert((*interface, instance.to_ascii_lowercase())));
+    let instances = candidates.by_ref().take(MAX_DISCOVERY_INSTANCES).collect();
+    // One unique lookahead distinguishes a full result from a truncated one.
+    // Duplicates and invalid records still receive their normal treatment until
+    // that point; nothing after the first excess unique instance is inspected.
+    if candidates.next().is_some() {
+        warnings.push(format!(
+            "limited DNS-SD resolution to {MAX_DISCOVERY_INSTANCES} instances"
+        ));
     }
     (instances, warnings)
+}
+
+fn browse_instance(
+    (interface, class, record_type, bytes): ResolvedRecord,
+    query: &ServiceQuery,
+) -> std::result::Result<Option<(i32, String)>, &'static str> {
+    if interface <= 0 || (query.interface_index != 0 && interface != query.interface_index) {
+        return Err("ignored a DNS-SD record from an unexpected interface");
+    }
+    if class != DNS_CLASS_IN || record_type != DNS_TYPE_PTR {
+        return Ok(None);
+    }
+    let instance = ptr_instance(&bytes, &query.service_type, MDNS_DOMAIN)
+        .ok_or("ignored one malformed DNS-SD PTR record")?;
+    Ok(Some((interface, instance)))
 }
 
 async fn resolve_instances(

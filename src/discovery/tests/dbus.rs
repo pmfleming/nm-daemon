@@ -140,6 +140,71 @@ fn browse_limits_unique_targets_and_rejects_truncated_records() -> anyhow::Resul
 }
 
 #[test]
+fn browse_warning_order_and_first_seen_link_identity_are_preserved() -> anyhow::Result<()> {
+    let mut query = ServiceQuery::new("_googlecast._tcp".into(), None, None, AddressFamily::Any)?;
+    let records = || {
+        vec![
+            (0, 0, 0, Vec::new()), // Interface validation precedes type validation.
+            (3, 0, DNS_TYPE_PTR, Vec::new()), // Irrelevant record: no warning.
+            (3, DNS_CLASS_IN, DNS_TYPE_PTR, Vec::new()),
+            (3, DNS_CLASS_IN, DNS_TYPE_PTR, ptr("Living Room")),
+            (3, DNS_CLASS_IN, DNS_TYPE_PTR, ptr("LIVING ROOM")),
+            (4, DNS_CLASS_IN, DNS_TYPE_PTR, ptr("living room")),
+        ]
+    };
+    let unexpected = "ignored a DNS-SD record from an unexpected interface";
+    let malformed = "ignored one malformed DNS-SD PTR record";
+    let (instances, warnings) = browse_instances(records(), &query);
+    assert_eq!(
+        instances,
+        [(3, "Living Room".into()), (4, "living room".into())]
+    );
+    assert_eq!(warnings, [unexpected, malformed]);
+    query.interface_index = 3;
+    let (instances, warnings) = browse_instances(records(), &query);
+    assert_eq!(instances, [(3, "Living Room".into())]);
+    assert_eq!(warnings, [unexpected, malformed, unexpected]);
+    Ok(())
+}
+
+#[test]
+fn browse_limit_looks_past_duplicates_but_not_past_the_first_excess_instance() -> anyhow::Result<()>
+{
+    let query = ServiceQuery::new("_googlecast._tcp".into(), None, None, AddressFamily::Any)?;
+    for excess in [false, true] {
+        let mut records = (0..MAX_DISCOVERY_INSTANCES)
+            .map(|index| {
+                (
+                    3,
+                    DNS_CLASS_IN,
+                    DNS_TYPE_PTR,
+                    ptr(&format!("Device {index}")),
+                )
+            })
+            .collect::<Vec<_>>();
+        records.extend([
+            (3, DNS_CLASS_IN, DNS_TYPE_PTR, ptr("DEVICE 0")),
+            (3, DNS_CLASS_IN, DNS_TYPE_PTR, Vec::new()),
+        ]);
+        let mut expected = vec!["ignored one malformed DNS-SD PTR record".to_string()];
+        if excess {
+            records.extend([
+                (3, DNS_CLASS_IN, DNS_TYPE_PTR, ptr("excess")),
+                (0, DNS_CLASS_IN, DNS_TYPE_PTR, Vec::new()), // Must not be visited.
+            ]);
+            expected.push(format!(
+                "limited DNS-SD resolution to {MAX_DISCOVERY_INSTANCES} instances"
+            ));
+        }
+        let (instances, warnings) = browse_instances(records, &query);
+        assert_eq!(instances.len(), MAX_DISCOVERY_INSTANCES);
+        assert_eq!(instances[0], (3, "Device 0".into()));
+        assert_eq!(warnings, expected);
+    }
+    Ok(())
+}
+
+#[test]
 fn browsing_is_link_scoped_mdns_only_and_reports_resolver_failures_and_deadlines()
 -> anyhow::Result<()> {
     crate::test_support::workflows::isolated(
