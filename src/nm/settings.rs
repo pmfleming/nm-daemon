@@ -18,6 +18,10 @@ use crate::model::{
     WifiProfileDetails, WifiProfileSecret, WifiProfileUpdate, WifiSharePayload, display_ssid,
     network_entries_with_profile_matches, security_class,
 };
+use crate::variant::{
+    setting, setting_i32, setting_strings, setting_text as setting_string,
+    value_text as setting_value_string,
+};
 use profile_advanced::{apply_advanced, check_expected_version, profile_version, read_enterprise};
 use profile_secrets::{
     enterprise_secret_needs_agent, profile_secret_spec, profile_secret_values,
@@ -144,71 +148,7 @@ impl Nm {
     pub(crate) fn wifi_profile_details_by_path(&self, path: &str) -> Result<WifiProfileDetails> {
         let path = OwnedObjectPath::try_from(path).context("parse connection path")?;
         let settings = self.connection_settings(&path)?;
-        let profile = saved_wifi_connection_from_settings(&path, &settings).ok_or_else(|| {
-            DomainError::not_found(
-                ErrorOperation::ProfileOperation,
-                format!("connection is not a saved Wi-Fi profile: {path}"),
-            )
-        })?;
-        let empty = HashMap::new();
-        let connection = settings.get("connection").unwrap_or(&empty);
-        let wireless = settings.get("802-11-wireless").unwrap_or(&empty);
-        let assigned_mac = setting_string(wireless, "assigned-mac-address");
-        Ok(WifiProfileDetails {
-            path: profile.path,
-            id: profile.id,
-            uuid: setting_string(connection, "uuid").unwrap_or_default(),
-            ssid: profile.ssid,
-            version: profile_version(&settings),
-            autoconnect: profile.autoconnect,
-            autoconnect_priority: connection
-                .get("autoconnect-priority")
-                .and_then(setting_i64)
-                .and_then(|value| i32::try_from(value).ok())
-                .unwrap_or(0),
-            metered: metered_from_settings(connection),
-            hidden: wireless
-                .get("hidden")
-                .and_then(setting_bool)
-                .unwrap_or(false),
-            mac_address_policy: profile.privacy.mac_address_policy,
-            // A literal address and the keyword policy share one property, so
-            // report the exact address only when it is not a policy keyword.
-            cloned_mac_address: assigned_mac.filter(|value| {
-                !matches!(
-                    value.as_str(),
-                    "default" | "stable" | "random" | "permanent"
-                )
-            }),
-            mac_address: setting_string(wireless, "mac-address").filter(|v| !v.is_empty()),
-            bssid: setting_string(wireless, "bssid").filter(|v| !v.is_empty()),
-            mtu: wireless.get("mtu").and_then(setting_u32).filter(|v| *v > 0),
-            mode: setting_string(wireless, "mode")
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "infrastructure".to_string()),
-            band: setting_string(wireless, "band")
-                .map(|band| crate::model::WifiBand::from_nm_value(&band))
-                .unwrap_or(crate::model::WifiBand::Auto),
-            channel: wireless
-                .get("channel")
-                .and_then(setting_u32)
-                .filter(|v| *v > 0),
-            send_hostname: profile.privacy.send_hostname,
-            casting_enabled: profile.casting_enabled,
-            permissions: connection
-                .get("permissions")
-                .and_then(setting_string_list)
-                .unwrap_or_default(),
-            firewall_zone: setting_string(connection, "zone").filter(|v| !v.is_empty()),
-            secondaries: connection
-                .get("secondaries")
-                .and_then(setting_string_list)
-                .unwrap_or_default(),
-            security_type: security_type_from_settings(&settings),
-            enterprise: read_enterprise(&settings),
-            ipv4: profile_ip_settings(&settings, "ipv4"),
-            ipv6: profile_ip_settings(&settings, "ipv6"),
-        })
+        wifi_profile_details(&path, &settings)
     }
 
     pub(crate) fn wifi_profile_secret_by_path(&self, path: &str) -> Result<WifiProfileSecret> {
@@ -613,6 +553,61 @@ impl Nm {
     }
 }
 
+/// Decode a settings snapshot independently of transport, retaining NM's
+/// distinction between missing/default properties and explicit empty values.
+fn wifi_profile_details(
+    path: &OwnedObjectPath,
+    settings: &ConnectionSettings,
+) -> Result<WifiProfileDetails> {
+    let profile = saved_wifi_connection_from_settings(path, settings).ok_or_else(|| {
+        DomainError::not_found(
+            ErrorOperation::ProfileOperation,
+            format!("connection is not a saved Wi-Fi profile: {path}"),
+        )
+    })?;
+    let empty = HashMap::new();
+    let connection = settings.get("connection").unwrap_or(&empty);
+    let wireless = settings.get("802-11-wireless").unwrap_or(&empty);
+    let text = |key| setting_string(wireless, key).filter(|value| !value.is_empty());
+    let positive = |key| setting::<u32>(wireless, key).filter(|value| *value > 0);
+    Ok(WifiProfileDetails {
+        path: profile.path,
+        id: profile.id,
+        uuid: setting_string(connection, "uuid").unwrap_or_default(),
+        ssid: profile.ssid,
+        version: profile_version(settings),
+        autoconnect: profile.autoconnect,
+        autoconnect_priority: setting_i32(connection, "autoconnect-priority").unwrap_or(0),
+        metered: metered_from_settings(connection),
+        hidden: setting(wireless, "hidden").unwrap_or(false),
+        mac_address_policy: profile.privacy.mac_address_policy,
+        // A literal address and keyword policy occupy the same NM property.
+        cloned_mac_address: setting_string(wireless, "assigned-mac-address").filter(|value| {
+            !matches!(
+                value.as_str(),
+                "default" | "stable" | "random" | "permanent"
+            )
+        }),
+        mac_address: text("mac-address"),
+        bssid: text("bssid"),
+        mtu: positive("mtu"),
+        mode: text("mode").unwrap_or_else(|| "infrastructure".to_string()),
+        band: text("band")
+            .map(|band| crate::model::WifiBand::from_nm_value(&band))
+            .unwrap_or(crate::model::WifiBand::Auto),
+        channel: positive("channel"),
+        send_hostname: profile.privacy.send_hostname,
+        casting_enabled: profile.casting_enabled,
+        permissions: setting_strings(connection, "permissions"),
+        firewall_zone: setting_string(connection, "zone").filter(|value| !value.is_empty()),
+        secondaries: setting_strings(connection, "secondaries"),
+        security_type: security_type_from_settings(settings),
+        enterprise: read_enterprise(settings),
+        ipv4: profile_ip_settings(settings, "ipv4"),
+        ipv6: profile_ip_settings(settings, "ipv6"),
+    })
+}
+
 struct SavedWifiProfileCandidate {
     profile: SavedWifiConnection,
     matcher: WifiProfileMatch,
@@ -946,16 +941,13 @@ fn security_type_from_settings(settings: &ConnectionSettings) -> String {
 }
 
 fn profile_ip_settings(settings: &ConnectionSettings, section: &str) -> ProfileIpSettings {
-    use crate::variant::{setting, setting_strings};
-
     let empty = HashMap::new();
     let values = settings.get(section).unwrap_or(&empty);
     let text = |key| setting_string(values, key).filter(|value| !value.is_empty());
     let family_i32 = |family, key| {
         (section == family)
-            .then(|| values.get(key).and_then(setting_i64))
+            .then(|| setting_i32(values, key))
             .flatten()
-            .and_then(|value| i32::try_from(value).ok())
     };
     ProfileIpSettings {
         method: setting_string(values, "method").unwrap_or_else(|| "auto".to_string()),
@@ -1195,14 +1187,6 @@ fn wifi_settings_section(settings: &ConnectionSettings) -> Option<&HashMap<Strin
         return None;
     }
     Some(wireless)
-}
-
-pub(super) fn setting_string(settings: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
-    settings.get(key).and_then(setting_value_string)
-}
-
-fn setting_value_string(value: &OwnedValue) -> Option<String> {
-    crate::variant::value_string(value).or_else(|| String::from_utf8(setting_bytes(value)?).ok())
 }
 
 fn setting_bool(value: &OwnedValue) -> Option<bool> {

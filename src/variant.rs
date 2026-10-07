@@ -53,6 +53,26 @@ where
         .ok()
 }
 
+/// NetworkManager's legacy settings also encode text as UTF-8 byte arrays.
+/// Keep this distinct from strict string inspection (`value_string`).
+pub(crate) fn setting_text(section: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+    section.get(key).and_then(value_text)
+}
+
+pub(crate) fn value_text(value: &OwnedValue) -> Option<String> {
+    value_string(value).or_else(|| String::from_utf8(value_list(value)?).ok())
+}
+
+/// NM uses signed 32-bit values here; tolerate the older wider/unsigned forms
+/// only when they fit, without truncating, parsing strings, or coercing booleans.
+pub(crate) fn setting_i32(section: &HashMap<String, OwnedValue>, key: &str) -> Option<i32> {
+    setting(section, key).or_else(|| {
+        let wide =
+            setting::<i64>(section, key).or_else(|| setting::<u32>(section, key).map(i64::from))?;
+        wide.try_into().ok()
+    })
+}
+
 pub(crate) fn value_string(value: &OwnedValue) -> Option<String> {
     <&str>::try_from(value).ok().map(str::to_string)
 }
@@ -115,6 +135,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::{owned_value, setting, setting_strings, value_list, value_map, value_string};
+
+    #[test]
+    fn settings_readers_preserve_legacy_text_and_checked_signed_integers() -> anyhow::Result<()> {
+        use std::collections::HashMap;
+        for (value, expected) in [
+            (owned_value("text")?, Some("text")),
+            (owned_value(b"text".to_vec())?, Some("text")),
+            (owned_value(Vec::<u8>::new())?, Some("")),
+            (owned_value(vec![0xff_u8])?, None),
+            (owned_value(42_u32)?, None),
+        ] {
+            assert_eq!(
+                super::setting_text(&HashMap::from([("value".into(), value)]), "value").as_deref(),
+                expected
+            );
+        }
+        for (value, expected) in [
+            (owned_value(-1_i32)?, Some(-1)),
+            (owned_value(0_i32)?, Some(0)),
+            (owned_value(-1_i64)?, Some(-1)),
+            (owned_value(42_u32)?, Some(42)),
+            (owned_value(u32::MAX)?, None),
+            (owned_value(i64::MIN)?, None),
+            (owned_value("1")?, None),
+            (owned_value(true)?, None),
+        ] {
+            assert_eq!(
+                super::setting_i32(&HashMap::from([("value".into(), value)]), "value"),
+                expected
+            );
+        }
+        assert_eq!(super::setting_i32(&HashMap::new(), "missing"), None);
+        assert_eq!(super::setting_text(&HashMap::new(), "missing"), None);
+        Ok(())
+    }
 
     #[test]
     fn borrowed_string_arrays_preserve_owned_conversion_semantics() -> anyhow::Result<()> {

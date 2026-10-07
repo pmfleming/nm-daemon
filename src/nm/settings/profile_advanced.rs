@@ -16,6 +16,7 @@ use crate::model::{
 };
 use crate::variant::{
     insert_optional_value, insert_optional_values, setting, setting_strings as strings,
+    setting_text,
 };
 
 const WIRELESS: &str = "802-11-wireless";
@@ -421,7 +422,7 @@ fn set_list(
 }
 
 fn text(section: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
-    super::setting_string(section, key).filter(|value| !value.is_empty())
+    setting_text(section, key).filter(|value| !value.is_empty())
 }
 
 /// Certificate and key properties are byte arrays; NetworkManager stores URIs

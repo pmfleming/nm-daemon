@@ -2,9 +2,11 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 
+use crate::variant::setting_text as setting_string;
+
 use super::{
-    ConnectionSettings, WifiSecretKind, has_wep_settings, owned_value, setting_string,
-    setting_string_list, setting_u32, wifi_secret_kind,
+    ConnectionSettings, WifiSecretKind, has_wep_settings, owned_value, setting_string_list,
+    setting_u32, wifi_secret_kind,
 };
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::WifiProfileUpdate;

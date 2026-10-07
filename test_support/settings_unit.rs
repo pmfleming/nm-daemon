@@ -152,6 +152,78 @@ fn ip_profile_defaults_and_family_specific_fields_are_preserved() -> anyhow::Res
 }
 
 #[test]
+fn profile_snapshot_decoding_preserves_defaults_empty_values_and_radio_restrictions()
+-> anyhow::Result<()> {
+    let path = zvariant::OwnedObjectPath::try_from("/settings/1")?;
+    let mut settings = wifi_settings("Example", "802-11-wireless");
+    let defaults = super::wifi_profile_details(&path, &settings)?;
+    assert_eq!(defaults.mode, "infrastructure");
+    assert_eq!(
+        (defaults.mtu, defaults.channel, defaults.bssid),
+        (None, None, None)
+    );
+    settings
+        .get_mut("connection")
+        .unwrap()
+        .extend(crate::variant::value_map([
+            ("autoconnect-priority", (-42_i32).into()),
+            ("zone", "".into()),
+        ])?);
+    settings
+        .get_mut("802-11-wireless")
+        .unwrap()
+        .extend(crate::variant::value_map([
+            ("mode", "".into()),
+            ("mtu", 0_u32.into()),
+            ("channel", 36_u32.into()),
+            ("band", b"a".as_slice().into()),
+            ("bssid", b"AA:BB:CC:DD:EE:FF".as_slice().into()),
+            ("assigned-mac-address", "stable".into()),
+            ("hidden", true.into()),
+        ])?);
+    let details = super::wifi_profile_details(&path, &settings)?;
+    assert_eq!(details.autoconnect_priority, -42);
+    assert_eq!(details.mode, "infrastructure");
+    assert_eq!(details.band, crate::model::WifiBand::Ghz5);
+    assert_eq!(details.bssid.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
+    assert_eq!(details.channel, Some(36));
+    assert!(details.hidden);
+    assert!(
+        details.firewall_zone.is_none()
+            && details.cloned_mac_address.is_none()
+            && details.mtu.is_none()
+    );
+    crate::variant::insert_string(
+        settings.get_mut("802-11-wireless").unwrap(),
+        "assigned-mac-address",
+        "00:11:22:33:44:55",
+    )?;
+    assert_eq!(
+        super::wifi_profile_details(&path, &settings)?
+            .cloned_mac_address
+            .as_deref(),
+        Some("00:11:22:33:44:55")
+    );
+    assert!(super::wifi_profile_details(&path, &wifi_settings("Example", "vpn")).is_err());
+    assert!(super::wifi_profile_details(&path, &ConnectionSettings::new()).is_err());
+    Ok(())
+}
+
+#[test]
+fn signed_nm_ip_properties_survive_decoding() -> anyhow::Result<()> {
+    let mut settings = ConnectionSettings::new();
+    for (section, key) in [("ipv4", "dad-timeout"), ("ipv6", "ip6-privacy")] {
+        settings.insert(
+            section.into(),
+            crate::variant::value_map([(key, (-1_i32).into())])?,
+        );
+    }
+    assert_eq!(profile_ip_settings(&settings, "ipv4").dad_timeout, Some(-1));
+    assert_eq!(profile_ip_settings(&settings, "ipv6").ip6_privacy, Some(-1));
+    Ok(())
+}
+
+#[test]
 fn advanced_profile_ip_settings_round_trip_and_validate_address_families() {
     let ipv4 = TargetIpSettings {
         method: Some("manual".to_string()),
