@@ -34,7 +34,7 @@ pub(super) enum SharedScanOutcome {
     Failed(ErrorReport),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) enum ScanWait {
     Completed(SharedScanOutcome),
     Cancelled,
@@ -64,10 +64,9 @@ impl ScanScheduler {
     pub(super) fn claim(&self, device_path: &str, ssids: &[Vec<u8>]) -> ScanTurn {
         let mut devices = self.lock();
         let state = devices.entry(device_path.to_string()).or_default();
-        let requested = normalized_ssids(ssids);
         if state.in_flight {
             *state.waiters.entry(state.generation).or_default() += 1;
-            return if scan_scope_covers(&state.in_flight_ssids, &requested) {
+            return if scan_scope_covers(&state.in_flight_ssids, ssids) {
                 ScanTurn::Join {
                     generation: state.generation,
                 }
@@ -78,7 +77,7 @@ impl ScanScheduler {
             };
         }
         state.in_flight = true;
-        state.in_flight_ssids = requested;
+        state.in_flight_ssids = normalized_ssids(ssids);
         state.generation = state.generation.wrapping_add(1);
         state.previous_request = state.last_request;
         state.last_request = Some(Instant::now());
@@ -111,30 +110,29 @@ impl ScanScheduler {
         cancellation: Option<&AtomicBool>,
     ) -> ScanWait {
         let mut devices = self.lock();
-        loop {
+        let outcome = loop {
             if cancellation_requested(cancellation) {
-                consume_waiter(&mut devices, device_path, generation);
-                return ScanWait::Cancelled;
+                break ScanWait::Cancelled;
             }
             if let Some(outcome) = devices
                 .get(device_path)
                 .and_then(|state| state.completions.get(&generation))
                 .cloned()
             {
-                consume_waiter(&mut devices, device_path, generation);
-                return ScanWait::Completed(outcome);
+                break ScanWait::Completed(outcome);
             }
             let wait = deadline.wait(SCAN_SCHEDULE_POLL_INTERVAL);
             if wait.is_zero() {
-                consume_waiter(&mut devices, device_path, generation);
-                return ScanWait::DeadlineExpired;
+                break ScanWait::DeadlineExpired;
             }
             devices = self
                 .finished
                 .wait_timeout(devices, wait)
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .0;
-        }
+        };
+        consume_waiter(&mut devices, device_path, generation);
+        outcome
     }
 
     pub(super) fn notify_waiters(&self) {
@@ -314,6 +312,13 @@ mod tests {
             ScanTurn::Join { generation: 1 }
         );
         assert_eq!(
+            scheduler.claim(
+                "/devices/1",
+                &[b"Office".to_vec(), b"Cafe".to_vec(), b"Cafe".to_vec()]
+            ),
+            ScanTurn::Join { generation: 1 }
+        );
+        assert_eq!(
             scheduler.claim("/devices/1", &[b"Other".to_vec()]),
             ScanTurn::Wait { generation: 1 }
         );
@@ -333,31 +338,46 @@ mod tests {
         );
     }
     #[test]
-    fn a_cancelled_waiter_stops_waiting_and_releases_its_outcome_slot() {
-        let scheduler = ScanScheduler::default();
-        assert_eq!(
-            scheduler.claim("/devices/1", &[]),
-            ScanTurn::Request { generation: 1 }
-        );
-        assert_eq!(
-            scheduler.claim("/devices/1", &[]),
-            ScanTurn::Join { generation: 1 }
-        );
-        let cancellation = AtomicBool::new(true);
-        assert!(matches!(
-            scheduler.wait_for_completion(
+    fn waiter_cleanup_preserves_cancellation_completion_deadline_precedence() {
+        use std::mem::discriminant;
+        for (timeout, cancelled, completed, expected) in [
+            (1, true, false, ScanWait::Cancelled),
+            (0, true, false, ScanWait::Cancelled),
+            (0, true, true, ScanWait::Cancelled),
+            (
+                0,
+                false,
+                true,
+                ScanWait::Completed(SharedScanOutcome::Succeeded),
+            ),
+            (0, false, false, ScanWait::DeadlineExpired),
+        ] {
+            let scheduler = ScanScheduler::default();
+            assert_eq!(
+                scheduler.claim("/devices/1", &[]),
+                ScanTurn::Request { generation: 1 }
+            );
+            assert_eq!(
+                scheduler.claim("/devices/1", &[]),
+                ScanTurn::Join { generation: 1 }
+            );
+            if completed {
+                scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
+            }
+            let outcome = scheduler.wait_for_completion(
                 "/devices/1",
                 1,
-                Deadline::from_now(Duration::from_secs(1)).unwrap(),
-                Some(&cancellation),
-            ),
-            ScanWait::Cancelled
-        ));
-        scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
-        let state = scheduler.lock();
-        let state = state.get("/devices/1").expect("device state");
-        assert!(!state.waiters.contains_key(&1));
-        assert!(!state.completions.contains_key(&1));
+                Deadline::from_now(Duration::from_secs(timeout)).unwrap(),
+                Some(&AtomicBool::new(cancelled)),
+            );
+            assert_eq!(discriminant(&outcome), discriminant(&expected));
+            // A late completion must not recreate a consumed outcome slot.
+            scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
+            let state = scheduler.lock();
+            let state = &state["/devices/1"];
+            assert!(!state.waiters.contains_key(&1));
+            assert!(!state.completions.contains_key(&1));
+        }
     }
 
     #[test]
