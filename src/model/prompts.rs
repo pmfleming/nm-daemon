@@ -17,7 +17,7 @@ pub(crate) struct SecurityChoice {
     key_mgmt: &'static str,
     wep_key_type: Option<WepKeyType>,
     enterprise: bool,
-    required_fields: Vec<&'static str>,
+    required_fields: &'static [&'static str],
 }
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HiddenPrompt {
@@ -61,9 +61,9 @@ impl Default for HiddenPrompt {
             wep_key_type,
             enterprise: id == "wpa-eap",
             required_fields: match id {
-                "open" | "owe" => vec![],
-                "wpa-eap" => vec!["enterprise.identity", "enterprise.eap"],
-                _ => vec!["password"],
+                "open" | "owe" => &[],
+                "wpa-eap" => &["enterprise.identity", "enterprise.eap"],
+                _ => &["password"],
             },
         })
         .collect();
@@ -93,7 +93,7 @@ pub(crate) fn recovery(reason: ConnectFailureReason) -> Option<NetworkConnectPro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ConnectFailureReason, HiddenPrompt, WepKeyType, recovery};
     #[test]
     fn hidden_modes_have_explicit_key_management_and_conditional_requirements() {
         let prompt = HiddenPrompt::default();
