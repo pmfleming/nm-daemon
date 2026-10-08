@@ -217,6 +217,7 @@ impl Nm {
             .and_then(|path| self.connection_timestamp_ms(path));
 
         Ok(Some(WifiStatus {
+            hidden_prompt: Default::default(),
             enabled: radios.wireless_enabled,
             radios: radios.clone(),
             active: true,

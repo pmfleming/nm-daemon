@@ -111,6 +111,14 @@
     "fallback_used": false,
     "message": "password required for Example",
     "reason": "secret-required",
+    "recovery_prompt": {
+      "kind": "password",
+      "message": "Saved password failed. Enter a new Wi-Fi password.",
+      "optional_fields": [],
+      "required_fields": [
+        "password"
+      ]
+    },
     "ssid": "Example",
     "status": "error",
     "suggest_open_portal": false
@@ -237,6 +245,14 @@
           "fallback_used": false,
           "message": "password required for Example",
           "reason": "secret-required",
+          "recovery_prompt": {
+            "kind": "password",
+            "message": "Saved password failed. Enter a new Wi-Fi password.",
+            "optional_fields": [],
+            "required_fields": [
+              "password"
+            ]
+          },
           "ssid": "Example",
           "status": "error",
           "suggest_open_portal": false
@@ -400,6 +416,127 @@
         "enterprise.identity"
       ]
     }
+  },
+  "hidden_prompt": {
+    "fields": [
+      {
+        "key": "ssid",
+        "password": false,
+        "required": true,
+        "value": ""
+      },
+      {
+        "key": "security",
+        "password": false,
+        "required": true,
+        "value": "wpa-psk"
+      },
+      {
+        "key": "password",
+        "password": true,
+        "required": false,
+        "value": ""
+      },
+      {
+        "key": "enterprise.eap",
+        "password": false,
+        "required": false,
+        "value": "peap"
+      },
+      {
+        "key": "enterprise.identity",
+        "password": false,
+        "required": false,
+        "value": ""
+      },
+      {
+        "key": "enterprise.anonymous_identity",
+        "password": false,
+        "required": false,
+        "value": ""
+      },
+      {
+        "key": "enterprise.phase2_auth",
+        "password": false,
+        "required": false,
+        "value": "mschapv2"
+      },
+      {
+        "key": "enterprise.ca_cert",
+        "password": false,
+        "required": false,
+        "value": ""
+      }
+    ],
+    "security_modes": [
+      {
+        "enterprise": false,
+        "id": "open",
+        "key_mgmt": "open",
+        "required_fields": [],
+        "security": "--",
+        "wep_key_type": null
+      },
+      {
+        "enterprise": false,
+        "id": "owe",
+        "key_mgmt": "owe",
+        "required_fields": [],
+        "security": "OWE",
+        "wep_key_type": null
+      },
+      {
+        "enterprise": false,
+        "id": "wpa-psk",
+        "key_mgmt": "wpa-psk",
+        "required_fields": [
+          "password"
+        ],
+        "security": "WPA2/3",
+        "wep_key_type": null
+      },
+      {
+        "enterprise": false,
+        "id": "sae",
+        "key_mgmt": "sae",
+        "required_fields": [
+          "password"
+        ],
+        "security": "WPA2/3",
+        "wep_key_type": null
+      },
+      {
+        "enterprise": false,
+        "id": "wep-key",
+        "key_mgmt": "wep",
+        "required_fields": [
+          "password"
+        ],
+        "security": "WEP",
+        "wep_key_type": "key"
+      },
+      {
+        "enterprise": false,
+        "id": "wep-phrase",
+        "key_mgmt": "wep",
+        "required_fields": [
+          "password"
+        ],
+        "security": "WEP",
+        "wep_key_type": "phrase"
+      },
+      {
+        "enterprise": true,
+        "id": "wpa-eap",
+        "key_mgmt": "wpa-eap",
+        "required_fields": [
+          "enterprise.identity",
+          "enterprise.eap"
+        ],
+        "security": "Enterprise",
+        "wep_key_type": null
+      }
+    ]
   },
   "network_snapshot": {
     "age_ms": 2500,

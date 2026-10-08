@@ -10,6 +10,7 @@ use zvariant::OwnedObjectPath;
 
 mod identity;
 mod network;
+pub(crate) mod prompts;
 pub(crate) mod reason;
 mod wire_v1;
 
@@ -197,6 +198,8 @@ impl NetworkSnapshotMetadata {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ConnectResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery_prompt: Option<NetworkConnectPrompt>,
     pub(crate) status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<ConnectFailureReason>,
@@ -224,6 +227,7 @@ impl ConnectResult {
             .is_some_and(|status| status.captive_portal);
         Self {
             status: "connected",
+            recovery_prompt: None,
             reason: None,
             path: Some(path),
             ssid: ssid.into(),
@@ -242,6 +246,7 @@ impl ConnectResult {
     ) -> Self {
         Self {
             status: "error",
+            recovery_prompt: prompts::recovery(reason),
             reason: Some(reason),
             path: None,
             ssid: ssid.into(),
@@ -285,6 +290,7 @@ pub(crate) struct RadioPowerResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct WifiStatus {
+    pub(crate) hidden_prompt: prompts::HiddenPrompt,
     pub(crate) enabled: bool,
     pub(crate) radios: RadioStatus,
     pub(crate) active: bool,
@@ -326,6 +332,7 @@ impl WifiStatus {
         connectivity: Option<ConnectivityStatus>,
     ) -> Self {
         Self {
+            hidden_prompt: Default::default(),
             enabled,
             radios,
             active: false,

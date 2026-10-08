@@ -465,6 +465,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
     ShelllistContractFixture {
         network: network.clone(),
         status: WifiStatus {
+            hidden_prompt: Default::default(),
             enabled: true,
             radios: contract_radio_status(),
             active: true,
@@ -1481,6 +1482,7 @@ fn serialized_boundary_snapshot() -> Value {
     let shell = serde_json::to_value(shelllist_contract_fixture()).expect("shell fixture JSON");
     let methods = method_contract_fixtures();
     json!({
+        "hidden_prompt": methods["wifi-status.inactive"]["status"]["hidden_prompt"],
         "network_snapshot": methods["wifi-networks.saved"]["snapshot"],
         "saved_network": {
             "capabilities": shell["network"]["capabilities"],

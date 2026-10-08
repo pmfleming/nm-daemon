@@ -358,6 +358,7 @@ fn emit_connect_failure(
         "phase": ConnectPhase::Failed,
         "target": target,
         "reason": report.code.connect_reason(),
+        "recovery_prompt": report.code.connect_reason().and_then(crate::model::prompts::recovery),
         "code": report.code,
         "message": report.message,
         "details": report.api_details(),
