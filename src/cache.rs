@@ -27,7 +27,7 @@ const KNOWN_CONNECTIONS_FILE: &str = "known-connections.json";
 const CONNECT_HISTORY_FILE: &str = "connects.jsonl";
 const PROFILE_OPERATION_HISTORY_FILE: &str = "profile-operations.jsonl";
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum CacheRead<T> {
     Missing,
     Stale {
@@ -56,13 +56,14 @@ impl<T> CacheRead<T> {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct CachedSnapshot {
+// Reads own their networks; writes borrow the same wire shape without copying APs.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct CachedSnapshot<T = Vec<AccessPoint>> {
     version: u32,
     updated_at_ms: u128,
     scanning: bool,
     networks_found: usize,
-    networks: Vec<AccessPoint>,
+    networks: T,
 }
 
 impl CachedSnapshot {
@@ -88,7 +89,7 @@ impl CachedSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct CachedStatus {
     version: u32,
     updated_at_ms: u128,
@@ -106,7 +107,7 @@ struct CachedActiveStatus<'a> {
     status: &'a WifiStatus,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct CachedKnownConnections {
     version: u32,
     updated_at_ms: u128,
@@ -122,7 +123,7 @@ pub(crate) struct ConnectAttemptRecord<'a> {
     reason: Option<ConnectFailureReason>,
     path: Option<ConnectEnginePath>,
     ssid: &'a str,
-    ssid_bytes: Vec<u8>,
+    ssid_bytes: &'a [u8],
     bssid: Option<&'a str>,
     ap_path: Option<&'a str>,
     device_iface: Option<&'a str>,
@@ -147,7 +148,7 @@ impl<'a> ConnectAttemptRecord<'a> {
             reason,
             path,
             ssid: target.ssid.as_str(),
-            ssid_bytes: target.ssid_bytes().to_vec(),
+            ssid_bytes: target.ssid_bytes(),
             bssid: non_empty(target.bssid.as_ref().map(Bssid::as_str)),
             ap_path: non_empty(target.ap_path.as_ref().map(NmObjectPath::as_str)),
             device_iface: non_empty(target.ifname.as_ref().map(InterfaceName::as_str)),
@@ -270,13 +271,13 @@ pub(crate) fn append_profile_operation_audit(record: &(impl Serialize + ?Sized))
     })
 }
 
-fn snapshot_record(scanning: bool, networks: &[AccessPoint]) -> CachedSnapshot {
+fn snapshot_record(scanning: bool, networks: &[AccessPoint]) -> CachedSnapshot<&[AccessPoint]> {
     CachedSnapshot {
         version: CACHE_VERSION,
         updated_at_ms: now_ms(),
         scanning,
         networks_found: networks.len(),
-        networks: networks.to_vec(),
+        networks,
     }
 }
 
@@ -387,4 +388,36 @@ pub(crate) fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CachedSnapshot, ConnectAttemptRecord, snapshot_record};
+    use crate::model::{Ssid, example_access_point, example_connect_target};
+
+    #[test]
+    fn borrowed_snapshot_preserves_the_owned_cache_wire_shape() -> anyhow::Result<()> {
+        let points = [example_access_point()];
+        for networks in [&points[..], &[]] {
+            let snapshot = snapshot_record(true, networks);
+            assert!(std::ptr::eq(snapshot.networks, networks));
+            let wire = serde_json::to_value(&snapshot)?;
+            let owned: CachedSnapshot = serde_json::from_value(wire.clone())?;
+            assert_eq!(owned.networks_found, networks.len());
+            assert_eq!(serde_json::to_value(owned)?, wire);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn history_borrows_raw_ssid_bytes_without_changing_json() -> anyhow::Result<()> {
+        let mut target = example_connect_target(false);
+        target.ssid = Ssid::from_bytes(vec![0, 255])?;
+        let record = ConnectAttemptRecord::new(&target, "failed", None, None, "failure", 10);
+        assert!(std::ptr::eq(record.ssid_bytes, target.ssid_bytes()));
+        let wire = serde_json::to_value(record)?;
+        assert_eq!(wire["ssid_bytes"], serde_json::json!([0, 255]));
+        assert_eq!(wire["ssid"], target.ssid.as_str());
+        Ok(())
+    }
 }
