@@ -426,7 +426,7 @@ mod tests {
                 ConnectEvent::Finished {
                     phase,
                     target: target.clone(),
-                    outcome: ConnectOutcome::Cancelled {
+                    outcome: &ConnectOutcome::Cancelled {
                         message: message.clone(),
                     },
                 },
@@ -479,7 +479,7 @@ mod tests {
             let event = ConnectEvent::Finished {
                 phase,
                 target: target.clone(),
-                outcome,
+                outcome: &outcome,
             };
             assert_eq!(
                 connect_event_payload("connect-test", &event),

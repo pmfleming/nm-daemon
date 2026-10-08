@@ -293,9 +293,7 @@ impl<'a> Application<'a> {
             Err(err) => {
                 let err = ensure_domain(ErrorOperation::Scan, err);
                 let error = ErrorReport::from_error(&err, ErrorOperation::Scan);
-                emit(&ScanEvent::Warning {
-                    error: error.clone(),
-                })?;
+                emit(&ScanEvent::Warning { error: &error })?;
                 if strict {
                     return Err(err);
                 }
@@ -315,7 +313,7 @@ impl<'a> Application<'a> {
         cache_scan_snapshot(cache_result, &access_points)?;
         emit(&ScanEvent::Snapshot {
             networks_found,
-            access_points: access_points.clone(),
+            access_points: &access_points,
         })?;
         cache_scan_complete(cache_result, networks_found)?;
         emit(&ScanEvent::Complete { networks_found })?;
@@ -760,17 +758,18 @@ pub(crate) struct PreparedScanRequest {
     ssid_bytes: Vec<Vec<u8>>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum ScanEvent {
+/// Synchronous notifications borrow data retained by the scan result.
+#[derive(Debug)]
+pub(crate) enum ScanEvent<'a> {
     Status {
-        message: String,
+        message: &'a str,
     },
     Warning {
-        error: ErrorReport,
+        error: &'a ErrorReport,
     },
     Snapshot {
         networks_found: usize,
-        access_points: Vec<AccessPoint>,
+        access_points: &'a [AccessPoint],
     },
     Complete {
         networks_found: usize,
@@ -868,8 +867,8 @@ impl ConnectRequest {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum ConnectEvent {
+#[derive(Debug)]
+pub(crate) enum ConnectEvent<'a> {
     Started {
         phase: ConnectPhase,
         target: ConnectTargetIdentity,
@@ -885,7 +884,7 @@ pub(crate) enum ConnectEvent {
     Finished {
         phase: ConnectPhase,
         target: ConnectTargetIdentity,
-        outcome: ConnectOutcome,
+        outcome: &'a ConnectOutcome,
     },
     Cancelled {
         phase: ConnectPhase,
@@ -894,7 +893,7 @@ pub(crate) enum ConnectEvent {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum ConnectOutcome {
     Succeeded(ConnectResult),
     Failed {
@@ -1001,7 +1000,7 @@ fn check_scan_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
 
 fn emit_scan_started(emit: &mut impl FnMut(&ScanEvent) -> Result<()>) -> Result<()> {
     emit(&ScanEvent::Status {
-        message: "starting Wi-Fi scan".to_string(),
+        message: "starting Wi-Fi scan",
     })
 }
 
@@ -1222,7 +1221,7 @@ fn emit_finished_connect(
     emit(&ConnectEvent::Finished {
         phase,
         target: ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref()),
-        outcome: outcome.clone(),
+        outcome,
     })
 }
 
@@ -1526,6 +1525,42 @@ mod tests {
         ] {
             assert!(!retryable_candidate_failure(reason), "{reason:?}");
         }
+    }
+
+    #[test]
+    fn scan_snapshot_borrows_the_returned_points_and_precedes_completion() -> anyhow::Result<()> {
+        use crate::test_support::workflows::{FakeNm, isolated};
+        isolated(
+            concat!(
+                module_path!(),
+                "::scan_snapshot_borrows_the_returned_points_and_precedes_completion"
+            ),
+            || {
+                let fake = FakeNm::new([], false)?;
+                let mut pointer = None;
+                let mut events = Vec::new();
+                let points =
+                    super::Application::new(&fake.nm).finish_scan(false, &mut |event| {
+                        match event {
+                            super::ScanEvent::Snapshot {
+                                access_points,
+                                networks_found,
+                            } => {
+                                pointer = Some(access_points.as_ptr());
+                                assert_eq!(*networks_found, access_points.len());
+                                events.push("snapshot");
+                            }
+                            super::ScanEvent::Complete { .. } => events.push("complete"),
+                            _ => panic!("unexpected scan event"),
+                        }
+                        Ok(())
+                    })?;
+                assert_eq!(points.len(), 2);
+                assert_eq!(pointer, Some(points.as_ptr()));
+                assert_eq!(events, ["snapshot", "complete"]);
+                Ok(())
+            },
+        )
     }
 
     #[test]

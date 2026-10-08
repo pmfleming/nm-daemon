@@ -113,7 +113,7 @@ fn emit_scan_event(
             networks_found,
             access_points,
         } => {
-            let snapshot = application.network_snapshot(access_points.clone())?;
+            let snapshot = application.network_snapshot(access_points.to_vec())?;
             (
                 "snapshot",
                 json!({

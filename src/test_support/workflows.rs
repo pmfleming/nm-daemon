@@ -503,9 +503,9 @@ fn candidate_retry_is_bounded_and_authentication_failure_is_not_retried() -> Res
                     strength: Some(70),
                 };
                 request.alternatives = vec![alternate.clone(), alternate];
-                let mut events = Vec::new();
+                let mut finished = 0;
                 let outcome = Application::new(&fake.nm).connect(&request, None, |event| {
-                    events.push(event.clone());
+                    finished += usize::from(matches!(event, ConnectEvent::Finished { .. }));
                     Ok(())
                 })?;
                 let result = match outcome {
@@ -531,13 +531,7 @@ fn candidate_retry_is_bounded_and_authentication_failure_is_not_retried() -> Res
                     }
                 );
                 assert_eq!(state.deleted, attempts - usize::from(reason.is_none()));
-                assert_eq!(
-                    events
-                        .iter()
-                        .filter(|event| matches!(event, ConnectEvent::Finished { .. }))
-                        .count(),
-                    1
-                );
+                assert_eq!(finished, 1);
             }
             Ok(())
         },
