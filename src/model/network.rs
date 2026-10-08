@@ -183,7 +183,7 @@ impl HotspotSecurity {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct HotspotCapabilities {
     pub(crate) supported: bool,
     pub(crate) unsupported_reason: Option<HotspotUnavailableReason>,
@@ -194,7 +194,7 @@ pub(crate) struct HotspotCapabilities {
     pub(crate) supported_bands: Vec<WifiBand>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct HotspotDevice {
     pub(crate) path: String,
     pub(crate) interface: String,
@@ -208,7 +208,7 @@ pub(crate) struct HotspotDevice {
     pub(crate) bands: Vec<WifiBand>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub(crate) struct HotspotStatus {
     pub(crate) active: bool,
     pub(crate) device_path: Option<String>,
@@ -228,7 +228,7 @@ pub(crate) struct HotspotStatus {
     pub(crate) share: Option<HotspotShare>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct HotspotShare {
     pub(crate) ssid: String,
     pub(crate) auth_type: &'static str,
@@ -236,7 +236,7 @@ pub(crate) struct HotspotShare {
     pub(crate) qr_payload: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct HotspotStartResult {
     pub(crate) status: &'static str,
     pub(crate) message: String,
@@ -248,7 +248,7 @@ pub(crate) struct HotspotStartResult {
     pub(crate) hotspot: HotspotStatus,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct HotspotStopResult {
     pub(crate) status: &'static str,
     pub(crate) message: String,

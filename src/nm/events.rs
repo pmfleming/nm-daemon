@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -9,8 +9,7 @@ use zbus::message::Type;
 
 use crate::generated::NETWORKMANAGER_EVENT_RETRY_DELAY;
 
-const DEVICE_IFACE: &str = "org.freedesktop.NetworkManager.Device";
-const ACTIVE_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.Connection.Active";
+use super::{ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, recover_lock};
 const VPN_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.VPN.Connection";
 
 /// Which NetworkManager object reported a transition.
@@ -62,16 +61,20 @@ impl NetworkEvents {
         let monitor_events = Arc::clone(&events);
         if let Err(error) = std::thread::Builder::new()
             .name("nm-events".to_string())
-            .spawn(move || loop {
-                if let Err(error) = monitor_signals(connection.clone(), &destination, &monitor_events) {
-                    tracing::warn!(error = %crate::error::err_chain(&error), "NetworkManager event monitor interrupted; retrying");
-                }
-                std::thread::sleep(NETWORKMANAGER_EVENT_RETRY_DELAY);
-            })
+            .spawn(move || monitor_events.monitor(&connection, &destination))
         {
             tracing::error!(%error, "failed to spawn NetworkManager event monitor");
         }
         events
+    }
+
+    fn monitor(&self, connection: &Connection, destination: &str) {
+        loop {
+            if let Err(error) = monitor_signals(connection, destination, self) {
+                tracing::warn!(error = %crate::error::err_chain(&error), "NetworkManager event monitor interrupted; retrying");
+            }
+            std::thread::sleep(NETWORKMANAGER_EVENT_RETRY_DELAY);
+        }
     }
 
     pub(super) fn generation(&self) -> u64 {
@@ -143,12 +146,8 @@ impl NetworkEvents {
     }
 }
 
-fn recover_lock<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
-    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 fn monitor_signals(
-    connection: Connection,
+    connection: &Connection,
     destination: &str,
     events: &NetworkEvents,
 ) -> Result<()> {
@@ -157,7 +156,7 @@ fn monitor_signals(
         .sender(destination)
         .context("match NetworkManager signal sender")?
         .build();
-    let mut messages = MessageIterator::for_match_rule(rule, &connection, Some(64))
+    let mut messages = MessageIterator::for_match_rule(rule, connection, Some(64))
         .context("subscribe to NetworkManager signals")?;
     events.notify();
     for message in &mut messages {
@@ -175,50 +174,32 @@ fn monitor_signals(
 /// generation; only these carry health detail.
 fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
     let header = message.header();
-    let interface = header.interface()?.as_str().to_string();
-    let member = header.member()?.as_str().to_string();
-    let path = header.path()?.as_str().to_string();
-    let owner = header.sender()?.as_str().to_owned();
+    let subject = match (header.interface()?.as_str(), header.member()?.as_str()) {
+        (DEVICE_IFACE, "StateChanged") => HealthSubject::Device,
+        (ACTIVE_CONNECTION_IFACE, "StateChanged") => HealthSubject::ActiveConnection,
+        (VPN_CONNECTION_IFACE, "VpnStateChanged") => HealthSubject::Vpn,
+        _ => return None,
+    };
     let body = message.body();
-    match (interface.as_str(), member.as_str()) {
-        (DEVICE_IFACE, "StateChanged") => {
-            let (state, previous_state, reason): (u32, u32, u32) = body.deserialize().ok()?;
-            Some(HealthSignal {
-                owner,
-                subject: HealthSubject::Device,
-                path,
-                state,
-                previous_state: Some(previous_state),
-                reason,
-                observed_at: Instant::now(),
-            })
+    let (state, previous_state, reason) = match subject {
+        HealthSubject::Device => {
+            let (state, previous, reason): (u32, u32, u32) = body.deserialize().ok()?;
+            (state, Some(previous), reason)
         }
-        (ACTIVE_CONNECTION_IFACE, "StateChanged") => {
+        _ => {
             let (state, reason): (u32, u32) = body.deserialize().ok()?;
-            Some(HealthSignal {
-                owner,
-                subject: HealthSubject::ActiveConnection,
-                path,
-                state,
-                previous_state: None,
-                reason,
-                observed_at: Instant::now(),
-            })
+            (state, None, reason)
         }
-        (VPN_CONNECTION_IFACE, "VpnStateChanged") => {
-            let (state, reason): (u32, u32) = body.deserialize().ok()?;
-            Some(HealthSignal {
-                owner,
-                subject: HealthSubject::Vpn,
-                path,
-                state,
-                previous_state: None,
-                reason,
-                observed_at: Instant::now(),
-            })
-        }
-        _ => None,
-    }
+    };
+    Some(HealthSignal {
+        owner: header.sender()?.to_string(),
+        subject,
+        path: header.path()?.to_string(),
+        state,
+        previous_state,
+        reason,
+        observed_at: Instant::now(),
+    })
 }
 
 #[cfg(test)]
@@ -227,6 +208,56 @@ mod tests {
     use std::time::Instant;
 
     use super::{HealthSignal, HealthSubject, NetworkEvents};
+
+    #[test]
+    fn health_signals_require_the_matching_member_body_and_sender() -> anyhow::Result<()> {
+        use super::{ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, VPN_CONNECTION_IFACE, health_signal};
+        for (interface, member, subject, previous) in [
+            (
+                DEVICE_IFACE,
+                "StateChanged",
+                HealthSubject::Device,
+                Some(70),
+            ),
+            (
+                ACTIVE_CONNECTION_IFACE,
+                "StateChanged",
+                HealthSubject::ActiveConnection,
+                None,
+            ),
+            (
+                VPN_CONNECTION_IFACE,
+                "VpnStateChanged",
+                HealthSubject::Vpn,
+                None,
+            ),
+        ] {
+            let builder = zbus::Message::signal("/object/1", interface, member)?.sender(":1.2")?;
+            let message = match previous {
+                Some(previous) => builder.build(&(120_u32, previous, 17_u32))?,
+                None => builder.build(&(120_u32, 17_u32))?,
+            };
+            let signal = health_signal(&message).expect("valid state signal");
+            assert_eq!((signal.subject, signal.previous_state), (subject, previous));
+            assert_eq!((signal.state, signal.reason), (120, 17));
+            assert_eq!(
+                (signal.owner.as_str(), signal.path.as_str()),
+                (":1.2", "/object/1")
+            );
+            for message in [
+                zbus::Message::signal("/object/1", interface, member)?
+                    .sender(":1.2")?
+                    .build(&"bad body")?,
+                zbus::Message::signal("/object/1", interface, "Other")?
+                    .sender(":1.2")?
+                    .build(&(120_u32, 17_u32))?,
+                zbus::Message::signal("/object/1", interface, member)?.build(&(120_u32, 17_u32))?,
+            ] {
+                assert!(health_signal(&message).is_none());
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn owner_loss_clears_both_health_caches_and_wakes_waiters() {

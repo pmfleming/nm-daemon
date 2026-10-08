@@ -402,11 +402,11 @@ fn system_uptime_seconds() -> Option<f64> {
 mod tests {
 
     use super::access_point_matches;
-    use crate::model::AccessPoint;
+    use crate::model::example_access_point;
 
     #[test]
     fn access_point_match_requires_path_and_bssid_when_both_are_supplied() {
-        let ap = test_ap();
+        let ap = example_access_point();
 
         assert!(access_point_matches(
             &ap,
@@ -426,33 +426,5 @@ mod tests {
             Some("/ap/1"),
             Some("00:11:22:33:44:66")
         ));
-    }
-
-    fn test_ap() -> AccessPoint {
-        AccessPoint {
-            ssid: "Example".to_string(),
-            ssid_bytes: b"Example".to_vec(),
-            active: false,
-            security: crate::model::Security::Wpa2Or3,
-            strength: 80,
-            frequency: 2412,
-            channel: 1,
-            band: "2.4 GHz".to_string(),
-            mode: "Infra".to_string(),
-            max_bitrate_mbps: 0,
-            bandwidth_mhz: 0,
-            ssid_hex: "4578616d706c65".to_string(),
-            wpa_flags_label: "(none)".to_string(),
-            rsn_flags_label: "(none)".to_string(),
-            bssid: "00:11:22:33:44:55".to_string(),
-            last_seen: 0,
-            last_seen_age_ms: None,
-            path: "/ap/1".to_string(),
-            device_path: "/device/1".to_string(),
-            device_iface: "wlan0".to_string(),
-            flags: 0,
-            wpa_flags: 0,
-            rsn_flags: 0,
-        }
     }
 }

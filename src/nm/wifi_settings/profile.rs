@@ -4,6 +4,7 @@ use crate::error::{DomainError, ErrorOperation};
 use crate::model::{TargetProfileSettings, WifiConnectTarget};
 use crate::nm::ip_settings;
 use crate::nm::{ConnectionSettings, owned_value};
+use crate::variant::{insert_optional_value, insert_string, setting};
 
 pub(in crate::nm) fn apply_target_connection_metadata(
     settings: &mut ConnectionSettings,
@@ -42,13 +43,7 @@ pub(in crate::nm) fn apply_target_profile_settings(
     settings: &mut ConnectionSettings,
     target: &WifiConnectTarget,
 ) -> Result<()> {
-    apply_profile_settings(settings, &target.profile)
-}
-
-fn apply_profile_settings(
-    settings: &mut ConnectionSettings,
-    profile: &TargetProfileSettings,
-) -> Result<()> {
+    let profile = &target.profile;
     apply_connection_settings(settings, profile)?;
     apply_mac_policy(settings, profile)?;
     apply_hostname_policy(settings, profile)?;
@@ -69,18 +64,16 @@ fn apply_connection_settings(
     // Cast discovery is opt-in. Preserve an explicit per-profile toggle, but
     // pin profiles with no mDNS policy to disabled instead of inheriting a
     // potentially permissive system default.
-    let mdns = connection
-        .get("mdns")
-        .and_then(|value| i32::try_from(value.clone()).ok());
+    let mdns = setting::<i32>(connection, "mdns");
     if mdns.is_none() || mdns == Some(-1) {
         connection.insert("mdns".to_string(), owned_value(0_i32)?);
     }
-    if let Some(autoconnect) = profile.autoconnect {
-        connection.insert("autoconnect".to_string(), owned_value(autoconnect)?);
-    }
-    if let Some(priority) = profile.autoconnect_priority {
-        connection.insert("autoconnect-priority".to_string(), owned_value(priority)?);
-    }
+    insert_optional_value(connection, "autoconnect", profile.autoconnect)?;
+    insert_optional_value(
+        connection,
+        "autoconnect-priority",
+        profile.autoconnect_priority,
+    )?;
     if let Some(metered) = profile.metered.as_deref().filter(|value| !value.is_empty()) {
         connection.insert("metered".to_string(), owned_value(metered_code(metered)?)?);
     }
@@ -128,20 +121,19 @@ fn apply_mac_policy(
     settings: &mut ConnectionSettings,
     profile: &TargetProfileSettings,
 ) -> Result<()> {
-    if let Some(cloned_mac) = profile
+    // Do not create a wireless section when no MAC policy was supplied.
+    let Some(value) = profile
         .cloned_mac_address
         .as_deref()
         .filter(|value| !value.is_empty())
-    {
-        settings
-            .entry("802-11-wireless".to_string())
-            .or_default()
-            .insert(
-                "assigned-mac-address".to_string(),
-                owned_value(cloned_mac.to_string())?,
-            );
-    }
-    Ok(())
+    else {
+        return Ok(());
+    };
+    insert_string(
+        settings.entry("802-11-wireless".to_string()).or_default(),
+        "assigned-mac-address",
+        value,
+    )
 }
 
 fn apply_hostname_policy(

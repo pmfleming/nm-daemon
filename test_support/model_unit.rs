@@ -154,28 +154,15 @@ fn test_profile() -> SavedWifiConnection {
 
 fn test_ap(flags: u32, wpa_flags: u32, rsn_flags: u32) -> AccessPoint {
     AccessPoint {
-        ssid: "Example".to_string(),
-        ssid_bytes: b"Example".to_vec(),
-        active: false,
         security: security_label(flags, wpa_flags, rsn_flags),
         strength: 50,
-        frequency: 2412,
-        channel: 1,
-        band: "2.4 GHz".to_string(),
-        mode: "Infra".to_string(),
-        max_bitrate_mbps: 0,
-        bandwidth_mhz: 0,
-        ssid_hex: "4578616d706c65".to_string(),
         wpa_flags_label: security_flags_label(wpa_flags),
         rsn_flags_label: security_flags_label(rsn_flags),
-        bssid: "00:11:22:33:44:55".to_string(),
-        last_seen: 0,
-        last_seen_age_ms: None,
         path: "/ap".to_string(),
         device_path: "/device".to_string(),
-        device_iface: "wlan0".to_string(),
         flags,
         wpa_flags,
         rsn_flags,
+        ..super::example_access_point()
     }
 }

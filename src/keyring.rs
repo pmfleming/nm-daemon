@@ -5,7 +5,7 @@ use zbus::blocking::{Connection, Proxy};
 use zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::nm::ConnectionSettings;
-use crate::variant::{owned_value, value_string};
+use crate::variant::{owned_value, setting};
 
 const SECRET_DEST: &str = "org.freedesktop.secrets";
 const SECRET_SERVICE_PATH: &str = "/org/freedesktop/secrets";
@@ -236,12 +236,14 @@ impl SecretServiceClient {
         let Some(item) = unlocked.into_iter().next() else {
             return Ok(KeyringOutcome::Completed(None));
         };
-        let secrets: HashMap<OwnedObjectPath, Secret> = service
-            .call("GetSecrets", &(vec![item.clone()], self.session.clone()))
+        let mut secrets: HashMap<OwnedObjectPath, Secret> = service
+            .call("GetSecrets", &(std::slice::from_ref(&item), &self.session))
             .context("read Secret Service item secret")?;
-        Ok(KeyringOutcome::Completed(secrets.get(&item).and_then(
-            |secret| String::from_utf8(secret.2.clone()).ok(),
-        )))
+        Ok(KeyringOutcome::Completed(
+            secrets
+                .remove(&item)
+                .and_then(|secret| String::from_utf8(secret.2).ok()),
+        ))
     }
 
     fn store(
@@ -262,11 +264,13 @@ impl SecretServiceClient {
             (ITEM_LABEL_KEY.to_string(), owned_value(label.to_string())?),
             (ITEM_ATTRIBUTES_KEY.to_string(), owned_value(attrs.clone())?),
         ]);
-        let secret: Secret = (
-            self.session.clone(),
-            Vec::new(),
-            password.as_bytes().to_vec(),
-            "text/plain".to_string(),
+        // The synchronous call serializes these borrows before returning; no
+        // extra password buffer or session-path copy is needed.
+        let secret = (
+            &self.session,
+            &[] as &[u8],
+            password.as_bytes(),
+            "text/plain",
         );
         let (_item, prompt): (OwnedObjectPath, OwnedObjectPath) = collection_proxy
             .call("CreateItem", &(props, secret, true))
@@ -326,17 +330,13 @@ impl SecretServiceClient {
 
     fn collection(&self) -> Result<OwnedObjectPath> {
         let service = self.service_proxy()?;
-        let default: OwnedObjectPath = service
-            .call("ReadAlias", &(DEFAULT_COLLECTION,))
-            .context("read default Secret Service collection")?;
-        if default.as_str() != NULL_PROMPT {
-            return Ok(default);
-        }
-        let login: OwnedObjectPath = service
-            .call("ReadAlias", &(LOGIN_COLLECTION,))
-            .context("read login Secret Service collection")?;
-        if login.as_str() != NULL_PROMPT {
-            return Ok(login);
+        for alias in [DEFAULT_COLLECTION, LOGIN_COLLECTION] {
+            let collection: OwnedObjectPath = service
+                .call("ReadAlias", &(alias,))
+                .with_context(|| format!("read {alias} Secret Service collection"))?;
+            if collection.as_str() != NULL_PROMPT {
+                return Ok(collection);
+            }
         }
         bail!("no default or login Secret Service collection is available")
     }
@@ -398,10 +398,13 @@ fn primary_secret_attributes(
     setting_name: &str,
     key: &str,
 ) -> HashMap<String, String> {
+    let identity = settings
+        .get("connection")
+        .and_then(|section| setting::<&str>(section, "uuid"))
+        .map(|uuid| ("uuid", uuid))
+        .unwrap_or(("connection_path", connection_path));
     let mut attrs = base_secret_attributes(setting_name, key);
-    if !insert_setting_string(settings, "connection", "uuid", &mut attrs) {
-        attrs.insert("connection_path".to_string(), connection_path.to_string());
-    }
+    attrs.insert(identity.0.to_string(), identity.1.to_string());
     attrs
 }
 
@@ -431,30 +434,11 @@ fn base_secret_attributes(setting_name: &str, key: &str) -> HashMap<String, Stri
     ])
 }
 
-fn insert_setting_string(
-    settings: &ConnectionSettings,
-    section: &str,
-    key: &str,
-    attrs: &mut HashMap<String, String>,
-) -> bool {
-    if let Some(value) = settings
-        .get(section)
-        .and_then(|section| section.get(key))
-        .and_then(value_string)
-    {
-        attrs.insert(key.to_string(), value);
-        true
-    } else {
-        false
-    }
-}
-
 fn secret_label(settings: &ConnectionSettings, setting_name: &str, key: &str) -> String {
     let connection_id = settings
         .get("connection")
-        .and_then(|section| section.get("id"))
-        .and_then(value_string)
-        .unwrap_or_else(|| "Wi-Fi network".to_string());
+        .and_then(|section| setting::<&str>(section, "id"))
+        .unwrap_or("Wi-Fi network");
     format!("nm-daemon {connection_id} {setting_name}.{key}")
 }
 
@@ -489,6 +473,17 @@ mod tests {
                 vec![object_path(ITEM_ONE_PATH), object_path(ITEM_TWO_PATH)],
                 Vec::new(),
             )
+        }
+
+        fn get_secrets(
+            &self,
+            _items: Vec<OwnedObjectPath>,
+            session: OwnedObjectPath,
+        ) -> HashMap<OwnedObjectPath, Secret> {
+            HashMap::from([(
+                object_path(ITEM_ONE_PATH),
+                (session, Vec::new(), b"secret".to_vec(), "text/plain".into()),
+            )])
         }
 
         fn unlock(
@@ -559,11 +554,6 @@ mod tests {
     }
 
     fn run_prompt_test() {
-        let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _entered = tokio_runtime.enter();
         let peer = TestPeer::new(":1.0", ":1.1");
         let dismissals = Arc::new(AtomicUsize::new(0));
         peer.server
@@ -597,6 +587,20 @@ mod tests {
             session: object_path("/org/freedesktop/secrets/session/test"),
         };
 
+        let service = client.service_proxy().unwrap();
+        for (items, expected) in [
+            (vec![object_path(ITEM_ONE_PATH)], Some("secret")),
+            (
+                vec![object_path(ITEM_TWO_PATH), object_path(ITEM_ONE_PATH)],
+                None,
+            ),
+            (Vec::new(), None),
+        ] {
+            assert!(matches!(
+                client.read_first_secret(&service, items).unwrap(),
+                KeyringOutcome::Completed(secret) if secret.as_deref() == expected
+            ));
+        }
         assert!(matches!(
             client.store(&HashMap::new(), "test", "secret").unwrap(),
             KeyringOutcome::PromptUnsupported {

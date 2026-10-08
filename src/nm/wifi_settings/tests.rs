@@ -352,20 +352,14 @@ fn wpa_psk_validation_matches_nmcli_shape() {
 }
 fn test_ap(rsn_flags: u32) -> AccessPoint {
     AccessPoint {
-        ssid: "Example".to_string(),
-        ssid_bytes: b"Example".to_vec(),
-        security: crate::model::Security::Wpa2Or3,
         strength: 50,
-        frequency: 2412,
-        band: "2.4 GHz".to_string(),
-        mode: "Infra".to_string(),
-        ssid_hex: "4578616d706c65".to_string(),
-        bssid: "00:11:22:33:44:55".to_string(),
+        channel: 0,
+        wpa_flags_label: String::new(),
+        rsn_flags_label: String::new(),
         path: "/ap".to_string(),
         device_path: "/device".to_string(),
-        device_iface: "wlan0".to_string(),
         rsn_flags,
-        ..Default::default()
+        ..crate::model::example_access_point()
     }
 }
 

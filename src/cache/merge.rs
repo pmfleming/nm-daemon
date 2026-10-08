@@ -60,44 +60,16 @@ fn same_access_point(left: &AccessPoint, right: &AccessPoint) -> bool {
 #[cfg(test)]
 mod tests {
     use super::upsert_connected_access_point;
-    use crate::model::AccessPoint;
+    use crate::model::example_access_point;
 
     #[test]
     fn connected_access_point_replaces_cached_network_and_marks_only_it_active() {
-        let mut networks = vec![test_ap("/ap/1", "00:11:22:33:44:55", false)];
-        let connected = test_ap("/ap/1", "00:11:22:33:44:55", false);
+        let mut networks = vec![example_access_point()];
+        let connected = example_access_point();
 
         upsert_connected_access_point(&mut networks, connected);
 
         assert_eq!(networks.len(), 1);
         assert!(networks[0].active);
-    }
-
-    fn test_ap(path: &str, bssid: &str, active: bool) -> AccessPoint {
-        AccessPoint {
-            ssid: "Example".to_string(),
-            ssid_bytes: b"Example".to_vec(),
-            active,
-            security: crate::model::Security::Wpa2Or3,
-            strength: 80,
-            frequency: 2412,
-            channel: 1,
-            band: "2.4 GHz".to_string(),
-            mode: "Infra".to_string(),
-            max_bitrate_mbps: 0,
-            bandwidth_mhz: 0,
-            ssid_hex: "4578616d706c65".to_string(),
-            wpa_flags_label: "(none)".to_string(),
-            rsn_flags_label: "(none)".to_string(),
-            bssid: bssid.to_string(),
-            last_seen: 0,
-            last_seen_age_ms: None,
-            path: path.to_string(),
-            device_path: "/device/1".to_string(),
-            device_iface: "wlan0".to_string(),
-            flags: 0,
-            wpa_flags: 0,
-            rsn_flags: 0,
-        }
     }
 }

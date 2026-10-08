@@ -1233,6 +1233,29 @@ pub(crate) struct AccessPoint {
     pub(crate) rsn_flags: u32,
 }
 
+/// Shared realistic scan fixture; tests override only the fields they exercise.
+#[cfg(test)]
+pub(crate) fn example_access_point() -> AccessPoint {
+    AccessPoint {
+        ssid: "Example".to_string(),
+        ssid_bytes: b"Example".to_vec(),
+        security: Security::Wpa2Or3,
+        strength: 80,
+        frequency: 2412,
+        channel: 1,
+        band: "2.4 GHz".to_string(),
+        mode: "Infra".to_string(),
+        ssid_hex: "4578616d706c65".to_string(),
+        wpa_flags_label: "(none)".to_string(),
+        rsn_flags_label: "(none)".to_string(),
+        bssid: "00:11:22:33:44:55".to_string(),
+        path: "/ap/1".to_string(),
+        device_path: "/device/1".to_string(),
+        device_iface: "wlan0".to_string(),
+        ..Default::default()
+    }
+}
+
 impl AccessPoint {
     pub(crate) fn ssid_bytes(&self) -> Cow<'_, [u8]> {
         ssid_bytes_or_display(&self.ssid_bytes, &self.ssid)

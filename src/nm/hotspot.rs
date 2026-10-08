@@ -17,7 +17,7 @@ use crate::model::{
     validate_ssid_bytes, wifi_qr_payload,
 };
 use crate::random::{random_passphrase, random_uuid_v4};
-use crate::variant::{insert_optional_value, value_map, value_string};
+use crate::variant::{insert_optional_value, setting, value_list, value_map};
 
 /// NM_WIFI_DEVICE_CAP_* bits this module depends on.
 const CAP_AP: u32 = 0x40;
@@ -58,7 +58,9 @@ impl Nm {
             .root_proxy()
             .get_property("WirelessEnabled")
             .unwrap_or(false);
-        let recommended = preferred_hotspot_device(&devices);
+        let recommended = devices
+            .iter()
+            .find(|device| available_hotspot_device(device));
         let (unsupported_reason, message) =
             hotspot_availability(&devices, wireless_enabled, recommended.is_some());
         Ok(HotspotCapabilities {
@@ -74,7 +76,7 @@ impl Nm {
 
     pub(crate) fn hotspot_status(&self) -> Result<HotspotStatus> {
         for device in self.hotspot_devices()? {
-            if let Some(status) = self.hotspot_status_for_device(&device)? {
+            if let Some(status) = self.hotspot_status_for_device(device)? {
                 return Ok(status);
             }
         }
@@ -126,8 +128,7 @@ impl Nm {
 
     pub(crate) fn stop_hotspot(&self) -> Result<HotspotStopResult> {
         let status = self.hotspot_status()?;
-        let (Some(active_connection), Some(ssid)) = (&status.active_connection, &status.ssid)
-        else {
+        let (Some(active_connection), Some(ssid)) = (status.active_connection, status.ssid) else {
             return Ok(HotspotStopResult {
                 status: "noop",
                 message: "No hotspot is running".to_string(),
@@ -151,8 +152,8 @@ impl Nm {
         Ok(HotspotStopResult {
             status: "stopped",
             message: format!("Hotspot {ssid} stopped"),
-            ssid: Some(ssid.clone()),
-            device_iface: status.device_iface.clone(),
+            ssid: Some(ssid),
+            device_iface: status.device_iface,
         })
     }
 
@@ -183,7 +184,7 @@ impl Nm {
             .collect()
     }
 
-    fn hotspot_status_for_device(&self, device: &HotspotDevice) -> Result<Option<HotspotStatus>> {
+    fn hotspot_status_for_device(&self, device: HotspotDevice) -> Result<Option<HotspotStatus>> {
         let wifi = self.proxy(&device.path, WIFI_IFACE)?;
         if wifi.get_property::<u32>("Mode").unwrap_or(0) != WIFI_MODE_AP {
             return Ok(None);
@@ -202,43 +203,15 @@ impl Nm {
         let profile_path: OwnedObjectPath = active.get_property("Connection").unwrap_or_default();
         drop(active);
         let settings = self.connection_settings(&profile_path)?;
-        let wireless = settings.get("802-11-wireless");
-        let ssid_bytes = wireless
-            .and_then(|section| section.get("ssid"))
-            .and_then(|value| Vec::<u8>::try_from(value.clone()).ok())
-            .unwrap_or_default();
         Ok(Some(HotspotStatus {
             active: true,
-            device_path: Some(device.path.clone()),
-            device_iface: Some(device.interface.clone()),
-            ssid: Some(display_ssid(&ssid_bytes)),
-            ssid_hex: Some(ssid_hex(&ssid_bytes)),
-            band: wireless
-                .and_then(|section| section.get("band"))
-                .and_then(value_string)
-                .map(|band| WifiBand::from_nm_value(&band)),
-            channel: wireless
-                .and_then(|section| section.get("channel"))
-                .and_then(|value| u32::try_from(value).ok())
-                .filter(|channel| *channel > 0),
-            security: settings
-                .get("802-11-wireless-security")
-                .and_then(|section| section.get("key-mgmt"))
-                .and_then(value_string)
-                .and_then(|key_mgmt| match key_mgmt.as_str() {
-                    "sae" => Some(HotspotSecurity::Sae),
-                    "wpa-psk" => Some(HotspotSecurity::WpaPsk),
-                    _ => None,
-                }),
-            hidden: wireless
-                .and_then(|section| section.get("hidden"))
-                .and_then(|value| bool::try_from(value).ok())
-                .unwrap_or(false),
+            device_path: Some(device.path),
+            device_iface: Some(device.interface),
             profile_path: Some(profile_path.to_string()),
             active_connection: Some(active_path.to_string()),
             state: Some(state),
             state_name: Some(super::inventory::active_connection_state_name(state)),
-            share: None,
+            ..hotspot_profile_status(&settings)
         }))
     }
 
@@ -252,7 +225,7 @@ impl Nm {
             .with_detail("unsupported_reason", serde_json::json!(reason))
             .into());
         }
-        let device = select_hotspot_device(&capabilities.devices, request.device.as_deref())?;
+        let device = select_hotspot_device(capabilities.devices, request.device.as_deref())?;
         let generated_ssid = request.ssid.is_none();
         let ssid = match &request.ssid {
             Some(ssid) => ssid.clone(),
@@ -425,6 +398,32 @@ impl Nm {
     }
 }
 
+/// Decode saved profile fields independently of active-device identity.
+fn hotspot_profile_status(settings: &ConnectionSettings) -> HotspotStatus {
+    let empty = HashMap::new();
+    let wireless = settings.get("802-11-wireless").unwrap_or(&empty);
+    let ssid_bytes = wireless
+        .get("ssid")
+        .and_then(value_list)
+        .unwrap_or_default();
+    HotspotStatus {
+        ssid: Some(display_ssid(&ssid_bytes)),
+        ssid_hex: Some(ssid_hex(&ssid_bytes)),
+        band: setting::<&str>(wireless, "band").map(WifiBand::from_nm_value),
+        channel: setting::<u32>(wireless, "channel").filter(|channel| *channel > 0),
+        security: match settings
+            .get("802-11-wireless-security")
+            .and_then(|section| setting(section, "key-mgmt"))
+        {
+            Some("sae") => Some(HotspotSecurity::Sae),
+            Some("wpa-psk") => Some(HotspotSecurity::WpaPsk),
+            _ => None,
+        },
+        hidden: setting(wireless, "hidden").unwrap_or(false),
+        ..HotspotStatus::default()
+    }
+}
+
 fn hotspot_connection_settings(
     resolved: &ResolvedHotspot,
     request: &HotspotRequest,
@@ -503,28 +502,28 @@ fn hotspot_availability(
     (None, "A Wi-Fi hotspot can be started".to_string())
 }
 
-/// Selects an unused AP-capable device.
-fn preferred_hotspot_device(devices: &[HotspotDevice]) -> Option<&HotspotDevice> {
-    devices
-        .iter()
-        .find(|device| device.ap_capable && !device.in_use)
+fn available_hotspot_device(device: &HotspotDevice) -> bool {
+    device.ap_capable && !device.in_use
 }
 
 fn select_hotspot_device(
-    devices: &[HotspotDevice],
+    devices: Vec<HotspotDevice>,
     requested: Option<&str>,
 ) -> Result<HotspotDevice> {
     let Some(requested) = requested else {
-        return preferred_hotspot_device(devices).cloned().ok_or_else(|| {
-            DomainError::not_found(
-                ErrorOperation::HotspotOperation,
-                "no unused access-point-capable Wi-Fi device is available",
-            )
-            .into()
-        });
+        return devices
+            .into_iter()
+            .find(available_hotspot_device)
+            .ok_or_else(|| {
+                DomainError::not_found(
+                    ErrorOperation::HotspotOperation,
+                    "no unused access-point-capable Wi-Fi device is available",
+                )
+                .into()
+            });
     };
     let device = devices
-        .iter()
+        .into_iter()
         .find(|device| device.path == requested || device.interface == requested)
         .ok_or_else(|| {
             DomainError::not_found(
@@ -544,7 +543,7 @@ fn select_hotspot_device(
         )
         .into());
     }
-    Ok(device.clone())
+    Ok(device)
 }
 
 fn resolve_band(requested: WifiBand, device: &HotspotDevice) -> Result<WifiBand> {
@@ -660,6 +659,12 @@ mod tests {
                 channel,
             };
             let settings = hotspot_connection_settings(&resolved, &request)?;
+            let status = super::hotspot_profile_status(&settings);
+            assert_eq!(status.ssid.as_deref(), Some("tést"));
+            assert_eq!(status.security, Some(security));
+            assert_eq!(status.band, band.nm_value().map(WifiBand::from_nm_value));
+            assert_eq!(status.channel, channel);
+            assert!(status.hidden);
             let text = |section: &str, key: &str| {
                 settings[section]
                     .get(key)
@@ -691,6 +696,38 @@ mod tests {
             );
             assert_eq!(text("ipv4", "method").as_deref(), Some("shared"));
             assert_eq!(text("ipv6", "method").as_deref(), Some("ignore"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_hotspot_fields_keep_strict_defaults() -> anyhow::Result<()> {
+        use super::{ConnectionSettings, hotspot_profile_status, value_map};
+        for settings in [
+            ConnectionSettings::new(),
+            ConnectionSettings::from([
+                (
+                    "802-11-wireless".into(),
+                    value_map([
+                        ("ssid", "not bytes".into()),
+                        ("band", b"a".as_slice().into()),
+                        ("channel", 0_u32.into()),
+                        ("hidden", 1_u32.into()),
+                    ])?,
+                ),
+                (
+                    "802-11-wireless-security".into(),
+                    value_map([("key-mgmt", "none".into())])?,
+                ),
+            ]),
+        ] {
+            let status = hotspot_profile_status(&settings);
+            assert_eq!(status.ssid.as_deref(), Some(""));
+            assert_eq!(
+                (status.band, status.channel, status.security),
+                (None, None, None)
+            );
+            assert!(!status.hidden);
         }
         Ok(())
     }
@@ -730,13 +767,13 @@ mod tests {
 
     #[test]
     fn requesting_a_non_access_point_device_is_a_typed_validation_error() {
-        let devices = vec![device("wlan1", false, false)];
-        let error = select_hotspot_device(&devices, Some("wlan1")).unwrap_err();
+        let devices = || vec![device("wlan1", false, false)];
+        let error = select_hotspot_device(devices(), Some("wlan1")).unwrap_err();
         let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
         assert_eq!(report.code, ErrorCode::ValidationError);
         assert_eq!(report.details["unsupported_reason"], "ap-mode-unsupported");
 
-        let missing = select_hotspot_device(&devices, Some("wlan9")).unwrap_err();
+        let missing = select_hotspot_device(devices(), Some("wlan9")).unwrap_err();
         assert_eq!(
             ErrorReport::from_error(&missing, ErrorOperation::Unknown).code,
             ErrorCode::NotFound

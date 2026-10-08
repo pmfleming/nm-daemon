@@ -516,101 +516,64 @@ impl<'a> Application<'a> {
         &self,
         operation: ProfileOperation,
     ) -> Result<ProfileOperationResult> {
-        match operation {
-            ProfileOperation::Details { path } => self.profile_details(path.as_str()),
-            ProfileOperation::Update { path, settings } => {
-                self.update_profile(path.as_str(), settings.as_ref())
+        let message = match operation {
+            ProfileOperation::Details { path } => {
+                return self
+                    .nm
+                    .wifi_profile_details_by_path(path.as_str())
+                    .map(|details| ProfileOperationResult::Details(Box::new(details)));
             }
-            ProfileOperation::RevealSecret { path } => self.reveal_profile_secret(path.as_str()),
-            ProfileOperation::Delete { path } => self.delete_profile(path.as_str()),
+            ProfileOperation::RevealSecret { path } => {
+                return self
+                    .nm
+                    .wifi_profile_secret_by_path(path.as_str())
+                    .map(ProfileOperationResult::Secret);
+            }
+            ProfileOperation::Share { path } => {
+                return self
+                    .nm
+                    .wifi_share_payload_by_path(path.as_str())
+                    .map(ProfileOperationResult::Share);
+            }
+            ProfileOperation::Update { path, settings } => {
+                self.nm
+                    .update_wifi_profile_by_path(path.as_str(), &settings)?;
+                "Saved Wi-Fi profile settings updated"
+            }
+            ProfileOperation::Delete { path } => {
+                tracing::info!(
+                    profile_path = path.as_str(),
+                    "deleting saved Wi-Fi profile by explicit path"
+                );
+                self.nm.delete_connection_by_path(path.as_str())?;
+                tracing::info!(
+                    profile_path = path.as_str(),
+                    "saved Wi-Fi profile deleted by explicit path"
+                );
+                "Saved Wi-Fi profile deleted"
+            }
             ProfileOperation::SetAutoconnect { path, enabled } => {
-                self.set_profile_autoconnect(path.as_str(), enabled)
+                self.nm
+                    .set_connection_autoconnect_by_path(path.as_str(), enabled)?;
+                "Saved Wi-Fi profile autoconnect updated"
             }
             ProfileOperation::SetCasting { path, enabled } => {
-                self.set_profile_casting(path.as_str(), enabled)
+                self.nm
+                    .set_connection_casting_by_path(path.as_str(), enabled)?;
+                "Saved Wi-Fi profile Cast discovery updated"
             }
             ProfileOperation::SetMacRandomization { path, randomized } => {
-                self.set_profile_mac_randomization(path.as_str(), randomized)
+                self.nm
+                    .set_connection_mac_randomization_by_path(path.as_str(), randomized)?;
+                "Saved Wi-Fi profile MAC privacy updated"
             }
-            ProfileOperation::Share { path } => self.share_profile(path.as_str()),
             ProfileOperation::SetSendHostname { path, enabled } => {
-                self.set_profile_send_hostname(path.as_str(), enabled)
+                self.nm
+                    .set_connection_send_hostname_by_path(path.as_str(), enabled)?;
+                "Saved Wi-Fi profile DHCP hostname privacy updated"
             }
-        }
-    }
-
-    fn profile_details(&self, path: &str) -> Result<ProfileOperationResult> {
-        Ok(ProfileOperationResult::Details(Box::new(
-            self.nm.wifi_profile_details_by_path(path)?,
-        )))
-    }
-
-    fn update_profile(
-        &self,
-        path: &str,
-        settings: &WifiProfileUpdate,
-    ) -> Result<ProfileOperationResult> {
-        self.nm.update_wifi_profile_by_path(path, settings)?;
-        Ok(profile_updated("Saved Wi-Fi profile settings updated"))
-    }
-
-    fn reveal_profile_secret(&self, path: &str) -> Result<ProfileOperationResult> {
-        Ok(ProfileOperationResult::Secret(
-            self.nm.wifi_profile_secret_by_path(path)?,
-        ))
-    }
-
-    fn delete_profile(&self, path: &str) -> Result<ProfileOperationResult> {
-        tracing::info!(
-            profile_path = path,
-            "deleting saved Wi-Fi profile by explicit path"
-        );
-        self.nm.delete_connection_by_path(path)?;
-        tracing::info!(
-            profile_path = path,
-            "saved Wi-Fi profile deleted by explicit path"
-        );
-        Ok(profile_updated("Saved Wi-Fi profile deleted"))
-    }
-
-    fn set_profile_autoconnect(&self, path: &str, enabled: bool) -> Result<ProfileOperationResult> {
-        self.nm.set_connection_autoconnect_by_path(path, enabled)?;
-        Ok(profile_updated("Saved Wi-Fi profile autoconnect updated"))
-    }
-
-    fn set_profile_casting(&self, path: &str, enabled: bool) -> Result<ProfileOperationResult> {
-        self.nm.set_connection_casting_by_path(path, enabled)?;
-        Ok(profile_updated(
-            "Saved Wi-Fi profile Cast discovery updated",
-        ))
-    }
-
-    fn set_profile_mac_randomization(
-        &self,
-        path: &str,
-        randomized: bool,
-    ) -> Result<ProfileOperationResult> {
-        self.nm
-            .set_connection_mac_randomization_by_path(path, randomized)?;
-        Ok(profile_updated("Saved Wi-Fi profile MAC privacy updated"))
-    }
-
-    fn share_profile(&self, path: &str) -> Result<ProfileOperationResult> {
-        Ok(ProfileOperationResult::Share(
-            self.nm.wifi_share_payload_by_path(path)?,
-        ))
-    }
-
-    fn set_profile_send_hostname(
-        &self,
-        path: &str,
-        enabled: bool,
-    ) -> Result<ProfileOperationResult> {
-        self.nm
-            .set_connection_send_hostname_by_path(path, enabled)?;
-        Ok(profile_updated(
-            "Saved Wi-Fi profile DHCP hostname privacy updated",
-        ))
+        };
+        Ok(ProfileOperationResult::Updated { message })
     }
 
     pub(crate) fn disconnect(&self) -> Result<DisconnectResult> {
@@ -1287,10 +1250,6 @@ fn log_unavailable_cache<T>(state: &cache::CacheRead<T>) {
         message = %state.unavailable_message("Wi-Fi scan cache").unwrap_or_default(),
         "Wi-Fi scan cache is unavailable"
     );
-}
-
-fn profile_updated(message: &'static str) -> ProfileOperationResult {
-    ProfileOperationResult::Updated { message }
 }
 
 fn resolve_connect_candidates(
