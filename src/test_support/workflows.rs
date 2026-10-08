@@ -215,12 +215,20 @@ impl Manager {
     }
     async fn add_and_activate_connection(
         &self,
-        settings: ConnectionSettings,
+        mut settings: ConnectionSettings,
         device: OwnedObjectPath,
         specific: OwnedObjectPath,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> (OwnedObjectPath, OwnedObjectPath) {
         assert_eq!(device.as_str(), DEVICE);
+        // NM completes partial visible profiles using the selected access point.
+        if specific.as_str() != "/" {
+            settings
+                .entry("802-11-wireless".into())
+                .or_default()
+                .entry("ssid".into())
+                .or_insert_with(|| crate::variant::owned_value(b"Example".to_vec()).unwrap());
+        }
         let active = {
             let mut state = self.0.lock().unwrap();
             state.settings = settings;
@@ -444,15 +452,23 @@ fn link_completion_and_status_never_wait_for_internet_probe() -> Result<()> {
         ),
         || {
             use crate::application::{Application, ConnectOutcome, ConnectRequest};
-            let fake = FakeNm::new([Outcome::Connected], false)?;
+            let fake = FakeNm::new([Outcome::Connected, Outcome::Connected], false)?;
             let request =
                 ConnectRequest::single(crate::model::example_connect_target(false), None, None);
-            let outcome = Application::new(&fake.nm).connect(&request, None, |_| Ok(()))?;
-            let ConnectOutcome::Succeeded(result) = outcome else {
-                panic!("link did not finish")
-            };
-            assert_eq!(result.connectivity.unwrap().code, 0);
-            assert!(!result.suggest_open_portal);
+            for network in ["Wi-Fi network", "saved network"] {
+                fake.state.lock().unwrap().current = None;
+                let outcome = Application::new(&fake.nm).connect(&request, None, |_| Ok(()))?;
+                let ConnectOutcome::Succeeded(result) = outcome else {
+                    panic!("link did not finish")
+                };
+                assert_eq!(
+                    result.message,
+                    format!("Connected to {network} Example via D-Bus")
+                );
+                assert_eq!(result.connectivity.unwrap().code, 0);
+                assert!(!result.suggest_open_portal);
+            }
+            assert_eq!(fake.state.lock().unwrap().deleted, 0);
             assert!(fake.nm.wifi_status()?.active);
             let payloads =
                 crate::daemon_status::refresh_payloads(&fake.nm, false, true, false, false);

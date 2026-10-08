@@ -42,13 +42,13 @@ enum ConnectionState {
     SavedProfile,
     CreateProfile,
     Rescan,
-    Verify(VerificationKind),
+    Verify(ProfileKind),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VerificationKind {
-    SavedProfile,
-    CreatedProfile,
+enum ProfileKind {
+    Saved,
+    Created,
 }
 
 impl ConnectionState {
@@ -68,21 +68,13 @@ enum StateTransition {
     Connected(ActivationOutcome),
 }
 
-#[derive(Debug, Clone, Copy)]
-enum DbusAttempt {
-    SavedProfile,
-    CreateProfile,
-    SavedProfileAfterRescan,
-    CreateProfileAfterRescan,
-}
-
-impl DbusAttempt {
-    fn failure_subject(self) -> &'static str {
-        match self {
-            Self::SavedProfile => "D-Bus saved profile activation failed",
-            Self::CreateProfile => "D-Bus add/activate failed",
-            Self::SavedProfileAfterRescan => "D-Bus saved profile activation after rescan failed",
-            Self::CreateProfileAfterRescan => "D-Bus add/activate after rescan failed",
+impl ProfileKind {
+    fn failure_subject(self, rescanned: bool) -> &'static str {
+        match (self, rescanned) {
+            (Self::Saved, false) => "D-Bus saved profile activation failed",
+            (Self::Created, false) => "D-Bus add/activate failed",
+            (Self::Saved, true) => "D-Bus saved profile activation after rescan failed",
+            (Self::Created, true) => "D-Bus add/activate after rescan failed",
         }
     }
 }
@@ -136,11 +128,7 @@ impl<'a> ConnectionMachine<'a> {
             Ok(outcome) => self.finish_success(outcome, started_at),
             Err(err) => {
                 self.cleanup_created_connection();
-                if finalize_failure {
-                    self.finish_failure(err, started_at)
-                } else {
-                    self.finish_candidate_failure(err, started_at)
-                }
+                self.finish_failure(err, started_at, finalize_failure)
             }
         }
     }
@@ -174,29 +162,23 @@ impl<'a> ConnectionMachine<'a> {
         match self.nm.active_target_matches(self.target) {
             Ok(true) if self.password.is_none() && self.target.enterprise.is_none() => {
                 tracing::info!(ssid = %self.target.ssid, "target Wi-Fi network is already active; skipping reactivation");
-                Ok(StateTransition::Connected(ActivationOutcome::new(
+                return Ok(StateTransition::Connected(ActivationOutcome::new(
                     format!("Already connected to {}", self.target.ssid),
                     ConnectEnginePath::AlreadyActive,
-                )))
+                )));
             }
             Ok(true) => {
                 tracing::info!(ssid = %self.target.ssid, "target Wi-Fi network is active but supplied credentials must update its profile");
-                Ok(StateTransition::Next(ConnectionState::SavedProfile))
             }
-            Ok(false) => Ok(StateTransition::Next(ConnectionState::SavedProfile)),
+            Ok(false) => {}
             Err(err) => {
                 tracing::debug!(ssid = %self.target.ssid, error = %crate::error::err_chain(&err), "could not check active Wi-Fi target before activation");
-                Ok(StateTransition::Next(ConnectionState::SavedProfile))
             }
         }
+        Ok(StateTransition::Next(ConnectionState::SavedProfile))
     }
 
     fn activate_saved_profile(&mut self) -> Result<StateTransition> {
-        let attempt = if self.rescanned {
-            DbusAttempt::SavedProfileAfterRescan
-        } else {
-            DbusAttempt::SavedProfile
-        };
         match self.nm.activate_saved_wifi_connection_for(
             self.target,
             self.password,
@@ -206,21 +188,16 @@ impl<'a> ConnectionMachine<'a> {
                 tracing::info!(ssid = %self.target.ssid, %active_path, "requested activation of saved Wi-Fi profile over D-Bus");
                 self.activation_path = Some(active_path);
                 Ok(StateTransition::Next(ConnectionState::Verify(
-                    VerificationKind::SavedProfile,
+                    ProfileKind::Saved,
                 )))
             }
             Ok(None) => Ok(StateTransition::Next(ConnectionState::CreateProfile)),
-            Err(err) => self.finish_dbus_failure(attempt, err),
+            Err(err) => self.finish_dbus_failure(ProfileKind::Saved, err),
         }
     }
 
     fn create_profile(&mut self) -> Result<StateTransition> {
         tracing::info!(ssid = %self.target.ssid, "no saved D-Bus profile activation target; trying add-and-activate path");
-        let attempt = if self.rescanned {
-            DbusAttempt::CreateProfileAfterRescan
-        } else {
-            DbusAttempt::CreateProfile
-        };
         match self.nm.add_and_activate_wifi_connection_for(
             self.target,
             self.password,
@@ -236,7 +213,7 @@ impl<'a> ConnectionMachine<'a> {
                 self.created_connection = Some(activation.profile_path);
                 self.activation_path = Some(activation.active_path);
                 Ok(StateTransition::Next(ConnectionState::Verify(
-                    VerificationKind::CreatedProfile,
+                    ProfileKind::Created,
                 )))
             }
             Ok(None) => {
@@ -247,7 +224,7 @@ impl<'a> ConnectionMachine<'a> {
                     Err(self.unavailable_activation_error(target_visible))
                 }
             }
-            Err(err) => self.finish_dbus_failure(attempt, err),
+            Err(err) => self.finish_dbus_failure(ProfileKind::Created, err),
         }
     }
 
@@ -285,13 +262,13 @@ impl<'a> ConnectionMachine<'a> {
 
     fn finish_dbus_failure(
         &self,
-        attempt: DbusAttempt,
+        kind: ProfileKind,
         error: anyhow::Error,
     ) -> Result<StateTransition> {
         tracing::warn!(
             ssid = %self.target.ssid,
             error = %crate::error::err_chain(&error),
-            failure = attempt.failure_subject(),
+            failure = kind.failure_subject(self.rescanned),
             "D-Bus activation path failed"
         );
         if should_return_secret_agent_error(self.password, &error) {
@@ -318,36 +295,25 @@ impl<'a> ConnectionMachine<'a> {
         )
     }
 
-    fn verify(&mut self, kind: VerificationKind) -> Result<StateTransition> {
-        let active_path = self.activation_path.as_ref();
-        let outcome = match kind {
-            VerificationKind::SavedProfile => {
-                crate::connect_wait::wait_for_active_target_path(
-                    self.nm,
-                    self.target,
-                    active_path,
-                    self.cancellation,
-                )?;
-                ActivationOutcome::new(
-                    format!("Connected to saved network {} via D-Bus", self.target.ssid),
-                    ConnectEnginePath::Dbus,
-                )
-            }
-            VerificationKind::CreatedProfile => {
-                crate::connect_wait::wait_for_active_target_path(
-                    self.nm,
-                    self.target,
-                    active_path,
-                    self.cancellation,
-                )?;
+    fn verify(&mut self, kind: ProfileKind) -> Result<StateTransition> {
+        crate::connect_wait::wait_for_active_target_path(
+            self.nm,
+            self.target,
+            self.activation_path.as_ref(),
+            self.cancellation,
+        )?;
+        let network = match kind {
+            ProfileKind::Saved => "saved network",
+            ProfileKind::Created => {
+                // Release rollback ownership only after verification succeeds.
                 self.created_connection = None;
-                ActivationOutcome::new(
-                    format!("Connected to Wi-Fi network {} via D-Bus", self.target.ssid),
-                    ConnectEnginePath::Dbus,
-                )
+                "Wi-Fi network"
             }
         };
-        Ok(StateTransition::Connected(outcome))
+        Ok(StateTransition::Connected(ActivationOutcome::new(
+            format!("Connected to {network} {} via D-Bus", self.target.ssid),
+            ConnectEnginePath::Dbus,
+        )))
     }
 
     fn cleanup_created_connection(&mut self) {
@@ -377,16 +343,15 @@ impl<'a> ConnectionMachine<'a> {
         let status_started = Instant::now();
         let active_status = cache_active_status(self.nm, self.cancellation);
         let status_elapsed_ms = status_started.elapsed().as_millis();
-        let connectivity_from_status = active_status
-            .as_ref()
-            .and_then(|status| status.connectivity.clone());
+        let status_available = active_status.is_some();
+        let connectivity_from_status = active_status.and_then(|status| status.connectivity);
         let (connectivity, connectivity_source) = match connectivity_from_status {
             Some(connectivity) => (Some(connectivity), "wifi-status"),
             None => (self.nm.connectivity_snapshot().ok(), "passive-snapshot"),
         };
         tracing::info!(
             ssid = %self.target.ssid,
-            status_available = active_status.is_some(),
+            status_available,
             status_elapsed_ms,
             connectivity_source,
             "collected post-activation Wi-Fi and connectivity status"
@@ -417,21 +382,18 @@ impl<'a> ConnectionMachine<'a> {
         Ok(result)
     }
 
-    fn finish_failure(self, error: anyhow::Error, started_at: Instant) -> Result<ConnectResult> {
-        let error = ensure_domain(ErrorOperation::Connect, error);
-        publish_failure_status(self.target, &error);
-        let result = failed_result(self.target, &error);
-        record_connect_attempt(self.target, &result, started_at);
-        Err(error)
-    }
-
-    fn finish_candidate_failure(
+    fn finish_failure(
         self,
         error: anyhow::Error,
         started_at: Instant,
+        publish_failure: bool,
     ) -> Result<ConnectResult> {
         let error = ensure_domain(ErrorOperation::Connect, error);
-        tracing::warn!(ssid = %self.target.ssid, error = %crate::error::err_chain(&error), "Wi-Fi access-point candidate failed");
+        if publish_failure {
+            publish_final_connect_failure(self.target, &error);
+        } else {
+            tracing::warn!(ssid = %self.target.ssid, error = %crate::error::err_chain(&error), "Wi-Fi access-point candidate failed");
+        }
         let result = failed_result(self.target, &error);
         record_connect_attempt(self.target, &result, started_at);
         Err(error)
@@ -467,10 +429,6 @@ pub(crate) fn connect_target(
 }
 
 pub(crate) fn publish_final_connect_failure(target: &WifiConnectTarget, error: &anyhow::Error) {
-    publish_failure_status(target, error);
-}
-
-fn publish_failure_status(target: &WifiConnectTarget, error: &anyhow::Error) {
     tracing::error!(ssid = %target.ssid, error = %crate::error::err_chain(error), "Wi-Fi connection failed");
     best_effort("failed to write Wi-Fi cache status", || {
         cache::write_status(
