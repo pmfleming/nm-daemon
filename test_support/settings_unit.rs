@@ -304,7 +304,7 @@ fn enterprise_profile_secrets_use_the_8021x_section_and_support_named_updates() 
 
     let spec = profile_secret_spec(&settings);
     assert_eq!(spec.setting_name, Some("802-1x"));
-    assert_eq!(spec.primary_secret_key.as_deref(), Some("password"));
+    assert_eq!(spec.primary_secret_key, Some("password"));
     let values = profile_secret_values(&settings, Some(&readable), &spec);
     assert_eq!(
         values.get("password").map(String::as_str),
@@ -358,8 +358,22 @@ fn wep_profile_updates_validate_and_replace_the_active_named_key() {
             ("wep-key-type".to_string(), owned_value(Value::new(1_u32))),
         ]),
     );
-    let spec = profile_secret_spec(&settings);
-    assert_eq!(spec.primary_secret_key.as_deref(), Some("wep-key2"));
+    assert_eq!(super::wep_secret_key(None), "wep-key0");
+    assert_eq!(super::wep_secret_key(Some(&HashMap::new())), "wep-key0");
+    for (index, key) in [
+        (Value::new(u32::MAX), "wep-key3"),
+        (Value::new(2_i32), "wep-key0"),
+        (Value::new("2"), "wep-key0"),
+        (Value::new(0_u32), "wep-key0"),
+        (Value::new(1_u32), "wep-key1"),
+        (Value::new(2_u32), "wep-key2"),
+    ] {
+        settings
+            .get_mut("802-11-wireless-security")
+            .unwrap()
+            .insert("wep-tx-keyidx".into(), owned_value(index));
+        assert_eq!(profile_secret_spec(&settings).primary_secret_key, Some(key));
+    }
 
     let update = WifiProfileUpdate {
         password: Some("abcde".to_string()),

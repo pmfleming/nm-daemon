@@ -7,7 +7,7 @@ use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{DEVICE_IFACE, Nm};
 use crate::model::{DhcpLeaseStatus, IpAddressEntry, IpRouteEntry, IpStatus};
-use crate::variant::value_string;
+use crate::variant::{setting, setting_string, value_string};
 
 pub(super) enum IpFamily {
     V4,
@@ -86,17 +86,12 @@ impl Nm {
 pub(super) fn dhcp_lease_from_options(
     options: &HashMap<String, OwnedValue>,
 ) -> Option<DhcpLeaseStatus> {
-    let option_string = |key: &str| {
-        options
-            .get(key)
-            .and_then(value_string)
-            .filter(|value| !value.is_empty())
-    };
+    let option_string = |key: &str| setting_string(options, key).filter(|value| !value.is_empty());
     let option_u64 = |key: &str| {
         options.get(key).and_then(|value| {
             u64::try_from(value)
                 .ok()
-                .or_else(|| value_u32(value).map(u64::from))
+                .or_else(|| u32::try_from(value).ok().map(u64::from))
                 .or_else(|| value_string(value)?.parse().ok())
         })
     };
@@ -121,8 +116,8 @@ fn address_entries(config: &Proxy<'_>) -> Vec<IpAddressEntry> {
         .iter()
         .filter_map(|entry| {
             Some(IpAddressEntry {
-                address: entry.get("address").and_then(value_string)?,
-                prefix: entry.get("prefix").and_then(value_u32)?,
+                address: setting_string(entry, "address")?,
+                prefix: setting(entry, "prefix")?,
             })
         })
         .collect()
@@ -135,10 +130,10 @@ fn route_entries(config: &Proxy<'_>) -> Vec<IpRouteEntry> {
         .iter()
         .filter_map(|entry| {
             Some(IpRouteEntry {
-                dest: entry.get("dest").and_then(value_string)?,
-                prefix: entry.get("prefix").and_then(value_u32)?,
-                next_hop: entry.get("next-hop").and_then(value_string),
-                metric: entry.get("metric").and_then(value_u32),
+                dest: setting_string(entry, "dest")?,
+                prefix: setting(entry, "prefix")?,
+                next_hop: setting_string(entry, "next-hop"),
+                metric: setting(entry, "metric"),
             })
         })
         .collect()
@@ -149,7 +144,7 @@ fn nameserver_entries(config: &Proxy<'_>) -> Option<Vec<String>> {
         .get_property::<Vec<HashMap<String, OwnedValue>>>("NameserverData")
         .ok()?
         .iter()
-        .filter_map(|entry| entry.get("address").and_then(value_string))
+        .filter_map(|entry| setting_string(entry, "address"))
         .collect::<Vec<_>>();
     (!entries.is_empty()).then_some(entries)
 }
@@ -176,10 +171,6 @@ fn string_list(config: &Proxy<'_>, name: &str) -> Vec<String> {
         .into_iter()
         .filter(|value| !value.is_empty())
         .collect()
-}
-
-fn value_u32(value: &OwnedValue) -> Option<u32> {
-    u32::try_from(value).ok()
 }
 
 fn legacy_ipv4(value: u32) -> String {

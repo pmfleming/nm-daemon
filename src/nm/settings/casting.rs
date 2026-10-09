@@ -18,13 +18,7 @@ pub(super) fn casting_enabled_from_settings(settings: &ConnectionSettings) -> bo
 }
 
 fn mdns_policy(settings: &ConnectionSettings) -> Option<i32> {
-    settings
-        .get("connection")?
-        .get("mdns")?
-        .try_clone()
-        .ok()?
-        .try_into()
-        .ok()
+    crate::variant::setting(settings.get("connection")?, "mdns")
 }
 
 pub(super) fn set_casting_enabled(settings: &mut ConnectionSettings, enabled: bool) -> Result<()> {

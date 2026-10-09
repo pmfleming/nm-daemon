@@ -30,6 +30,11 @@ where
     section.get(key)?.try_into().ok()
 }
 
+/// Read strict D-Bus text; unlike `setting_text`, byte arrays are not accepted.
+pub(crate) fn setting_string(section: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+    setting::<&str>(section, key).map(str::to_string)
+}
+
 /// Decode a whole string array, including variant-wrapped elements, without
 /// cloning the D-Bus container. A malformed element invalidates the whole list.
 pub(crate) fn setting_strings(section: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
@@ -156,10 +161,10 @@ mod tests {
             (owned_value(vec![0xff_u8])?, None),
             (owned_value(42_u32)?, None),
         ] {
-            assert_eq!(
-                super::setting_text(&HashMap::from([("value".into(), value)]), "value").as_deref(),
-                expected
-            );
+            let strict = value_string(&value);
+            let section = HashMap::from([("value".into(), value)]);
+            assert_eq!(super::setting_string(&section, "value"), strict);
+            assert_eq!(super::setting_text(&section, "value").as_deref(), expected);
         }
         for (value, expected) in [
             (owned_value(-1_i32)?, Some(-1)),

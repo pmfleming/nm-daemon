@@ -1440,7 +1440,7 @@ fn profiles_for_access_point_group(
         .iter()
         .filter_map(|access_point| profile_matches_by_ap_path.get(&access_point.path))
         .flatten()
-        .filter(|profile| seen_paths.insert(profile.path.clone()))
+        .filter(|profile| seen_paths.insert(profile.path.as_str()))
         .cloned()
         .collect()
 }

@@ -30,6 +30,7 @@ use profile_secrets::{
 const NM_SECRET_FLAG_AGENT_OWNED: u32 = 0x1;
 const NM_SECRET_FLAG_NOT_SAVED: u32 = 0x2;
 const NM_SECRET_FLAG_NOT_REQUIRED: u32 = 0x4;
+const WEP_KEYS: [&str; 4] = ["wep-key0", "wep-key1", "wep-key2", "wep-key3"];
 
 use casting::{casting_enabled_from_settings, set_casting_enabled};
 
@@ -167,7 +168,6 @@ impl Nm {
         let values = profile_secret_values(&settings, secrets.as_ref(), &spec);
         let password = spec
             .primary_secret_key
-            .as_ref()
             .and_then(|key| values.get(key))
             .cloned();
         Ok(WifiProfileSecret {
@@ -176,7 +176,7 @@ impl Nm {
             kind: spec.kind.to_string(),
             setting_name: spec.setting_name.map(str::to_string),
             secret_keys: spec.secret_keys.iter().map(ToString::to_string).collect(),
-            primary_secret_key: spec.primary_secret_key,
+            primary_secret_key: spec.primary_secret_key.map(str::to_string),
             values,
             password,
         })
@@ -714,14 +714,14 @@ fn share_payload_for_key_mgmt(
 ) -> WifiSharePayload {
     match key_mgmt {
         "wpa-psk" | "sae" => secret_payload(profile, "WPA", "psk", settings, secrets, hidden),
-        "none" | "" if has_wep_settings(settings, secrets) => {
-            let key_index = security
-                .and_then(|section| setting_u32(section.get("wep-tx-keyidx")?))
-                .unwrap_or(0)
-                .min(3);
-            let key = format!("wep-key{key_index}");
-            secret_payload(profile, "WEP", &key, settings, secrets, hidden)
-        }
+        "none" | "" if has_wep_settings(settings, secrets) => secret_payload(
+            profile,
+            "WEP",
+            wep_secret_key(security),
+            settings,
+            secrets,
+            hidden,
+        ),
         "none" | "" => WifiSharePayload::shareable(profile, "nopass", None, hidden),
         "owe" => WifiSharePayload::shareable(profile, "nopass", None, hidden),
         value if value.contains("eap") => {
@@ -860,22 +860,25 @@ fn access_point_secret_kind(ap: Option<&AccessPoint>) -> WifiSecretKind {
     }
 }
 
+fn wep_secret_key(security: Option<&HashMap<String, OwnedValue>>) -> &'static str {
+    let index = security
+        .and_then(|section| setting::<u32>(section, "wep-tx-keyidx"))
+        .unwrap_or(0)
+        .min(3);
+    WEP_KEYS[index as usize]
+}
+
 fn wep_secret_needs_agent(
     settings: &ConnectionSettings,
     secrets: Option<&ConnectionSettings>,
     security: &HashMap<String, OwnedValue>,
 ) -> bool {
-    let key_index = security
-        .get("wep-tx-keyidx")
-        .and_then(setting_u32)
-        .unwrap_or(0)
-        .min(3);
-    let key = format!("wep-key{key_index}");
+    let key = wep_secret_key(Some(security));
     required_secret_needs_agent(
         settings,
         secrets,
         "802-11-wireless-security",
-        &key,
+        key,
         &format!("{key}-flags"),
     )
 }

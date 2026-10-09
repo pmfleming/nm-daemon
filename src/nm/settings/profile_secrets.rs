@@ -5,8 +5,8 @@ use anyhow::Result;
 use crate::variant::setting_text;
 
 use super::{
-    ConnectionSettings, WifiSecretKind, has_wep_settings, owned_value, setting_string_list,
-    setting_u32, wifi_secret_kind,
+    ConnectionSettings, WEP_KEYS, WifiSecretKind, has_wep_settings, owned_value,
+    setting_string_list, setting_u32, wep_secret_key, wifi_secret_kind,
 };
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::WifiProfileUpdate;
@@ -15,7 +15,7 @@ pub(super) struct ProfileSecretSpec {
     pub(super) kind: &'static str,
     pub(super) setting_name: Option<&'static str>,
     pub(super) secret_keys: &'static [&'static str],
-    pub(super) primary_secret_key: Option<String>,
+    pub(super) primary_secret_key: Option<&'static str>,
 }
 
 pub(super) fn profile_secret_spec(settings: &ConnectionSettings) -> ProfileSecretSpec {
@@ -31,19 +31,12 @@ pub(super) fn profile_secret_spec(settings: &ConnectionSettings) -> ProfileSecre
             &["leap-password"],
             "leap-password",
         ),
-        Some(WifiSecretKind::Wep) if has_wep_settings(settings, None) => {
-            let index = security
-                .and_then(|section| section.get("wep-tx-keyidx"))
-                .and_then(setting_u32)
-                .unwrap_or(0)
-                .min(3);
-            profile_secret_spec_for(
-                "wep-key",
-                "802-11-wireless-security",
-                &["wep-key0", "wep-key1", "wep-key2", "wep-key3"],
-                format!("wep-key{index}"),
-            )
-        }
+        Some(WifiSecretKind::Wep) if has_wep_settings(settings, None) => profile_secret_spec_for(
+            "wep-key",
+            "802-11-wireless-security",
+            &WEP_KEYS,
+            wep_secret_key(security),
+        ),
         Some(WifiSecretKind::Enterprise) => enterprise_profile_secret_spec(),
         _ if settings.contains_key("802-1x") => enterprise_profile_secret_spec(),
         _ => ProfileSecretSpec {
@@ -68,13 +61,13 @@ fn profile_secret_spec_for(
     kind: &'static str,
     setting_name: &'static str,
     secret_keys: &'static [&'static str],
-    primary: impl Into<String>,
+    primary: &'static str,
 ) -> ProfileSecretSpec {
     ProfileSecretSpec {
         kind,
         setting_name: Some(setting_name),
         secret_keys,
-        primary_secret_key: Some(primary.into()),
+        primary_secret_key: Some(primary),
     }
 }
 
@@ -149,7 +142,7 @@ fn secret_replacements<'a>(
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
-    let Some((primary, password)) = spec.primary_secret_key.as_deref().zip(
+    let Some((primary, password)) = spec.primary_secret_key.zip(
         update
             .password
             .as_deref()

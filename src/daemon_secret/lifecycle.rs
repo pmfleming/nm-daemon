@@ -1,12 +1,11 @@
 //! Registration follows the NM bus owner, not an installed version string.
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
+use futures::future::{BoxFuture, Fuse, FusedFuture};
+use futures::{FutureExt, StreamExt};
 use zbus::{Connection, Proxy};
 
 use super::{AGENT_MANAGER_IFACE, AGENT_MANAGER_PATH, REGISTERED, SECRET_AGENT_ID};
@@ -18,7 +17,6 @@ mod tests;
 
 const RETRY: Duration = Duration::from_secs(2);
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
-type Registration = Pin<Box<dyn Future<Output = Result<bool>> + Send>>;
 
 struct ResetOnDrop(Arc<DaemonRuntime>);
 impl Drop for ResetOnDrop {
@@ -56,7 +54,7 @@ async fn watch(connection: &Connection, runtime: &Arc<DaemonRuntime>) -> Result<
     let mut tick = tokio::time::interval(RETRY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut owner = None;
-    let mut registration: Option<Registration> = None;
+    let mut registration = Fuse::<BoxFuture<'static, Result<bool>>>::terminated();
     let mut retry_at = tokio::time::Instant::now();
     loop {
         let completed = tokio::select! {
@@ -65,48 +63,53 @@ async fn watch(connection: &Connection, runtime: &Arc<DaemonRuntime>) -> Result<
                 None
             }
             _ = tick.tick() => None,
-            result = async { registration.as_mut().expect("guarded registration").await }, if registration.is_some() => Some(result),
+            result = &mut registration => Some(result),
         };
         // GetNameOwner never auto-starts NM. Re-read even on a signal because
         // several transitions may already be queued (including stop/start/stop).
         let current = current_owner(&bus).await?;
         if current != owner {
-            registration = None; // Drop the in-flight call; never replay it.
+            registration = Fuse::terminated(); // Drop the in-flight call; never replay it.
             super::change_network_manager_owner(runtime, current.clone());
             owner = current;
             retry_at = tokio::time::Instant::now();
         } else if let Some(result) = completed {
-            registration = None;
-            match result {
-                Ok(vpn_hints) => {
-                    super::with_pending_registry(|registry| {
-                        if registry.is_current_owner(owner.as_deref()) {
-                            REGISTERED.store(true, Ordering::Release);
-                        }
-                    });
-                    tracing::info!(vpn_hints, "registered NetworkManager SecretAgent");
-                }
-                Err(error) => tracing::warn!(%error, "SecretAgent registration failed; retrying"),
-            }
+            registration_finished(owner.as_deref(), result);
             retry_at = tokio::time::Instant::now() + RETRY;
         }
         if let Some(owner) = owner.as_ref()
-            && registration.is_none()
+            && registration.is_terminated()
             && !REGISTERED.load(Ordering::Acquire)
             && tokio::time::Instant::now() >= retry_at
         {
             let connection = connection.clone();
             let owner = owner.clone();
             let runtime = Arc::clone(runtime);
-            registration = Some(Box::pin(async move {
+            registration = async move {
                 tokio::task::spawn_blocking(move || runtime.refresh_network_manager_scope())
                     .await
                     .context("refresh NetworkManager owner scope")??;
                 tokio::time::timeout(REGISTER_TIMEOUT, register_for_owner(&connection, &owner))
                     .await
                     .context("SecretAgent registration timed out")?
-            }));
+            }
+            .boxed()
+            .fuse();
         }
+    }
+}
+
+fn registration_finished(owner: Option<&str>, result: Result<bool>) {
+    match result {
+        Ok(vpn_hints) => {
+            super::with_pending_registry(|registry| {
+                if registry.is_current_owner(owner) {
+                    REGISTERED.store(true, Ordering::Release);
+                }
+            });
+            tracing::info!(vpn_hints, "registered NetworkManager SecretAgent");
+        }
+        Err(error) => tracing::warn!(%error, "SecretAgent registration failed; retrying"),
     }
 }
 

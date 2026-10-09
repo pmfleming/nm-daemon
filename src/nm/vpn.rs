@@ -5,7 +5,6 @@
 //! profiles are VPNs, which plugin serves them, whether activation will prompt
 //! for secrets, and the plugin's own state, banner, and typed failure reason.
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
@@ -22,7 +21,7 @@ use crate::model::{
     VpnDisconnectResult, VpnProfileSummary, VpnStatus, active_connection_state_reason,
     device_state_reason, vpn_state_name, vpn_state_reason,
 };
-use crate::variant::value_string;
+use crate::variant::{setting, setting_string, value_string_map};
 
 const VPN_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.VPN.Connection";
 const NM_VPN_STATE_ACTIVATED: u32 = 5;
@@ -32,7 +31,7 @@ const NM_ACTIVE_STATE_DEACTIVATING: u32 = 3;
 const ACTIVATION_POLL: Duration = Duration::from_millis(200);
 
 /// Selects one saved VPN or WireGuard profile.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct VpnSelector {
     pub(crate) uuid: Option<String>,
     pub(crate) path: Option<String>,
@@ -221,13 +220,11 @@ impl Nm {
         let service_type = settings
             .as_ref()
             .and_then(|settings| settings.get("vpn"))
-            .and_then(|vpn| vpn.get("service-type"))
-            .and_then(value_string);
+            .and_then(|vpn| setting_string(vpn, "service-type"));
         let activated_at_ms = settings
             .as_ref()
             .and_then(|settings| settings.get("connection"))
-            .and_then(|connection| connection.get("timestamp"))
-            .and_then(|value| u64::try_from(value).ok())
+            .and_then(|connection| setting::<u64>(connection, "timestamp"))
             .map(|seconds| seconds.saturating_mul(1000));
         let (vpn_state, banner) = self.vpn_plugin_state(&active.path);
         let plugin = plugin_name(&active.connection_type, service_type.as_deref());
@@ -299,8 +296,7 @@ impl Nm {
         let settings = self.connection_settings(&path)?;
         let service_type = settings
             .get("vpn")
-            .and_then(|vpn| vpn.get("service-type"))
-            .and_then(value_string);
+            .and_then(|vpn| setting_string(vpn, "service-type"));
         let secret_names = vpn_secret_names(&settings);
         let state = profile
             .active_connection
@@ -410,13 +406,10 @@ fn vpn_secret_names(settings: &super::ConnectionSettings) -> Vec<String> {
     };
     let mut names = vpn
         .get("secrets")
-        .and_then(|value| HashMap::<String, String>::try_from(value.clone()).ok())
-        .map(|secrets| secrets.into_keys().collect::<Vec<_>>())
+        .and_then(value_string_map)
+        .map(|secrets| secrets.into_keys().map(str::to_string).collect::<Vec<_>>())
         .unwrap_or_default();
-    if let Some(data) = vpn
-        .get("data")
-        .and_then(|value| HashMap::<String, String>::try_from(value.clone()).ok())
-    {
+    if let Some(data) = vpn.get("data").and_then(value_string_map) {
         names.extend(
             data.keys()
                 .filter_map(|key| key.strip_suffix("-flags"))
@@ -457,7 +450,7 @@ fn profile_requires_secrets(settings: &super::ConnectionSettings) -> bool {
         || settings
             .get("vpn")
             .and_then(|vpn| vpn.get("data"))
-            .and_then(|value| HashMap::<String, String>::try_from(value.clone()).ok())
+            .and_then(value_string_map)
             .is_some_and(|data| {
                 data.iter().any(|(key, value)| {
                     key.ends_with("-flags")

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use zvariant::{OwnedObjectPath, OwnedValue};
+use zvariant::OwnedObjectPath;
 
 use super::{ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, Nm};
 use crate::error::{DomainError, ErrorOperation};
@@ -10,10 +10,10 @@ use crate::model::{
     NetworkDeviceSummary, NetworkInventory, NetworkStateSummary, ProfileActivationResult,
     device_state_reason,
 };
-use crate::variant::{setting, setting_strings, value_string};
+use crate::variant::{setting, setting_string, setting_strings};
 
 /// Selects one saved profile by UUID or settings path, plus an optional device.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct ProfileSelector {
     pub(crate) uuid: Option<String>,
     pub(crate) path: Option<String>,
@@ -21,7 +21,7 @@ pub(crate) struct ProfileSelector {
 }
 
 /// Selects one active connection by active-connection path or profile UUID.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct ActiveConnectionSelector {
     pub(crate) path: Option<String>,
     pub(crate) uuid: Option<String>,
@@ -127,8 +127,8 @@ impl Nm {
         let devices = self.network_devices()?;
         let active_connections = self.network_active_connections()?;
         let connections = self.network_connections_with(&devices, &active_connections)?;
-        let profile = select_profile(&connections, selector)?;
-        let device = activation_device(profile, &devices, selector)?;
+        let profile = select_profile(connections, selector)?;
+        let device = activation_device(&profile, &devices, selector)?;
         let profile_path = object_path(&profile.path)?;
         super::profile_policy::validate_private_ca_paths(
             &self.connection_settings(&profile_path)?,
@@ -158,19 +158,18 @@ impl Nm {
             } else {
                 "activating"
             },
-            profile_path: profile.path.clone(),
-            id: profile.id.clone(),
-            uuid: profile.uuid.clone(),
-            connection_type: profile.connection_type.clone(),
+            message: format!("Activating saved profile {}", profile.id),
+            profile_path: profile.path,
+            id: profile.id,
+            uuid: profile.uuid,
+            connection_type: profile.connection_type,
             type_name: profile.type_name,
             active_connection: Some(active_path.to_string()),
             device: active
-                .as_ref()
-                .and_then(|active| active.devices.first().cloned())
+                .and_then(|active| active.devices.into_iter().next())
                 .or(device),
             state,
             state_name: active_connection_state_name(state),
-            message: format!("Activating saved profile {}", profile.id),
         })
     }
 
@@ -179,7 +178,7 @@ impl Nm {
         selector: &ActiveConnectionSelector,
     ) -> Result<NetworkDeactivateResult> {
         let active_connections = self.network_active_connections()?;
-        let active = select_active_connection(&active_connections, selector)?;
+        let active = select_active_connection(active_connections, selector)?;
         let path = object_path(&active.path)?;
         tracing::info!(active = %active.path, id = %active.id, "deactivating NetworkManager connection");
         self.root_proxy()
@@ -187,11 +186,11 @@ impl Nm {
             .with_context(|| format!("DeactivateConnection for {}", active.id))?;
         Ok(NetworkDeactivateResult {
             status: "deactivated",
-            path: active.path.clone(),
-            id: active.id.clone(),
-            uuid: active.uuid.clone(),
-            connection_type: active.connection_type.clone(),
             message: format!("Deactivated {}", active.id),
+            path: active.path,
+            id: active.id,
+            uuid: active.uuid,
+            connection_type: active.connection_type,
         })
     }
 
@@ -297,7 +296,7 @@ impl Nm {
     fn network_connection_summary(
         &self,
         path: &OwnedObjectPath,
-        available_by_profile: &HashMap<String, Vec<String>>,
+        available_by_profile: &HashMap<&str, Vec<&str>>,
         active_by_profile: &HashMap<&str, &str>,
     ) -> Result<Option<NetworkConnectionSummary>> {
         let Some(settings) = self.connection_settings_if_present(path)? else {
@@ -316,8 +315,8 @@ impl Nm {
             path: path.to_string(),
             id,
             uuid,
-            connection_type: connection_type.clone(),
             type_name: connection_type_name(&connection_type),
+            connection_type,
             autoconnect: setting(connection, "autoconnect").unwrap_or(true),
             autoconnect_priority: setting(connection, "autoconnect-priority").unwrap_or(0),
             timestamp_ms: setting::<u64>(connection, "timestamp")
@@ -326,8 +325,10 @@ impl Nm {
             permissions: setting_strings(connection, "permissions"),
             available_devices: available_by_profile
                 .get(path.as_str())
-                .cloned()
-                .unwrap_or_default(),
+                .into_iter()
+                .flatten()
+                .map(|path| (*path).to_string())
+                .collect(),
             active_connection: active_by_profile
                 .get(path.as_str())
                 .map(|value| (*value).to_string()),
@@ -335,13 +336,17 @@ impl Nm {
     }
 }
 
-fn select_profile<'a>(
-    connections: &'a [NetworkConnectionSummary],
+fn select_profile(
+    connections: Vec<NetworkConnectionSummary>,
     selector: &ProfileSelector,
-) -> Result<&'a NetworkConnectionSummary> {
+) -> Result<NetworkConnectionSummary> {
     let matched = match (&selector.uuid, &selector.path) {
-        (Some(uuid), _) => connections.iter().find(|profile| &profile.uuid == uuid),
-        (None, Some(path)) => connections.iter().find(|profile| &profile.path == path),
+        (Some(uuid), _) => connections
+            .into_iter()
+            .find(|profile| &profile.uuid == uuid),
+        (None, Some(path)) => connections
+            .into_iter()
+            .find(|profile| &profile.path == path),
         (None, None) => {
             return Err(DomainError::validation(
                 ErrorOperation::Connect,
@@ -355,8 +360,8 @@ fn select_profile<'a>(
             ErrorOperation::Connect,
             "no saved profile matched the request",
         )
-        .with_detail("uuid", selector.uuid.clone().unwrap_or_default())
-        .with_detail("path", selector.path.clone().unwrap_or_default())
+        .with_detail("uuid", selector.uuid.as_deref().unwrap_or_default())
+        .with_detail("path", selector.path.as_deref().unwrap_or_default())
         .into()
     })
 }
@@ -380,16 +385,16 @@ fn activation_device(
         })
 }
 
-fn select_active_connection<'a>(
-    active_connections: &'a [ActiveConnectionSummary],
+fn select_active_connection(
+    active_connections: Vec<ActiveConnectionSummary>,
     selector: &ActiveConnectionSelector,
-) -> Result<&'a ActiveConnectionSummary> {
+) -> Result<ActiveConnectionSummary> {
     let matched = match (&selector.path, &selector.uuid) {
         (Some(path), _) => active_connections
-            .iter()
+            .into_iter()
             .find(|active| &active.path == path),
         (None, Some(uuid)) => active_connections
-            .iter()
+            .into_iter()
             .find(|active| &active.uuid == uuid),
         (None, None) => {
             return Err(DomainError::validation(
@@ -404,8 +409,8 @@ fn select_active_connection<'a>(
             ErrorOperation::Disconnect,
             "no active connection matched the request",
         )
-        .with_detail("path", selector.path.clone().unwrap_or_default())
-        .with_detail("uuid", selector.uuid.clone().unwrap_or_default())
+        .with_detail("path", selector.path.as_deref().unwrap_or_default())
+        .with_detail("uuid", selector.uuid.as_deref().unwrap_or_default())
         .into()
     })
 }
@@ -415,14 +420,14 @@ fn object_path(value: &str) -> Result<OwnedObjectPath> {
         .with_context(|| format!("parse NetworkManager object path {value}"))
 }
 
-fn available_devices_by_profile(devices: &[NetworkDeviceSummary]) -> HashMap<String, Vec<String>> {
-    let mut result = HashMap::<String, Vec<String>>::new();
+fn available_devices_by_profile(devices: &[NetworkDeviceSummary]) -> HashMap<&str, Vec<&str>> {
+    let mut result = HashMap::<&str, Vec<&str>>::new();
     for device in devices {
         for profile in &device.available_connections {
             result
-                .entry(profile.clone())
+                .entry(profile.as_str())
                 .or_default()
-                .push(device.path.clone());
+                .push(device.path.as_str());
         }
     }
     result
@@ -444,10 +449,6 @@ fn object_path_list_property(proxy: &zbus::blocking::Proxy<'_>, name: &str) -> V
         .filter(|path| path.as_str() != "/")
         .map(|path| path.to_string())
         .collect()
-}
-
-fn setting_string(settings: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
-    settings.get(key).and_then(value_string)
 }
 
 fn nonempty(value: Option<String>) -> Option<String> {
@@ -602,17 +603,32 @@ mod tests {
     }
     #[test]
     fn profile_selection_reports_typed_validation_and_not_found_errors() {
-        let connections = vec![profile("/settings/1", "uuid-1")];
-        let empty = select_profile(&connections, &ProfileSelector::default()).unwrap_err();
+        let connections = || vec![profile("/settings/1", "uuid-1")];
+        for (uuid, path) in [
+            (Some("uuid-1"), Some("absent")),
+            (None, Some("/settings/1")),
+        ] {
+            let selector = ProfileSelector {
+                uuid: uuid.map(str::to_string),
+                path: path.map(str::to_string),
+                device: None,
+            };
+            assert_eq!(
+                select_profile(connections(), &selector).unwrap().uuid,
+                "uuid-1"
+            );
+        }
+        let empty = select_profile(connections(), &ProfileSelector::default()).unwrap_err();
         assert_eq!(
             ErrorReport::from_error(&empty, ErrorOperation::Unknown).code,
             ErrorCode::ValidationError
         );
 
         let missing = select_profile(
-            &connections,
+            connections(),
             &ProfileSelector {
                 uuid: Some("absent".to_string()),
+                path: Some("/settings/1".to_string()),
                 ..ProfileSelector::default()
             },
         )
@@ -625,13 +641,13 @@ mod tests {
 
     #[test]
     fn active_connection_selection_matches_path_or_uuid() {
-        let actives = vec![active("/active/1", "uuid-1")];
+        let actives = || vec![active("/active/1", "uuid-1")];
         let by_path = ActiveConnectionSelector {
             path: Some("/active/1".to_string()),
-            uuid: None,
+            uuid: Some("absent".to_string()),
         };
         assert_eq!(
-            select_active_connection(&actives, &by_path).unwrap().uuid,
+            select_active_connection(actives(), &by_path).unwrap().uuid,
             "uuid-1"
         );
 
@@ -640,15 +656,15 @@ mod tests {
             uuid: Some("uuid-1".to_string()),
         };
         assert_eq!(
-            select_active_connection(&actives, &by_uuid).unwrap().path,
+            select_active_connection(actives(), &by_uuid).unwrap().path,
             "/active/1"
         );
 
         let missing = ActiveConnectionSelector {
-            path: None,
-            uuid: Some("absent".to_string()),
+            path: Some("/active/missing".to_string()),
+            uuid: Some("uuid-1".to_string()),
         };
-        let error = select_active_connection(&actives, &missing).unwrap_err();
+        let error = select_active_connection(actives(), &missing).unwrap_err();
         assert_eq!(
             ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
             ErrorCode::NotFound

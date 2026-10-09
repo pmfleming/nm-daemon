@@ -1,3 +1,6 @@
 /target
 /result
 /.direnv
+
+# Local review notes are not rebuild inputs.
+/docs/quality-post-upgrade-2026-10-07.md
