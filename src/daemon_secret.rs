@@ -20,7 +20,7 @@ use crate::generated::SECRET_TIMEOUT;
 use crate::nm::{ConnectionSettings, NM_DEST};
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
-use crate::variant::value_string;
+use crate::variant::{value_string, value_string_map};
 
 // AgentManager.Register accepts an identifier, not an object path. NM always
 // calls agents at this standardized path, even when registration succeeded.
@@ -108,6 +108,9 @@ fn change_network_manager_owner(runtime: &Arc<DaemonRuntime>, owner: Option<Stri
     let cancelled = with_pending_registry(|registry| {
         REGISTERED.store(false, Ordering::Release);
         registry.nm_owner = owner.clone();
+        for (_, cancelled) in registry.inflight.drain() {
+            cancelled.store(true, Ordering::Release);
+        }
         registry
             .requests
             .drain()
@@ -122,8 +125,13 @@ fn change_network_manager_owner(runtime: &Arc<DaemonRuntime>, owner: Option<Stri
     }
 }
 
-fn ensure_request_owner(request: &PendingSecretRequest) -> zbus::fdo::Result<()> {
-    ensure_secret_owner(request.nm_owner.as_deref())
+fn ensure_request_owner(request: &PendingSecretRequest) -> SecretResult<()> {
+    if request.cancelled.load(Ordering::Acquire) {
+        return Err(SecretAgentError::UserCanceled(
+            "NetworkManager cancelled the secret request".into(),
+        ));
+    }
+    ensure_secret_owner(request.nm_owner.as_deref()).map_err(Into::into)
 }
 
 fn ensure_secret_owner(owner: Option<&str>) -> zbus::fdo::Result<()> {
@@ -152,7 +160,10 @@ impl SecretAgentInterface {
         let mut request = PendingSecretRequest::new(connection_path, setting_name, hints, flags);
         request.nm_owner = Some(self.authorize(&header).await?);
         let runtime = self.runtime.clone();
+        // Register before scheduling/performing keyring I/O, not only when a prompt is needed.
+        let inflight = InflightRegistration::new(&request, &runtime)?;
         secret_worker(move || {
+            let _inflight = inflight;
             resolve_secret_request(
                 request,
                 connection,
@@ -172,7 +183,7 @@ impl SecretAgentInterface {
         self.authorize(&header).await?;
         tracing::info!(%connection_path, setting_name, "NetworkManager cancelled SecretAgent request");
         let key = PendingSecretRequest::key_for(connection_path.as_str(), setting_name);
-        if let Some((request_id, sender)) = remove_pending_by_key(&key) {
+        if let Some((request_id, sender)) = cancel_pending_by_key(&key) {
             let _ = sender.send(SecretResponse::cancelled());
             emit_secret_cancelled(&self.runtime, &request_id);
         }
@@ -226,8 +237,9 @@ fn resolve_secret_request(
 ) -> SecretResult<ConnectionSettings> {
     ensure_request_owner(&request)?;
     // A fresh request must not reuse a password NetworkManager already rejected.
-    if request.flags & REQUEST_NEW == 0 && stored(&request, &mut connection)? {
-        ensure_request_owner(&request)?;
+    let complete = request.flags & REQUEST_NEW == 0 && stored(&request, &mut connection)?;
+    ensure_request_owner(&request)?;
+    if complete {
         return Ok(connection);
     }
     // Fail before registering a pending request or emitting a frontend event.
@@ -243,16 +255,47 @@ fn apply_stored_secret(
     request: &PendingSecretRequest,
     connection: &mut ConnectionSettings,
 ) -> zbus::fdo::Result<bool> {
-    let Some(stored) = lookup_stored_secret(request, connection) else {
-        return Ok(false);
+    let stored = lookup_stored_secrets(request, connection);
+    apply_stored_values(request, connection, stored)
+}
+
+fn apply_stored_values(
+    request: &PendingSecretRequest,
+    connection: &mut ConnectionSettings,
+    stored: Vec<crate::keyring::KeyringSecret>,
+) -> zbus::fdo::Result<bool> {
+    for secret in stored {
+        apply_password(
+            connection,
+            &request.setting_name,
+            &secret.key,
+            secret.password,
+        )?;
+    }
+    Ok(request_values_complete(request, connection))
+}
+
+fn request_values_complete(
+    request: &PendingSecretRequest,
+    connection: &ConnectionSettings,
+) -> bool {
+    let Some(section) = connection.get(&request.setting_name) else {
+        return false;
     };
-    apply_password(
-        connection,
-        &request.setting_name,
-        &stored.key,
-        stored.password,
-    )?;
-    Ok(true)
+    if request.setting_name == "vpn" {
+        let secrets = section
+            .get("secrets")
+            .and_then(value_string_map)
+            .unwrap_or_default();
+        return request.secret_keys.iter().all(|key| {
+            secrets
+                .get(key.as_str())
+                .is_some_and(|value| !value.is_empty())
+        });
+    }
+    request.secret_keys.iter().all(|key| {
+        crate::variant::setting::<&str>(section, key).is_some_and(|value| !value.is_empty())
+    })
 }
 
 fn wait_for_secret_response(
@@ -273,7 +316,18 @@ fn wait_for_secret_response(
     if let Some(displaced_request_id) = displaced_request_id {
         emit_secret_cancelled(runtime, &displaced_request_id);
     }
-    emit_secret_requested(runtime, &request);
+    // Publication and NM cancellation share the registry lock: a cancelled lookup
+    // cannot publish a prompt, nor can "requested" be queued after "cancelled".
+    with_pending_registry(|registry| {
+        if !registry.requests.contains_key(&request.id) || request.cancelled.load(Ordering::Acquire)
+        {
+            return Err(SecretAgentError::UserCanceled(
+                "secret request cancelled before prompting".into(),
+            ));
+        }
+        emit_secret_requested(runtime, &request);
+        Ok(())
+    })?;
 
     let response = registration.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
         // A timeout is not an explicit user cancellation: allow NM to try another agent.
@@ -369,12 +423,17 @@ pub(crate) fn provide(owner: Option<&str>, params: SecretProvideParams) -> Resul
 fn register_pending(
     request: &PendingSecretRequest,
     owners: Vec<String>,
-) -> zbus::fdo::Result<(PendingRegistration, Option<String>)> {
+) -> SecretResult<(PendingRegistration, Option<String>)> {
     let (tx, rx) = mpsc::channel();
     let displaced = with_pending_registry(|registry| {
         if !registry.is_current_owner(request.nm_owner.as_deref()) {
-            return Err(zbus::fdo::Error::Failed(
+            return Err(SecretAgentError::Failed(
                 "NetworkManager changed before secret registration".into(),
+            ));
+        }
+        if request.cancelled.load(Ordering::Acquire) {
+            return Err(SecretAgentError::UserCanceled(
+                "secret request cancelled during lookup".into(),
             ));
         }
         Ok(registry.insert(request.id.clone(), request.key.clone(), owners, tx))
@@ -404,8 +463,52 @@ fn remove_pending_for_owner(
     with_pending_registry(|registry| registry.remove_for_owner(request_id, owner))
 }
 
-fn remove_pending_by_key(key: &str) -> Option<(String, Sender<SecretResponse>)> {
-    with_pending_registry(|registry| registry.remove_by_key(key))
+fn cancel_pending_by_key(key: &str) -> Option<(String, Sender<SecretResponse>)> {
+    with_pending_registry(|registry| registry.cancel_by_key(key))
+}
+
+/// Kept alive through lookup, frontend response, and completion. A late guard
+/// must not remove a replacement request for the same connection/setting.
+struct InflightRegistration {
+    key: String,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl InflightRegistration {
+    fn new(request: &PendingSecretRequest, runtime: &Weak<DaemonRuntime>) -> SecretResult<Self> {
+        with_pending_registry(|registry| {
+            if !registry.is_current_owner(request.nm_owner.as_deref()) {
+                return Err(SecretAgentError::Failed(
+                    "NetworkManager changed before lookup".into(),
+                ));
+            }
+            if let Some((id, sender)) = registry.cancel_by_key(&request.key) {
+                let _ = sender.send(SecretResponse::cancelled());
+                emit_secret_cancelled(runtime, &id);
+            }
+            registry
+                .inflight
+                .insert(request.key.clone(), Arc::clone(&request.cancelled));
+            Ok(Self {
+                key: request.key.clone(),
+                cancelled: Arc::clone(&request.cancelled),
+            })
+        })
+    }
+}
+
+impl Drop for InflightRegistration {
+    fn drop(&mut self) {
+        with_pending_registry(|registry| {
+            if registry
+                .inflight
+                .get(&self.key)
+                .is_some_and(|flag| Arc::ptr_eq(flag, &self.cancelled))
+            {
+                registry.inflight.remove(&self.key);
+            }
+        });
+    }
 }
 
 fn pending() -> &'static Mutex<PendingRegistry> {
@@ -505,12 +608,12 @@ fn emit_secret_event(
     runtime.emit_external(Stream::WifiSecret, request_id.to_string(), event, data);
 }
 
-fn lookup_stored_secret(
+fn lookup_stored_secrets(
     request: &PendingSecretRequest,
     connection: &ConnectionSettings,
-) -> Option<crate::keyring::KeyringSecret> {
+) -> Vec<crate::keyring::KeyringSecret> {
     let result = crate::keyring::Keyring::new().and_then(|keyring| {
-        keyring.lookup_secret(
+        keyring.lookup_secrets(
             &request.connection_path,
             connection,
             &request.setting_name,
@@ -520,14 +623,16 @@ fn lookup_stored_secret(
     match result {
         Ok(crate::keyring::KeyringOutcome::Completed(secret)) => secret,
         Ok(crate::keyring::KeyringOutcome::PromptUnsupported {
-            operation, prompt, ..
+            operation,
+            prompt,
+            completed,
         }) => {
             tracing::info!(request_id = %request.id, %operation, %prompt, "keyring lookup requires an unsupported desktop prompt");
-            None
+            completed
         }
         Err(err) => {
             tracing::debug!(request_id = %request.id, error = %crate::error::err_chain(&err), "keyring lookup failed");
-            None
+            Vec::new()
         }
     }
 }
@@ -546,6 +651,11 @@ fn apply_secret_response(
         ));
     }
     apply_response_values(connection, request, &values)?;
+    if !request_values_complete(request, connection) {
+        return Err(SecretAgentError::NoSecrets(
+            "not all requested secrets were supplied".into(),
+        ));
+    }
     Ok(response
         .save
         .then(|| persistence_outcome(request, connection, &values)))
@@ -625,10 +735,10 @@ fn apply_vpn_secret(
     let vpn = connection.entry("vpn".to_string()).or_default();
     let mut secrets = vpn
         .get("secrets")
-        .and_then(|value| HashMap::<String, String>::try_from(value.clone()).ok())
+        .and_then(value_string_map)
         .unwrap_or_default();
-    secrets.insert(key.to_string(), password);
-    let secrets = crate::variant::owned_value(secrets)
+    secrets.insert(key, &password);
+    let secrets = OwnedValue::try_from(zvariant::Value::new(secrets))
         .map_err(|err| zbus::fdo::Error::Failed(format!("create VPN secret map: {err:#}")))?;
     vpn.insert("secrets".to_string(), secrets);
     Ok(())
@@ -793,6 +903,7 @@ fn owned_value(value: String) -> zbus::fdo::Result<OwnedValue> {
 }
 
 struct PendingSecretRequest {
+    cancelled: Arc<AtomicBool>,
     nm_owner: Option<String>,
     id: String,
     key: String,
@@ -813,6 +924,7 @@ impl PendingSecretRequest {
         let connection_path = connection_path.to_string();
         let secret_keys = secret_keys_for(setting_name, &hints);
         Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
             nm_owner: None,
             id: crate::daemon_runtime::next_request_id("secret"),
             key: Self::key_for(&connection_path, setting_name),
@@ -942,6 +1054,7 @@ struct PendingEntry {
 
 #[derive(Default)]
 struct PendingRegistry {
+    inflight: HashMap<String, Arc<AtomicBool>>,
     nm_owner: Option<String>,
     requests: HashMap<String, PendingEntry>,
 }
@@ -992,6 +1105,13 @@ impl PendingRegistry {
             .get(request_id)
             .is_some_and(|entry| owner.is_some_and(|owner| entry.owners.contains(owner)));
         authorized.then(|| self.remove(request_id)).flatten()
+    }
+
+    fn cancel_by_key(&mut self, key: &str) -> Option<(String, Sender<SecretResponse>)> {
+        if let Some(cancelled) = self.inflight.get(key) {
+            cancelled.store(true, Ordering::Release);
+        }
+        self.remove_by_key(key)
     }
 
     fn remove_by_key(&mut self, key: &str) -> Option<(String, Sender<SecretResponse>)> {
@@ -1079,6 +1199,124 @@ mod tests {
                 } else {
                     assert!(matches!(result, Err(super::SecretAgentError::NoSecrets(_))));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn nm_cancellation_during_lookup_prevents_prompt_and_stored_reply() {
+        for complete in [false, true] {
+            let mut request = pending_request("early-cancel", "early-cancel-key");
+            request.flags = super::ALLOW_INTERACTION;
+            let key = request.key.clone();
+            let guard =
+                super::InflightRegistration::new(&request, &std::sync::Weak::new()).unwrap();
+            let (entered, started) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let _guard = guard;
+                super::resolve_secret_request(
+                    request,
+                    ConnectionSettings::new(),
+                    |_, _| {
+                        entered.send(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+                        Ok(complete)
+                    },
+                    |_, _| panic!("cancelled lookup published a frontend prompt"),
+                )
+            });
+            started.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(
+                super::cancel_pending_by_key(&key).is_none(),
+                "no frontend prompt exists yet"
+            );
+            release.send(()).unwrap();
+            assert!(matches!(
+                worker.join().unwrap(),
+                Err(super::SecretAgentError::UserCanceled(_))
+            ));
+            super::with_pending_registry(|registry| {
+                assert!(!registry.inflight.contains_key(&key));
+                assert!(!registry.requests.contains_key("early-cancel"));
+            });
+        }
+    }
+
+    #[test]
+    fn cancelled_lookup_cannot_register_and_old_guard_cannot_remove_replacement() {
+        let old = pending_request("old-lookup", "replaced-lookup-key");
+        let current = pending_request("new-lookup", "replaced-lookup-key");
+        let runtime = std::sync::Weak::new();
+        let old_guard = super::InflightRegistration::new(&old, &runtime).unwrap();
+        let current_guard = super::InflightRegistration::new(&current, &runtime).unwrap();
+        assert!(matches!(
+            register_pending(&old, vec![":1.1".into()]),
+            Err(super::SecretAgentError::UserCanceled(_))
+        ));
+        drop(old_guard);
+        super::cancel_pending_by_key(&current.key);
+        assert!(current.cancelled.load(std::sync::atomic::Ordering::Acquire));
+        assert!(matches!(
+            register_pending(&current, vec![":1.1".into()]),
+            Err(super::SecretAgentError::UserCanceled(_))
+        ));
+        drop(current_guard);
+    }
+
+    #[test]
+    fn stored_secrets_must_cover_all_hints_before_suppressing_prompt() {
+        for setting in ["802-1x", "vpn"] {
+            for complete in [false, true] {
+                let mut request = pending_request("multi-key", "multi-key-key");
+                request.setting_name = setting.into();
+                request.secret_keys = vec!["password".into(), "pin".into()];
+                request.flags = super::ALLOW_INTERACTION;
+                let mut prompted = false;
+                let connection = super::resolve_secret_request(
+                    request,
+                    ConnectionSettings::new(),
+                    |request, connection| {
+                        let mut stored = vec![crate::keyring::KeyringSecret {
+                            key: "password".into(),
+                            password: "stored-password".into(),
+                        }];
+                        if complete {
+                            stored.push(crate::keyring::KeyringSecret {
+                                key: "pin".into(),
+                                password: "1234".into(),
+                            });
+                        }
+                        super::apply_stored_values(request, connection, stored)
+                    },
+                    |request, mut connection| {
+                        prompted = true;
+                        // Supplying only the missing key preserves the stored password.
+                        apply_secret_response(
+                            &mut connection,
+                            &request,
+                            SecretResponse {
+                                password: None,
+                                values: HashMap::from([("pin".into(), "1234".into())]),
+                                save: false,
+                                cancelled: false,
+                            },
+                        )?;
+                        Ok(connection)
+                    },
+                )
+                .unwrap();
+                assert_eq!(prompted, !complete);
+                let values = if setting == "vpn" {
+                    super::value_string_map(&connection[setting]["secrets"]).unwrap()
+                } else {
+                    connection[setting]
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), <&str>::try_from(value).unwrap()))
+                        .collect()
+                };
+                assert_eq!(values["password"], "stored-password");
+                assert_eq!(values["pin"], "1234");
             }
         }
     }
@@ -1174,6 +1412,7 @@ mod tests {
     #[test]
     fn secret_response_applies_only_requested_named_values() {
         let request = PendingSecretRequest {
+            cancelled: Default::default(),
             nm_owner: None,
             id: "named-values".to_string(),
             key: "named-values-key".to_string(),
@@ -1208,6 +1447,7 @@ mod tests {
 
     fn pending_request(id: &str, key: &str) -> PendingSecretRequest {
         PendingSecretRequest {
+            cancelled: Default::default(),
             nm_owner: None,
             id: id.to_string(),
             key: key.to_string(),

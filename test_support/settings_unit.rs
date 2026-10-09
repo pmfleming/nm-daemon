@@ -1,7 +1,6 @@
 use super::{
     ConnectionSettings, profile_ip_settings, profile_secret_spec, profile_secret_values,
-    setting_string, update_profile_secrets, validate_profile_update,
-    wifi_settings_need_secret_agent,
+    setting_text, update_profile_secrets, validate_profile_update, wifi_settings_need_secret_agent,
 };
 use crate::model::{TargetIpAddress, TargetIpSettings, WifiProfileUpdate};
 use crate::nm::ip_settings::replace as replace_ip_settings;
@@ -329,11 +328,11 @@ fn enterprise_profile_secrets_use_the_8021x_section_and_support_named_updates() 
     update_profile_secrets(&mut settings, &update).expect("update enterprise secrets");
     let enterprise = settings.get("802-1x").expect("802.1X section");
     assert_eq!(
-        setting_string(enterprise, "password").as_deref(),
+        setting_text(enterprise, "password").as_deref(),
         Some("new-password")
     );
     assert_eq!(
-        setting_string(enterprise, "private-key-password").as_deref(),
+        setting_text(enterprise, "private-key-password").as_deref(),
         Some("private-secret")
     );
     assert_eq!(
@@ -370,7 +369,7 @@ fn wep_profile_updates_validate_and_replace_the_active_named_key() {
     assert_eq!(
         settings
             .get("802-11-wireless-security")
-            .and_then(|section| setting_string(section, "wep-key2"))
+            .and_then(|section| setting_text(section, "wep-key2"))
             .as_deref(),
         Some("abcde")
     );

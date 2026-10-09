@@ -507,6 +507,18 @@ impl DaemonRuntime {
         self.call_on_lane(&self.fast_work, operation, task)
     }
 
+    /// Bounded long-running work must not occupy the single fast mutation worker.
+    pub(crate) fn call_work<T>(
+        &self,
+        operation: ErrorOperation,
+        task: impl FnOnce(&Nm) -> Result<T> + Send + 'static,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+    {
+        self.call_on_lane(&self.work, operation, task)
+    }
+
     pub(crate) fn call_read<T>(
         &self,
         operation: ErrorOperation,
@@ -983,6 +995,45 @@ mod tests {
 
     use super::{TERMINAL_RESULT_TTL, TerminalRequestResult, terminal_request_status};
     use crate::protocol::Stream;
+
+    #[test]
+    fn long_work_does_not_block_fast_mutations() -> anyhow::Result<()> {
+        crate::test_support::workflows::isolated(
+            concat!(module_path!(), "::long_work_does_not_block_fast_mutations"),
+            || {
+                use crate::error::ErrorOperation;
+                use std::sync::{Arc, mpsc};
+                use std::time::Duration;
+                let fake = crate::test_support::workflows::FakeNm::new([], false)?;
+                let runtime =
+                    super::DaemonRuntime::start(fake.nm, tokio::runtime::Handle::current())?;
+                let (entered, started) = mpsc::channel();
+                let (release, wait) = mpsc::channel();
+                let slow_runtime = Arc::clone(&runtime);
+                let slow = std::thread::spawn(move || {
+                    slow_runtime.call_work(ErrorOperation::ProfileOperation, move |_| {
+                        entered.send(())?;
+                        wait.recv_timeout(Duration::from_secs(5))?;
+                        Ok(())
+                    })
+                });
+                started.recv_timeout(Duration::from_secs(2))?;
+                let (done, finished) = mpsc::channel();
+                let fast_runtime = Arc::clone(&runtime);
+                let fast = std::thread::spawn(move || {
+                    done.send(fast_runtime.call(ErrorOperation::ProfileOperation, |_| Ok(())))
+                        .unwrap();
+                });
+                let result = finished.recv_timeout(Duration::from_secs(2));
+                release.send(())?;
+                slow.join().unwrap()?;
+                fast.join().unwrap();
+                result??;
+                tokio::runtime::Handle::current().block_on(runtime.shutdown());
+                Ok(())
+            },
+        )
+    }
 
     #[test]
     fn deadline_requests_cancellation_without_forging_completion() -> anyhow::Result<()> {

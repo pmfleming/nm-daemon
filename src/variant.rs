@@ -53,6 +53,16 @@ where
         .ok()
 }
 
+/// Borrow string dictionary entries, rejecting the entire map on a bad key or
+/// value, just like the owned conversion. In particular, never copy VPN secrets.
+pub(crate) fn value_string_map(value: &OwnedValue) -> Option<HashMap<&str, &str>> {
+    <&zvariant::Dict<'_, '_>>::try_from(value)
+        .ok()?
+        .iter()
+        .map(|(key, value)| Some((key.downcast_ref().ok()?, value.downcast_ref().ok()?)))
+        .collect()
+}
+
 /// NetworkManager's legacy settings also encode text as UTF-8 byte arrays.
 /// Keep this distinct from strict string inspection (`value_string`).
 pub(crate) fn setting_text(section: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
@@ -186,6 +196,37 @@ mod tests {
             let values = std::collections::HashMap::from([("value".into(), value)]);
             assert_eq!(setting_strings(&values, "value"), expected);
             assert!(setting_strings(&values, "missing").is_empty());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_string_maps_preserve_owned_conversion_semantics() -> anyhow::Result<()> {
+        use std::collections::HashMap;
+        use zvariant::Value;
+        for value in [
+            owned_value(HashMap::from([
+                ("password", "secret"),
+                ("password-flags", "1"),
+            ]))?,
+            owned_value(HashMap::<String, String>::new())?,
+            owned_value(HashMap::<u32, u32>::new())?,
+            owned_value(HashMap::from([("key", Value::from("value"))]))?,
+            owned_value(HashMap::from([
+                ("good", Value::from("text")),
+                ("bad", Value::from(1_u32)),
+            ]))?,
+            owned_value(HashMap::from([(1_u32, "bad key")]))?,
+            owned_value("not a dictionary")?,
+        ] {
+            let expected = HashMap::<String, String>::try_from(value.try_clone()?).ok();
+            let actual = super::value_string_map(&value).map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect()
+            });
+            assert_eq!(actual, expected);
         }
         Ok(())
     }

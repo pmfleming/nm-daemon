@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 
-use crate::variant::setting_text as setting_string;
+use crate::variant::setting_text;
 
 use super::{
     ConnectionSettings, WifiSecretKind, has_wep_settings, owned_value, setting_string_list,
@@ -86,11 +86,11 @@ pub(super) fn setting_secret_string(
 ) -> Option<String> {
     secrets
         .and_then(|secrets| secrets.get(setting_name))
-        .and_then(|section| setting_string(section, key))
+        .and_then(|section| setting_text(section, key))
         .or_else(|| {
             settings
                 .get(setting_name)
-                .and_then(|section| setting_string(section, key))
+                .and_then(|section| setting_text(section, key))
         })
         .filter(|value| !value.is_empty())
 }

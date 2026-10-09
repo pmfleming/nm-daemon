@@ -19,8 +19,7 @@ use crate::model::{
     network_entries_with_profile_matches, security_class,
 };
 use crate::variant::{
-    setting, setting_i32, setting_strings, setting_text as setting_string,
-    value_text as setting_value_string,
+    setting, setting_i32, setting_strings, setting_text, value_text as setting_value_string,
 };
 use profile_advanced::{apply_advanced, check_expected_version, profile_version, read_enterprise};
 use profile_secrets::{
@@ -568,12 +567,12 @@ fn wifi_profile_details(
     let empty = HashMap::new();
     let connection = settings.get("connection").unwrap_or(&empty);
     let wireless = settings.get("802-11-wireless").unwrap_or(&empty);
-    let text = |key| setting_string(wireless, key).filter(|value| !value.is_empty());
+    let text = |key| setting_text(wireless, key).filter(|value| !value.is_empty());
     let positive = |key| setting::<u32>(wireless, key).filter(|value| *value > 0);
     Ok(WifiProfileDetails {
         path: profile.path,
         id: profile.id,
-        uuid: setting_string(connection, "uuid").unwrap_or_default(),
+        uuid: setting_text(connection, "uuid").unwrap_or_default(),
         ssid: profile.ssid,
         version: profile_version(settings),
         autoconnect: profile.autoconnect,
@@ -582,7 +581,7 @@ fn wifi_profile_details(
         hidden: setting(wireless, "hidden").unwrap_or(false),
         mac_address_policy: profile.privacy.mac_address_policy,
         // A literal address and keyword policy occupy the same NM property.
-        cloned_mac_address: setting_string(wireless, "assigned-mac-address").filter(|value| {
+        cloned_mac_address: setting_text(wireless, "assigned-mac-address").filter(|value| {
             !matches!(
                 value.as_str(),
                 "default" | "stable" | "random" | "permanent"
@@ -599,7 +598,7 @@ fn wifi_profile_details(
         send_hostname: profile.privacy.send_hostname,
         casting_enabled: profile.casting_enabled,
         permissions: setting_strings(connection, "permissions"),
-        firewall_zone: setting_string(connection, "zone").filter(|value| !value.is_empty()),
+        firewall_zone: setting_text(connection, "zone").filter(|value| !value.is_empty()),
         secondaries: setting_strings(connection, "secondaries"),
         security_type: security_type_from_settings(settings),
         enterprise: read_enterprise(settings),
@@ -628,7 +627,7 @@ impl WifiProfileMatch {
         Some(Self {
             ssid_bytes: wireless.get("ssid").and_then(setting_bytes)?,
             bssid_bytes: wireless.get("bssid").and_then(setting_bytes),
-            band: setting_string(wireless, "band").filter(|band| !band.is_empty()),
+            band: setting_text(wireless, "band").filter(|band| !band.is_empty()),
             channel: wireless.get("channel").and_then(setting_u32).unwrap_or(0),
         })
     }
@@ -666,7 +665,7 @@ fn saved_wifi_connection_from_settings(
     {
         return None;
     }
-    let id = setting_string(connection, "id").unwrap_or_else(|| path.to_string());
+    let id = setting_text(connection, "id").unwrap_or_else(|| path.to_string());
     let ssid_bytes = wireless
         .get("ssid")
         .and_then(setting_bytes)
@@ -696,7 +695,7 @@ fn wifi_share_payload_for_settings(
     let hidden = hidden_from_settings(settings);
     let security = settings.get("802-11-wireless-security");
     let key_mgmt = security
-        .and_then(|section| setting_string(section, "key-mgmt"))
+        .and_then(|section| setting_text(section, "key-mgmt"))
         .unwrap_or_default();
     if security.is_none() || (key_mgmt.is_empty() && !has_wep_settings(settings, secrets)) {
         return WifiSharePayload::shareable(profile, "nopass", None, hidden);
@@ -839,11 +838,11 @@ pub(super) fn wifi_secret_kind(
     security: &HashMap<String, OwnedValue>,
     ap: Option<&AccessPoint>,
 ) -> WifiSecretKind {
-    let key_mgmt = setting_string(security, "key-mgmt").unwrap_or_default();
+    let key_mgmt = setting_text(security, "key-mgmt").unwrap_or_default();
     match key_mgmt.as_str() {
         "owe" => WifiSecretKind::None,
         "wpa-psk" | "sae" => WifiSecretKind::Personal,
-        "ieee8021x" if setting_string(security, "auth-alg").is_some_and(|auth| auth == "leap") => {
+        "ieee8021x" if setting_text(security, "auth-alg").is_some_and(|auth| auth == "leap") => {
             WifiSecretKind::Leap
         }
         key_mgmt if key_mgmt.contains("eap") => WifiSecretKind::Enterprise,
@@ -925,7 +924,7 @@ fn security_type_from_settings(settings: &ConnectionSettings) -> String {
     let Some(security) = settings.get("802-11-wireless-security") else {
         return "Open".to_string();
     };
-    match setting_string(security, "key-mgmt")
+    match setting_text(security, "key-mgmt")
         .unwrap_or_default()
         .as_str()
     {
@@ -943,14 +942,14 @@ fn security_type_from_settings(settings: &ConnectionSettings) -> String {
 fn profile_ip_settings(settings: &ConnectionSettings, section: &str) -> ProfileIpSettings {
     let empty = HashMap::new();
     let values = settings.get(section).unwrap_or(&empty);
-    let text = |key| setting_string(values, key).filter(|value| !value.is_empty());
+    let text = |key| setting_text(values, key).filter(|value| !value.is_empty());
     let family_i32 = |family, key| {
         (section == family)
             .then(|| setting_i32(values, key))
             .flatten()
     };
     ProfileIpSettings {
-        method: setting_string(values, "method").unwrap_or_else(|| "auto".to_string()),
+        method: setting_text(values, "method").unwrap_or_else(|| "auto".to_string()),
         addresses: values
             .get("address-data")
             .and_then(setting_address_data)
@@ -983,7 +982,7 @@ fn setting_address_data(value: &OwnedValue) -> Option<Vec<TargetIpAddress>> {
             .into_iter()
             .filter_map(|entry| {
                 Some(TargetIpAddress {
-                    address: setting_string(&entry, "address")?,
+                    address: setting_text(&entry, "address")?,
                     prefix: entry.get("prefix").and_then(setting_u32)?,
                 })
             })
@@ -998,9 +997,9 @@ fn setting_route_data(value: &OwnedValue) -> Option<Vec<TargetIpRoute>> {
             .into_iter()
             .filter_map(|entry| {
                 Some(TargetIpRoute {
-                    dest: setting_string(&entry, "dest")?,
+                    dest: setting_text(&entry, "dest")?,
                     prefix: entry.get("prefix").and_then(setting_u32)?,
-                    next_hop: setting_string(&entry, "next-hop").filter(|value| !value.is_empty()),
+                    next_hop: setting_text(&entry, "next-hop").filter(|value| !value.is_empty()),
                     metric: entry.get("metric").and_then(setting_u32),
                     table: entry.get("table").and_then(setting_u32),
                 })
@@ -1129,8 +1128,8 @@ fn privacy_from_settings(settings: &ConnectionSettings) -> ProfilePrivacy {
     let mac_address_policy = settings
         .get("802-11-wireless")
         .and_then(|wireless| {
-            setting_string(wireless, "assigned-mac-address")
-                .or_else(|| setting_string(wireless, "cloned-mac-address"))
+            setting_text(wireless, "assigned-mac-address")
+                .or_else(|| setting_text(wireless, "cloned-mac-address"))
         })
         .unwrap_or_else(|| "default".to_string());
     let randomized_mac = matches!(mac_address_policy.as_str(), "random" | "stable");
@@ -1181,7 +1180,7 @@ fn wifi_settings_section(settings: &ConnectionSettings) -> Option<&HashMap<Strin
     let wireless = settings.get("802-11-wireless")?;
     if settings
         .get("connection")
-        .and_then(|connection| setting_string(connection, "type"))
+        .and_then(|connection| setting_text(connection, "type"))
         .is_some_and(|connection_type| connection_type != "802-11-wireless")
     {
         return None;

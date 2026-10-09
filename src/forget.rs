@@ -66,7 +66,7 @@ pub(crate) fn execute(
 
     let log_request_id = request_id.clone();
     let log_ssid = target.ssid.to_string();
-    let result = runtime.call(ErrorOperation::ProfileOperation, move |nm| {
+    let result = runtime.call_work(ErrorOperation::ProfileOperation, move |nm| {
         ForgetService { nm }.run(request_id, &target, cancelled)
     });
     match result {
@@ -226,10 +226,10 @@ impl ForgetService<'_> {
                 .nm
                 .wait_for_event(generation, deadline.wait(FORGET_EVENT_POLL_INTERVAL));
         }
-        warnings.push(
-            "NetworkManager did not confirm disconnection within 10 seconds; no profiles were deleted."
-                .to_string(),
-        );
+        warnings.push(format!(
+            "NetworkManager did not confirm disconnection within {} seconds; no profiles were deleted.",
+            FORGET_DEACTIVATION_TIMEOUT.as_secs_f64(),
+        ));
         Ok(false)
     }
 

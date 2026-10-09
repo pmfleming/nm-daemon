@@ -74,20 +74,23 @@ impl Keyring {
         })
     }
 
-    pub(crate) fn lookup_secret(
+    pub(crate) fn lookup_secrets(
         &self,
         connection_path: &str,
         settings: &ConnectionSettings,
         setting_name: &str,
         keys: &[String],
-    ) -> Result<KeyringOutcome<Option<KeyringSecret>>> {
+    ) -> Result<KeyringOutcome<Vec<KeyringSecret>>> {
+        let mut secrets = Vec::new();
         for key in keys {
             match self.lookup_key(connection_path, settings, setting_name, key)? {
                 KeyringOutcome::Completed(Some(password)) => {
-                    return Ok(KeyringOutcome::Completed(Some(KeyringSecret {
-                        key: key.clone(),
-                        password,
-                    })));
+                    if !password.is_empty() {
+                        secrets.push(KeyringSecret {
+                            key: key.clone(),
+                            password,
+                        });
+                    }
                 }
                 KeyringOutcome::Completed(None) => {}
                 KeyringOutcome::PromptUnsupported {
@@ -96,12 +99,12 @@ impl Keyring {
                     return Ok(KeyringOutcome::PromptUnsupported {
                         operation,
                         prompt,
-                        completed: None,
+                        completed: secrets,
                     });
                 }
             }
         }
-        Ok(KeyringOutcome::Completed(None))
+        Ok(KeyringOutcome::Completed(secrets))
     }
 
     fn lookup_key(
@@ -401,6 +404,7 @@ fn primary_secret_attributes(
     let identity = settings
         .get("connection")
         .and_then(|section| setting::<&str>(section, "uuid"))
+        .filter(|uuid| !uuid.is_empty())
         .map(|uuid| ("uuid", uuid))
         .unwrap_or(("connection_path", connection_path));
     let mut attrs = base_secret_attributes(setting_name, key);
@@ -414,16 +418,14 @@ fn secret_attribute_sets(
     setting_name: &str,
     key: &str,
 ) -> Vec<HashMap<String, String>> {
-    let mut sets = vec![primary_secret_attributes(
+    // NM settings paths are reused after restart. A UUID identifies the profile
+    // exclusively; never read or delete a different profile's legacy path entry.
+    vec![primary_secret_attributes(
         connection_path,
         settings,
         setting_name,
         key,
-    )];
-    let mut path_attrs = base_secret_attributes(setting_name, key);
-    path_attrs.insert("connection_path".to_string(), connection_path.to_string());
-    sets.push(path_attrs);
-    sets
+    )]
 }
 
 fn base_secret_attributes(setting_name: &str, key: &str) -> HashMap<String, String> {
@@ -496,6 +498,149 @@ mod tests {
         fn read_alias(&self, _name: &str) -> OwnedObjectPath {
             object_path(COLLECTION_PATH)
         }
+    }
+
+    struct LookupService {
+        searches: Arc<std::sync::Mutex<Vec<HashMap<String, String>>>>,
+    }
+
+    #[zbus::interface(name = "org.freedesktop.Secret.Service")]
+    impl LookupService {
+        fn search_items(
+            &self,
+            attributes: HashMap<String, String>,
+        ) -> (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) {
+            self.searches.lock().unwrap().push(attributes.clone());
+            // A legacy path item belongs to another profile after NM restarts.
+            let matches = attributes
+                .get("uuid")
+                .is_some_and(|uuid| uuid == "profile-uuid")
+                || attributes.contains_key("connection_path");
+            let item = match attributes.get("key").map(String::as_str) {
+                Some("password") => ITEM_ONE_PATH,
+                Some("pin") => ITEM_TWO_PATH,
+                _ => return (Vec::new(), Vec::new()),
+            };
+            (
+                if matches {
+                    vec![object_path(item)]
+                } else {
+                    Vec::new()
+                },
+                Vec::new(),
+            )
+        }
+
+        fn get_secrets(
+            &self,
+            items: Vec<OwnedObjectPath>,
+            session: OwnedObjectPath,
+        ) -> HashMap<OwnedObjectPath, Secret> {
+            items
+                .into_iter()
+                .map(|item| {
+                    let value = if item.as_str() == ITEM_ONE_PATH {
+                        "password-value"
+                    } else {
+                        "1234"
+                    };
+                    (
+                        item,
+                        (
+                            session.clone(),
+                            Vec::new(),
+                            value.as_bytes().to_vec(),
+                            "text/plain".into(),
+                        ),
+                    )
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn lookups_collect_every_key_and_never_fall_back_from_uuid_to_reused_path() -> anyhow::Result<()>
+    {
+        let peer = TestPeer::new(":1.0", ":1.1");
+        let searches = Arc::new(std::sync::Mutex::new(Vec::new()));
+        peer.server.object_server().at(
+            SECRET_SERVICE_PATH,
+            LookupService {
+                searches: searches.clone(),
+            },
+        )?;
+        peer.server
+            .object_server()
+            .at(ITEM_ONE_PATH, FakeItem { prompt: false })?;
+        let keyring = super::Keyring {
+            client: SecretServiceClient {
+                connection: peer.client.clone(),
+                destination: ":1.0".into(),
+                session: object_path("/session/test"),
+            },
+        };
+        let mut settings = crate::nm::ConnectionSettings::from([(
+            "connection".into(),
+            crate::variant::value_map([("uuid", "profile-uuid".into())])?,
+        )]);
+        let keys = vec!["password".into(), "pin".into(), "missing".into()];
+        let KeyringOutcome::Completed(secrets) =
+            keyring.lookup_secrets("/reused", &settings, "802-1x", &keys)?
+        else {
+            panic!("unexpected prompt")
+        };
+        assert_eq!(
+            secrets
+                .iter()
+                .map(|secret| (secret.key.as_str(), secret.password.as_str()))
+                .collect::<Vec<_>>(),
+            [("password", "password-value"), ("pin", "1234")]
+        );
+        assert!(matches!(
+            keyring.delete_secret("/reused", &settings, "802-1x", "password")?,
+            KeyringOutcome::Completed(1)
+        ));
+
+        settings
+            .get_mut("connection")
+            .unwrap()
+            .insert("uuid".into(), crate::variant::owned_value("new-profile")?);
+        assert!(
+            matches!(keyring.lookup_secrets("/reused", &settings, "802-1x", &keys)?, KeyringOutcome::Completed(secrets) if secrets.is_empty())
+        );
+        assert!(matches!(
+            keyring.delete_secret("/reused", &settings, "802-1x", "password")?,
+            KeyringOutcome::Completed(0)
+        ));
+        assert!(
+            searches
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|attrs| attrs.contains_key("uuid") && !attrs.contains_key("connection_path"))
+        );
+
+        searches.lock().unwrap().clear();
+        settings.clear();
+        assert!(
+            matches!(keyring.lookup_secrets("/reused", &settings, "802-1x", &["password".into()])?, KeyringOutcome::Completed(secrets) if secrets.len() == 1)
+        );
+        assert!(matches!(
+            keyring.delete_secret("/reused", &settings, "802-1x", "password")?,
+            KeyringOutcome::Completed(1)
+        ));
+        let searches = searches.lock().unwrap();
+        assert_eq!(
+            searches.len(),
+            2,
+            "UUID-less lookups/deletes must not repeat the same path query"
+        );
+        assert!(
+            searches
+                .iter()
+                .all(|attrs| !attrs.contains_key("uuid") && attrs["connection_path"] == "/reused")
+        );
+        Ok(())
     }
 
     struct FakeCollection;
