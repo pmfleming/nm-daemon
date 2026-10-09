@@ -310,7 +310,20 @@ impl Nm {
         self.deactivate_wifi_connection(active_connection_path, "Disconnected Wi-Fi".to_string())
     }
 
+    /// Include activating connections, which may not have an active AP/status yet.
+    pub(crate) fn wifi_connection_active_for_ssid(&self, target_ssid: &[u8]) -> Result<bool> {
+        for device in self.wifi_devices()? {
+            if let Some(path) = self.device_active_connection_path(&device.path)?
+                && self.active_connection_matches_ssid(&path, target_ssid)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn disconnect_wifi_for_ssid(&self, target_ssid: &[u8]) -> Result<DisconnectResult> {
+        let mut disconnected = None;
         for device in self.wifi_devices()? {
             let Some(active_connection_path) = self.device_active_connection_path(&device.path)?
             else {
@@ -319,21 +332,21 @@ impl Nm {
             if !self.active_connection_matches_ssid(&active_connection_path, target_ssid)? {
                 continue;
             }
-            return self.deactivate_wifi_connection(
+            disconnected = Some(self.deactivate_wifi_connection(
                 active_connection_path,
                 format!(
                     "Cancelled connection to {}",
                     crate::model::display_ssid(target_ssid)
                 ),
-            );
+            )?);
         }
-        Ok(DisconnectResult {
+        Ok(disconnected.unwrap_or_else(|| DisconnectResult {
             status: "noop",
             message: format!(
                 "Cancelled target {} is no longer active or activating",
                 crate::model::display_ssid(target_ssid)
             ),
-        })
+        }))
     }
 
     fn deactivate_wifi_connection(

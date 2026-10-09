@@ -10,8 +10,11 @@ use crate::error::{ErrorOperation, best_effort};
 use crate::generated::{
     FORGET_CANCELLATION_TIMEOUT, FORGET_DEACTIVATION_TIMEOUT, FORGET_EVENT_POLL_INTERVAL,
 };
-use crate::model::{SavedWifiConnection, WifiConnectTarget, WifiStatus};
+use crate::model::{SavedWifiConnection, WifiConnectTarget};
 use crate::nm::Nm;
+
+#[cfg(test)]
+mod tests;
 
 const PORTAL_NOTE: &str =
     "The hotspot may continue to recognize this device until its captive-portal session expires.";
@@ -95,8 +98,9 @@ impl ForgetService<'_> {
         cancelled_connect_requests: Vec<String>,
     ) -> Result<ForgetResult> {
         let profiles = self.profiles_for(target)?;
-        let initial_status = self.nm.wifi_status()?;
-        let was_active = status_matches_target(&initial_status, target);
+        let was_active = self
+            .nm
+            .wifi_connection_active_for_ssid(target.ssid_bytes())?;
         self.log_start(
             &request_id,
             target,
@@ -206,12 +210,15 @@ impl ForgetService<'_> {
         warnings: &mut Vec<String>,
     ) -> Result<bool> {
         tracing::info!(%request_id, ssid = %target.ssid, "disconnecting active network before forget");
-        let result = self.nm.disconnect_wifi()?;
+        let result = self.nm.disconnect_wifi_for_ssid(target.ssid_bytes())?;
         tracing::info!(%request_id, ssid = %target.ssid, status = result.status, message = %result.message, "NetworkManager accepted disconnect before forget");
         let deadline = Deadline::from_now(FORGET_DEACTIVATION_TIMEOUT)?;
         let mut generation = self.nm.event_generation();
         while !deadline.expired() {
-            if !status_matches_target(&self.nm.wifi_status()?, target) {
+            if !self
+                .nm
+                .wifi_connection_active_for_ssid(target.ssid_bytes())?
+            {
                 tracing::info!(%request_id, ssid = %target.ssid, "confirmed target network is disconnected before profile deletion");
                 return Ok(true);
             }
@@ -461,17 +468,6 @@ fn successful_forget_message(completion: &ForgetCompletion, deleted: usize) -> S
     } else {
         format!("{action} {deleted} saved profiles for {}", completion.ssid)
     }
-}
-
-fn status_matches_target(status: &WifiStatus, target: &WifiConnectTarget) -> bool {
-    status.active
-        && status.access_point.as_ref().is_some_and(|access_point| {
-            if access_point.ssid_bytes.is_empty() {
-                access_point.ssid == target.ssid.as_str()
-            } else {
-                access_point.ssid_bytes == target.ssid_bytes()
-            }
-        })
 }
 
 fn normalized_request_id(request_id: String) -> String {

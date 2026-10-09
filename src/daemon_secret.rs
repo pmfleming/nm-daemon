@@ -37,6 +37,30 @@ const REQUEST_NEW: u32 = 0x2;
 static REGISTERED: AtomicBool = AtomicBool::new(false);
 static PENDING: OnceLock<Mutex<PendingRegistry>> = OnceLock::new();
 
+#[derive(Debug, zbus::DBusError)]
+#[zbus(prefix = "org.freedesktop")]
+enum SecretAgentError {
+    #[zbus(name = "NetworkManager.SecretAgent.UserCanceled")]
+    UserCanceled(String),
+    #[zbus(name = "NetworkManager.SecretAgent.NoSecrets")]
+    NoSecrets(String),
+    #[zbus(name = "DBus.Error.AccessDenied")]
+    AccessDenied(String),
+    #[zbus(name = "DBus.Error.Failed")]
+    Failed(String),
+}
+
+type SecretResult<T> = Result<T, SecretAgentError>;
+
+impl From<zbus::fdo::Error> for SecretAgentError {
+    fn from(error: zbus::fdo::Error) -> Self {
+        match error {
+            zbus::fdo::Error::AccessDenied(message) => Self::AccessDenied(message),
+            error => Self::Failed(error.to_string()),
+        }
+    }
+}
+
 pub(crate) struct SecretAgentInterface {
     runtime: Weak<DaemonRuntime>,
 }
@@ -124,7 +148,7 @@ impl SecretAgentInterface {
         hints: Vec<String>,
         flags: u32,
         #[zbus(header)] header: Header<'_>,
-    ) -> zbus::fdo::Result<ConnectionSettings> {
+    ) -> Result<ConnectionSettings, SecretAgentError> {
         let mut request = PendingSecretRequest::new(connection_path, setting_name, hints, flags);
         request.nm_owner = Some(self.authorize(&header).await?);
         let runtime = self.runtime.clone();
@@ -186,9 +210,9 @@ impl SecretAgentInterface {
     }
 }
 
-async fn secret_worker<T: Send + 'static>(
-    work: impl FnOnce() -> zbus::fdo::Result<T> + Send + 'static,
-) -> zbus::fdo::Result<T> {
+async fn secret_worker<T: Send + 'static, E: From<zbus::fdo::Error> + Send + 'static>(
+    work: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, E> {
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|_| zbus::fdo::Error::Failed("SecretAgent worker stopped".into()))?
@@ -198,11 +222,8 @@ fn resolve_secret_request(
     request: PendingSecretRequest,
     mut connection: ConnectionSettings,
     stored: impl FnOnce(&PendingSecretRequest, &mut ConnectionSettings) -> zbus::fdo::Result<bool>,
-    interact: impl FnOnce(
-        PendingSecretRequest,
-        ConnectionSettings,
-    ) -> zbus::fdo::Result<ConnectionSettings>,
-) -> zbus::fdo::Result<ConnectionSettings> {
+    interact: impl FnOnce(PendingSecretRequest, ConnectionSettings) -> SecretResult<ConnectionSettings>,
+) -> SecretResult<ConnectionSettings> {
     ensure_request_owner(&request)?;
     // A fresh request must not reuse a password NetworkManager already rejected.
     if request.flags & REQUEST_NEW == 0 && stored(&request, &mut connection)? {
@@ -211,7 +232,7 @@ fn resolve_secret_request(
     }
     // Fail before registering a pending request or emitting a frontend event.
     if request.flags & ALLOW_INTERACTION == 0 {
-        return Err(zbus::fdo::Error::Failed(
+        return Err(SecretAgentError::NoSecrets(
             "no usable stored secret and interaction is prohibited".to_string(),
         ));
     }
@@ -238,11 +259,16 @@ fn wait_for_secret_response(
     runtime: &Weak<DaemonRuntime>,
     request: PendingSecretRequest,
     mut connection: ConnectionSettings,
-) -> zbus::fdo::Result<ConnectionSettings> {
+) -> SecretResult<ConnectionSettings> {
     let owners = runtime
         .upgrade()
         .map(|runtime| runtime.subscriber_owners(Stream::WifiSecret))
         .unwrap_or_default();
+    if owners.is_empty() {
+        return Err(SecretAgentError::NoSecrets(
+            "no frontend is subscribed to secret requests".into(),
+        ));
+    }
     let (registration, displaced_request_id) = register_pending(&request, owners)?;
     if let Some(displaced_request_id) = displaced_request_id {
         emit_secret_cancelled(runtime, &displaced_request_id);
@@ -250,7 +276,8 @@ fn wait_for_secret_response(
     emit_secret_requested(runtime, &request);
 
     let response = registration.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
-        zbus::fdo::Error::NoReply(format!("timed out waiting for secret {}", request.id))
+        // A timeout is not an explicit user cancellation: allow NM to try another agent.
+        SecretAgentError::NoSecrets(format!("timed out waiting for secret {}", request.id))
     })?;
     ensure_request_owner(&request)?;
     if let Some(persistence) = apply_secret_response(&mut connection, &request, response)? {
@@ -509,12 +536,12 @@ fn apply_secret_response(
     connection: &mut ConnectionSettings,
     request: &PendingSecretRequest,
     response: SecretResponse,
-) -> zbus::fdo::Result<Option<SecretPersistenceOutcome>> {
+) -> SecretResult<Option<SecretPersistenceOutcome>> {
     reject_cancelled_response(response.cancelled)?;
     let mut values = response_values(request, response.password, response.values);
     values.retain(|key, value| request.secret_keys.contains(key) && !value.is_empty());
     if values.is_empty() {
-        return Err(zbus::fdo::Error::Failed(
+        return Err(SecretAgentError::NoSecrets(
             "secret request contained no requested values".to_string(),
         ));
     }
@@ -524,9 +551,9 @@ fn apply_secret_response(
         .then(|| persistence_outcome(request, connection, &values)))
 }
 
-fn reject_cancelled_response(cancelled: bool) -> zbus::fdo::Result<()> {
+fn reject_cancelled_response(cancelled: bool) -> SecretResult<()> {
     if cancelled {
-        return Err(zbus::fdo::Error::Failed(
+        return Err(SecretAgentError::UserCanceled(
             "secret request cancelled by frontend".to_string(),
         ));
     }
@@ -1050,10 +1077,44 @@ mod tests {
                         Some(if use_stored { "stored" } else { "fresh" }),
                     );
                 } else {
-                    assert!(matches!(result, Err(zbus::fdo::Error::Failed(_))));
+                    assert!(matches!(result, Err(super::SecretAgentError::NoSecrets(_))));
                 }
             }
         }
+    }
+
+    #[test]
+    fn secret_errors_have_network_manager_names() {
+        use zbus::DBusError;
+        let mut connection = ConnectionSettings::new();
+        let request = pending_request("cancel-name", "cancel-name-key");
+        let error = apply_secret_response(&mut connection, &request, SecretResponse::cancelled())
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.name().as_str(),
+            "org.freedesktop.NetworkManager.SecretAgent.UserCanceled"
+        );
+        assert!(connection.is_empty());
+    }
+
+    #[test]
+    fn no_subscribers_fails_without_registering_or_waiting() {
+        use zbus::DBusError;
+        let request = pending_request("no-subscribers", "no-subscribers-key");
+        let started = Instant::now();
+        let error = super::wait_for_secret_response(
+            &std::sync::Weak::new(),
+            request,
+            ConnectionSettings::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.name().as_str(),
+            "org.freedesktop.NetworkManager.SecretAgent.NoSecrets"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(remove_pending("no-subscribers").is_none());
     }
 
     #[test]

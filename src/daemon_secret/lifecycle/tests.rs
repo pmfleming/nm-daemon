@@ -179,6 +179,13 @@ fn restart_recovers_registration_and_fences_pending_work_and_secrets() -> Result
                 },
             )?;
 
+            // A prompt needs an eligible frontend; without one GetSecrets returns NoSecrets.
+            runtime.subscribe(
+                "secret-frontend".into(),
+                Some(connection.unique_name().unwrap().to_string()),
+                vec![crate::protocol::Stream::WifiSecret],
+                zbus::object_server::SignalEmitter::new(connection.inner(), "/test")?.into_owned(),
+            )?;
             // Exercise the exported interface with a genuine sender and pending reply.
             let agent_owner = connection.unique_name().unwrap().to_string();
             let caller = old.clone();
