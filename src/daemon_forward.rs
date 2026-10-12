@@ -12,10 +12,18 @@ use crate::cli::{
 };
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Method, Stream};
 
+mod safety;
+
+#[cfg(test)]
+mod safety_tests;
+
 pub(crate) enum ForwardOutcome {
     Handled,
+    /// Safe pre-dispatch fallback retaining a request already read from stdin.
     DirectConnect(Box<ConnectRequest>),
     NotForwardable,
+    /// No Call was sent, or the bus confirmed it could not dispatch that Call.
+    /// An uncertain timeout/disconnect must be returned as an error instead.
     Unavailable,
 }
 
@@ -79,14 +87,16 @@ fn forward_immediate(proxy: &Proxy<'_>, command: &Command) -> Result<ForwardOutc
     let Some((method, params)) = immediate_request(command) else {
         return Ok(ForwardOutcome::NotForwardable);
     };
-    let response: String = match proxy.call("Call", &(method.as_str(), params.as_str())) {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::debug!(%method, %error, "daemon call unavailable; running directly");
-            return Ok(ForwardOutcome::Unavailable);
-        }
+    let Some(response) = safety::call(proxy, method, &params)? else {
+        return Ok(ForwardOutcome::Unavailable);
     };
-    print_response(&response)?;
+    print_response(&response.body).map_err(|error| {
+        if crate::output::is_reported_error(&error) {
+            error
+        } else {
+            safety::unknown(method, None, error)
+        }
+    })?;
     Ok(ForwardOutcome::Handled)
 }
 
@@ -173,21 +183,27 @@ fn forward_simple_operation(
 /// same CLI envelope the direct implementation would have printed.
 fn finish_operation_result(mut events: CorrelatedEvents<'_>) -> Result<ForwardOutcome> {
     while let Some(event) = events.next()? {
-        match event.get("event").and_then(Value::as_str) {
-            Some("succeeded") => print_response(
-                &crate::output::api_data_value(
-                    "result",
-                    event.get("result").unwrap_or(&Value::Null),
-                    "serialize forwarded operation response JSON",
-                )?
-                .to_string(),
-            )?,
-            Some("failed" | "cancelled") => print_response(&event_error(&event).to_string())?,
-            _ => continue,
+        if finish_operation_event(&event)? {
+            return Ok(ForwardOutcome::Handled);
         }
-        return Ok(ForwardOutcome::Handled);
     }
     anyhow::bail!("nm-daemon operation event stream ended before completion")
+}
+
+fn finish_operation_event(event: &Value) -> Result<bool> {
+    match event.get("event").and_then(Value::as_str) {
+        Some("succeeded") => print_response(
+            &crate::output::api_data_value(
+                "result",
+                event.get("result").unwrap_or(&Value::Null),
+                "serialize forwarded operation response JSON",
+            )?
+            .to_string(),
+        )?,
+        Some("failed" | "cancelled") => print_response(&event_error(event).to_string())?,
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn run_operation<'a>(
@@ -205,23 +221,33 @@ fn run_operation<'a>(
             return Ok(unavailable());
         }
     };
-    let response_json: String = match proxy.call("Call", &(method.as_str(), params.as_str())) {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::debug!(%method, %error, "daemon operation unavailable");
-            return Ok(unavailable());
-        }
+    let Some(reply) = safety::call(proxy, method, &params)? else {
+        return Ok(unavailable());
     };
-    let response = parse_response(&response_json)?;
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        print_response(&response_json)?;
+    let response =
+        parse_response(&reply.body).map_err(|error| safety::unknown(method, None, error))?;
+    if response["ok"] == false {
+        print_response(&reply.body)?;
         return Ok(ForwardOutcome::Handled);
     }
-    finish(CorrelatedEvents {
+    let request_id = request_id(&response).map_err(|error| safety::unknown(method, None, error))?;
+    let result = finish(CorrelatedEvents {
         events,
         stream,
-        request_id: request_id(&response)?,
-    })
+        request_id: request_id.clone(),
+    });
+    match result {
+        Err(error) if !crate::output::is_reported_error(&error) => {
+            if let Some(event) =
+                safety::recover_terminal(proxy, method, stream, &request_id, reply.owner.as_ref())
+            {
+                finish_operation_event(&event)?;
+                return Ok(ForwardOutcome::Handled);
+            }
+            Err(safety::unknown(method, Some(&request_id), error))
+        }
+        result => result,
+    }
 }
 
 struct CorrelatedEvents<'a> {
@@ -295,13 +321,22 @@ fn is_terminal(event: &Value) -> bool {
 }
 
 fn parse_response(response_json: &str) -> Result<Value> {
-    serde_json::from_str(response_json).context("parse nm-daemon response JSON")
+    let value: Value =
+        serde_json::from_str(response_json).context("parse nm-daemon response JSON")?;
+    anyhow::ensure!(
+        value["protocol"] == crate::output::API_PROTOCOL
+            && value["version"] == crate::output::API_VERSION
+            && value["ok"].is_boolean(),
+        "invalid nm-daemon response envelope"
+    );
+    Ok(value)
 }
 
 fn request_id(response: &Value) -> Result<String> {
     response
         .pointer("/data/result/request_id")
         .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
         .map(ToString::to_string)
         .context("daemon operation response did not contain request_id")
 }

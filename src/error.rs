@@ -76,6 +76,7 @@ pub(crate) enum ErrorCode {
     AuthorizationRequired,
     NotFound,
     Timeout,
+    OutcomeUnknown,
     Cancelled,
     SecretRequired,
     WrongPassword,
@@ -122,6 +123,7 @@ impl ErrorCode {
             Self::UnsupportedAuth => ConnectFailureReason::UnsupportedAuth,
             Self::DhcpFailed => ConnectFailureReason::DhcpFailed,
             Self::Conflict
+            | Self::OutcomeUnknown
             | Self::NetworkmanagerUnavailable
             | Self::InternalError
             | Self::Unknown => return None,

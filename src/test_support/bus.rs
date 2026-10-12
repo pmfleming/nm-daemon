@@ -64,8 +64,12 @@ impl TestBus {
         Ok(bus)
     }
 
+    pub(crate) fn address(&self) -> &str {
+        self.address.trim()
+    }
+
     pub(crate) fn connect(&self) -> Result<Connection> {
-        Ok(Builder::address(self.address.trim())?.build()?)
+        Ok(Builder::address(self.address())?.build()?)
     }
 }
 

@@ -152,3 +152,17 @@ fn with_nm<T>(f: impl FnOnce(&Nm) -> Result<T>) -> Result<T> {
     nm.ensure_current_owner()?;
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_direct_mode_bypasses_forwarding() -> Result<()> {
+        let cli = Cli::try_parse_from(["nm-daemon", "--direct", "wifi", "disconnect"])?;
+        assert!(cli.direct);
+        // Only test the routing decision; never run the actual direct effect.
+        assert!(!try_forward(&cli.command, cli.direct)?);
+        Ok(())
+    }
+}
