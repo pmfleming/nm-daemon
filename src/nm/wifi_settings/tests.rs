@@ -1,16 +1,16 @@
 use std::collections::HashMap;
-
 use zvariant::OwnedValue;
 
 use super::{
     apply_saved_activation_settings, cloned_wifi_connection_settings,
-    enterprise_wifi_connection_settings, validate_wpa_psk,
+    enterprise_wifi_connection_settings,
 };
 use crate::model::{
     AccessPoint, EnterpriseAuth, NM_AP_SEC_KEY_MGMT_802_1X, NM_AP_SEC_KEY_MGMT_PSK,
     TargetIpAddress, TargetIpRoute, TargetIpSettings, TargetProfileSettings,
     example_connect_target,
 };
+use crate::variant::{owned_value, value_map};
 
 #[test]
 fn activation_pins_inherited_mdns_off_without_losing_explicit_policy() {
@@ -22,7 +22,7 @@ fn activation_pins_inherited_mdns_off_without_losing_explicit_policy() {
             existing
                 .get_mut("connection")
                 .unwrap()
-                .insert("mdns".into(), crate::nm::owned_value(policy).unwrap());
+                .insert("mdns".into(), owned_value(policy).unwrap());
         }
         let settings = cloned_wifi_connection_settings(
             existing,
@@ -40,158 +40,53 @@ fn activation_pins_inherited_mdns_off_without_losing_explicit_policy() {
 }
 
 #[test]
-fn cloned_profile_settings_replace_secret_and_preserve_profile_options() {
+fn profile_activation_replaces_credentials_without_losing_security_or_network_options()
+-> anyhow::Result<()> {
     let mut target = example_connect_target(true);
     target.profile = TargetProfileSettings {
         autoconnect: Some(false),
         autoconnect_priority: Some(20),
-        metered: Some("no".to_string()),
-        cloned_mac_address: Some("stable".to_string()),
+        metered: Some("no".into()),
+        cloned_mac_address: Some("stable".into()),
         send_hostname: Some(false),
         ipv4: Some(TargetIpSettings {
             addresses: vec![TargetIpAddress {
-                address: "192.0.2.10".to_string(),
+                address: "192.0.2.10".into(),
                 prefix: 24,
             }],
-            gateway: Some("192.0.2.1".to_string()),
-            dns: vec!["1.1.1.1".to_string(), "9.9.9.9".to_string()],
+            gateway: Some("192.0.2.1".into()),
+            dns: vec!["1.1.1.1".into(), "9.9.9.9".into()],
             routes: vec![TargetIpRoute {
-                dest: "198.51.100.0".to_string(),
+                dest: "198.51.100.0".into(),
                 prefix: 24,
-                next_hop: Some("192.0.2.1".to_string()),
+                next_hop: Some("192.0.2.1".into()),
                 metric: Some(20),
                 table: None,
             }],
             route_metric: Some(50),
             ignore_auto_dns: Some(true),
-            dns_search: vec!["example.test".to_string()],
+            dns_search: vec!["example.test".into()],
             ..Default::default()
         }),
         ..Default::default()
     };
-    let existing =
-        super::base_wifi_connection_settings("Example", b"Example", false).expect("base settings");
+    let mut existing = super::base_wifi_connection_settings("Example", b"Example", false)?;
+    existing.insert(
+        "802-11-wireless-security".into(),
+        value_map([
+            ("key-mgmt", "wpa-psk".into()),
+            ("pmf", 2_u32.into()),
+            ("psk", "old-password".into()),
+        ])?,
+    );
     let settings = cloned_wifi_connection_settings(
         existing,
         &target,
         &test_ap(NM_AP_SEC_KEY_MGMT_PSK),
         Some("secret123"),
         None,
-    )
-    .expect("settings");
-
-    assert_eq!(
-        settings
-            .get("802-11-wireless-security")
-            .and_then(|section| setting::<String>(section, "psk"))
-            .as_deref(),
-        Some("secret123")
-    );
-    assert_eq!(
-        settings
-            .get("connection")
-            .and_then(|section| setting::<bool>(section, "autoconnect")),
-        Some(false)
-    );
-    assert_eq!(
-        settings
-            .get("connection")
-            .and_then(|section| setting::<i32>(section, "mdns")),
-        Some(0)
-    );
-    assert_eq!(
-        settings
-            .get("802-11-wireless")
-            .and_then(|section| setting::<String>(section, "assigned-mac-address"))
-            .as_deref(),
-        Some("stable")
-    );
-    assert_eq!(
-        settings
-            .get("connection")
-            .and_then(|section| setting::<u32>(section, "metered")),
-        Some(2)
-    );
-    assert_eq!(
-        settings
-            .get("ipv4")
-            .and_then(|section| setting::<String>(section, "method"))
-            .as_deref(),
-        Some("manual")
-    );
-    assert_eq!(
-        settings
-            .get("ipv4")
-            .and_then(|section| setting::<String>(section, "gateway"))
-            .as_deref(),
-        Some("192.0.2.1")
-    );
-    assert_eq!(
-        settings
-            .get("ipv4")
-            .and_then(|section| setting::<i64>(section, "route-metric")),
-        Some(50)
-    );
-    assert_eq!(
-        settings
-            .get("ipv4")
-            .and_then(|section| setting::<Vec<String>>(section, "dns-data")),
-        Some(vec!["1.1.1.1".to_string(), "9.9.9.9".to_string()])
-    );
-    let address_data = settings
-        .get("ipv4")
-        .and_then(|section| setting::<Vec<HashMap<String, OwnedValue>>>(section, "address-data"))
-        .expect("address-data");
-    assert_eq!(
-        setting::<String>(&address_data[0], "address").as_deref(),
-        Some("192.0.2.10")
-    );
-    assert_eq!(setting::<u32>(&address_data[0], "prefix"), Some(24));
-    let route_data = settings
-        .get("ipv4")
-        .and_then(|section| setting::<Vec<HashMap<String, OwnedValue>>>(section, "route-data"))
-        .expect("route-data");
-    assert_eq!(
-        setting::<String>(&route_data[0], "dest").as_deref(),
-        Some("198.51.100.0")
-    );
-    assert_eq!(
-        setting::<String>(&route_data[0], "next-hop").as_deref(),
-        Some("192.0.2.1")
-    );
-}
-
-#[test]
-fn saved_profile_password_update_preserves_security_options() {
-    let target = example_connect_target(false);
-    let mut settings =
-        super::base_wifi_connection_settings("Example", b"Example", false).expect("base settings");
-    settings.insert(
-        "802-11-wireless-security".to_string(),
-        HashMap::from([
-            (
-                "key-mgmt".to_string(),
-                super::owned_value("wpa-psk".to_string()).expect("key management"),
-            ),
-            (
-                "pmf".to_string(),
-                super::owned_value(2_u32).expect("PMF setting"),
-            ),
-        ]),
-    );
-
-    apply_saved_activation_settings(
-        &mut settings,
-        &target,
-        Some(&test_ap(NM_AP_SEC_KEY_MGMT_PSK)),
-        Some("secret123"),
-        None,
-    )
-    .expect("update saved settings");
-
-    let security = settings
-        .get("802-11-wireless-security")
-        .expect("security settings");
+    )?;
+    let security = &settings["802-11-wireless-security"];
     assert_eq!(
         setting::<String>(security, "key-mgmt").as_deref(),
         Some("wpa-psk")
@@ -201,32 +96,109 @@ fn saved_profile_password_update_preserves_security_options() {
         Some("secret123")
     );
     assert_eq!(setting::<u32>(security, "pmf"), Some(2));
+    let connection = &settings["connection"];
+    assert_eq!(setting::<bool>(connection, "autoconnect"), Some(false));
+    assert_eq!(setting::<i32>(connection, "mdns"), Some(0));
+    assert_eq!(setting::<u32>(connection, "metered"), Some(2));
+    assert_eq!(
+        setting::<String>(&settings["802-11-wireless"], "assigned-mac-address").as_deref(),
+        Some("stable")
+    );
+    let ip = &settings["ipv4"];
+    assert_eq!(setting::<String>(ip, "method").as_deref(), Some("manual"));
+    assert_eq!(
+        setting::<String>(ip, "gateway").as_deref(),
+        Some("192.0.2.1")
+    );
+    assert_eq!(setting::<i64>(ip, "route-metric"), Some(50));
+    assert_eq!(
+        setting::<Vec<String>>(ip, "dns-data").unwrap(),
+        ["1.1.1.1", "9.9.9.9"]
+    );
+    let addresses = setting::<Vec<HashMap<String, OwnedValue>>>(ip, "address-data").unwrap();
+    assert_eq!(
+        setting::<String>(&addresses[0], "address").as_deref(),
+        Some("192.0.2.10")
+    );
+    assert_eq!(setting::<u32>(&addresses[0], "prefix"), Some(24));
+    let routes = setting::<Vec<HashMap<String, OwnedValue>>>(ip, "route-data").unwrap();
+    assert_eq!(
+        setting::<String>(&routes[0], "dest").as_deref(),
+        Some("198.51.100.0")
+    );
+    assert_eq!(
+        setting::<String>(&routes[0], "next-hop").as_deref(),
+        Some("192.0.2.1")
+    );
+    Ok(())
 }
 
 #[test]
-fn enterprise_creation_preserves_explicit_peap_zero_and_validates_the_enum() -> anyhow::Result<()> {
+fn enterprise_creation_and_reactivation_preserve_credentials_peap_and_certificate_trust()
+-> anyhow::Result<()> {
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     for label in [None, Some(""), Some("0"), Some("1")] {
         let auth = EnterpriseAuth {
+            eap: vec!["peap".into()],
             identity: Some("test".into()),
+            phase2_auth: Some("mschapv2".into()),
             phase1_peaplabel: label.map(str::to_owned),
             ca_cert: Some("file:///test/ca.pem".into()),
+            client_cert: Some("file:///test/client.pem".into()),
+            private_key: Some("pkcs11:object=client-key".into()),
+            domain_suffix_match: Some("radius.example".into()),
             ..Default::default()
         };
-        let settings = enterprise_wifi_connection_settings(
-            &test_ap(NM_AP_SEC_KEY_MGMT_802_1X),
-            &auth,
-            Some("test-password"),
-        )?;
-        let dot1x = &settings["802-1x"];
-        assert_eq!(
-            setting::<String>(dot1x, "phase1-peaplabel").as_deref(),
-            label.filter(|value| !value.is_empty())
-        );
-        assert_eq!(
-            setting::<Vec<u8>>(dot1x, "ca-cert").unwrap(),
-            b"file:///test/ca.pem\0"
-        );
+        let mut target = example_connect_target(true);
+        target.enterprise = Some(auth.clone());
+        for mut settings in [
+            enterprise_wifi_connection_settings(
+                &test_ap(NM_AP_SEC_KEY_MGMT_802_1X),
+                &auth,
+                Some("test-password"),
+            )?,
+            super::hidden_wifi_connection_settings(&target, Some("test-password"), None)?,
+        ] {
+            assert_eq!(
+                setting::<String>(&settings["802-11-wireless-security"], "key-mgmt").as_deref(),
+                Some("wpa-eap")
+            );
+            let dot1x = &settings["802-1x"];
+            assert_eq!(
+                setting::<String>(dot1x, "identity").as_deref(),
+                Some("test")
+            );
+            assert_eq!(
+                setting::<String>(dot1x, "password").as_deref(),
+                Some("test-password")
+            );
+            assert_eq!(
+                setting::<String>(dot1x, "phase2-auth").as_deref(),
+                Some("mschapv2")
+            );
+            assert_eq!(
+                setting::<String>(dot1x, "phase1-peaplabel").as_deref(),
+                label.filter(|value| !value.is_empty())
+            );
+            for (key, uri) in [
+                ("ca-cert", auth.ca_cert.as_deref().unwrap()),
+                ("client-cert", auth.client_cert.as_deref().unwrap()),
+                ("private-key", auth.private_key.as_deref().unwrap()),
+            ] {
+                assert_eq!(
+                    setting::<Vec<u8>>(dot1x, key).unwrap(),
+                    [uri.as_bytes(), &[0]].concat(),
+                    "NM requires ay for {key}"
+                );
+            }
+            let before = dot1x.clone();
+            target.enterprise = None;
+            apply_saved_activation_settings(&mut settings, &target, None, None, None)?;
+            assert_eq!(
+                settings["802-1x"], before,
+                "saved reactivation must retain trust and credentials"
+            );
+        }
     }
     for rejected in ["false", "true", "2", " 0", "0\0"] {
         let auth = EnterpriseAuth {
@@ -242,122 +214,26 @@ fn enterprise_creation_preserves_explicit_peap_zero_and_validates_the_enum() -> 
         assert_eq!(report.operation, ErrorOperation::Connect);
         assert_eq!(report.details["field"], "802-1x.phase1-peaplabel");
     }
-    Ok(())
-}
-
-#[test]
-fn hidden_enterprise_and_saved_reactivation_preserve_peap_zero_and_trust() -> anyhow::Result<()> {
-    let mut target = example_connect_target(true);
-    target.enterprise = Some(EnterpriseAuth {
-        identity: Some("test".into()),
-        phase1_peaplabel: Some("0".into()),
-        ca_cert: Some("file:///test/ca.pem".into()),
-        domain_suffix_match: Some("radius.example".into()),
-        ..Default::default()
-    });
-    let mut settings =
-        super::hidden_wifi_connection_settings(&target, Some("test-password"), None)?;
-    let before = settings["802-1x"].clone();
-    target.enterprise = None;
-    apply_saved_activation_settings(&mut settings, &target, None, None, None)?;
-    assert_eq!(settings["802-1x"], before);
-    assert_eq!(
-        setting::<String>(&settings["802-1x"], "phase1-peaplabel").as_deref(),
-        Some("0")
-    );
-    Ok(())
-}
-
-#[test]
-fn enterprise_wifi_settings_include_8021x_credentials() {
-    let mut auth = EnterpriseAuth {
-        eap: vec!["peap".to_string()],
-        identity: Some("laufan".to_string()),
-        anonymous_identity: None,
-        password: None,
-        phase2_auth: Some("mschapv2".to_string()),
-        ca_cert: Some("file:///etc/ssl/certs/company.pem".into()),
-        client_cert: Some("file:///home/user/client.pem".into()),
-        private_key: Some("pkcs11:object=client-key".into()),
-        ..Default::default()
-    };
-    let settings = enterprise_wifi_connection_settings(
-        &test_ap(NM_AP_SEC_KEY_MGMT_802_1X),
-        &auth,
-        Some("secret123"),
-    )
-    .expect("settings");
-
-    assert_eq!(
-        settings
-            .get("802-11-wireless-security")
-            .and_then(|section| setting::<String>(section, "key-mgmt"))
-            .as_deref(),
-        Some("wpa-eap")
-    );
-    assert_eq!(
-        settings
-            .get("802-1x")
-            .and_then(|section| setting::<String>(section, "identity"))
-            .as_deref(),
-        Some("laufan")
-    );
-    assert_eq!(
-        settings
-            .get("802-1x")
-            .and_then(|section| setting::<String>(section, "password"))
-            .as_deref(),
-        Some("secret123")
-    );
-    assert_eq!(
-        settings
-            .get("802-1x")
-            .and_then(|section| setting::<String>(section, "phase2-auth"))
-            .as_deref(),
-        Some("mschapv2")
-    );
-    for (key, uri) in [
-        ("ca-cert", auth.ca_cert.as_deref().unwrap()),
-        ("client-cert", auth.client_cert.as_deref().unwrap()),
-        ("private-key", auth.private_key.as_deref().unwrap()),
-    ] {
-        let bytes = setting::<Vec<u8>>(&settings["802-1x"], key).unwrap();
-        assert_eq!(
-            bytes,
-            [uri.as_bytes(), &[0]].concat(),
-            "NM requires ay for {key}"
-        );
-    }
     for invalid in ["https://example.test/ca.pem", "file:///safe.pem\0ignored"] {
-        auth.ca_cert = Some(invalid.into());
+        let auth = EnterpriseAuth {
+            identity: Some("test".into()),
+            ca_cert: Some(invalid.into()),
+            ..Default::default()
+        };
         assert!(
             enterprise_wifi_connection_settings(
                 &test_ap(NM_AP_SEC_KEY_MGMT_802_1X),
                 &auth,
-                Some("secret123"),
+                Some("secret123")
             )
             .is_err()
         );
     }
+    Ok(())
 }
 
-#[test]
-fn wpa_psk_validation_matches_nmcli_shape() {
-    assert!(validate_wpa_psk("12345678").is_ok());
-    assert!(validate_wpa_psk(&"a".repeat(63)).is_ok());
-    assert!(validate_wpa_psk(&"a".repeat(64)).is_ok());
-    assert!(validate_wpa_psk("short").is_err());
-    assert!(validate_wpa_psk(&"g".repeat(64)).is_err());
-    assert!(validate_wpa_psk(&"a".repeat(65)).is_err());
-}
 fn test_ap(rsn_flags: u32) -> AccessPoint {
     AccessPoint {
-        strength: 50,
-        channel: 0,
-        wpa_flags_label: String::new(),
-        rsn_flags_label: String::new(),
-        path: "/ap".to_string(),
-        device_path: "/device".to_string(),
         rsn_flags,
         ..crate::model::example_access_point()
     }

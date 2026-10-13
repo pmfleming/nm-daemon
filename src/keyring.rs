@@ -84,15 +84,13 @@ impl Keyring {
         let mut secrets = Vec::new();
         for key in keys {
             match self.lookup_key(connection_path, settings, setting_name, key)? {
-                KeyringOutcome::Completed(Some(password)) => {
-                    if !password.is_empty() {
-                        secrets.push(KeyringSecret {
-                            key: key.clone(),
-                            password,
-                        });
-                    }
+                KeyringOutcome::Completed(Some(password)) if !password.is_empty() => {
+                    secrets.push(KeyringSecret {
+                        key: key.clone(),
+                        password,
+                    });
                 }
-                KeyringOutcome::Completed(None) => {}
+                KeyringOutcome::Completed(_) => {}
                 KeyringOutcome::PromptUnsupported {
                     operation, prompt, ..
                 } => {

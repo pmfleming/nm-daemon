@@ -14,7 +14,7 @@ use crate::daemon_runtime::{ConnectAttemptKey, DaemonRuntime, TaskKind};
 use crate::error::{DomainError, ErrorOperation, ErrorReport};
 use crate::model::{
     ConnectPhase, ConnectTargetIdentity, EnterpriseAuth, WepKeyType, WifiConnectTarget,
-    connect_target_for_network_key, ssid_for_network_key,
+    connect_target_for_network_key,
 };
 use crate::nm::Nm;
 use crate::protocol::{Method, Stream};
@@ -56,13 +56,16 @@ impl DbusConnectTargetParams {
         }
     }
 
-    pub(crate) fn requested_identity(&self) -> Result<ConnectTargetIdentity> {
+    fn validated_identity(&self) -> Result<ConnectTargetIdentity> {
         match (&self.key, &self.target) {
             (Some(key), None) => {
                 let target = connect_target_for_network_key(key, None)?;
                 Ok(ConnectTargetIdentity::from_target(&target, Some(key)))
             }
-            (None, Some(target)) => Ok(ConnectTargetIdentity::from_target(target, None)),
+            (None, Some(target)) => {
+                target.validate()?;
+                Ok(ConnectTargetIdentity::from_target(target, None))
+            }
             (Some(_), Some(_)) => {
                 bail!("connect request must provide either key or target, not both")
             }
@@ -70,14 +73,13 @@ impl DbusConnectTargetParams {
         }
     }
 
-    fn attempt_key(&self) -> Result<ConnectAttemptKey> {
-        let identity = self.requested_identity()?;
-        let identity = identity.network_key.unwrap_or_else(|| {
+    fn attempt_key(&self, identity: &ConnectTargetIdentity) -> Result<ConnectAttemptKey> {
+        let identity = identity.network_key.clone().unwrap_or_else(|| {
             format!(
                 "{}:{}:{}",
                 identity.ssid_hex,
-                identity.device_iface.unwrap_or_default(),
-                identity.bssid.unwrap_or_default()
+                identity.device_iface.as_deref().unwrap_or_default(),
+                identity.bssid.as_deref().unwrap_or_default()
             )
         });
         let supplied_credentials = self.password.is_some() || self.enterprise.is_some();
@@ -87,20 +89,6 @@ impl DbusConnectTargetParams {
             &credential_material,
             supplied_credentials,
         ))
-    }
-
-    fn validated_ssid(&self) -> Result<Vec<u8>> {
-        match (&self.key, &self.target) {
-            (Some(key), None) => Ok(ssid_for_network_key(key)?.as_bytes().to_vec()),
-            (None, Some(target)) => {
-                target.validate()?;
-                Ok(target.ssid_bytes().to_vec())
-            }
-            (Some(_), Some(_)) => {
-                bail!("connect request must provide either key or target, not both")
-            }
-            (None, None) => bail!("connect request must provide key or target"),
-        }
     }
 
     fn into_request(self, nm: &Nm) -> Result<ConnectRequest> {
@@ -122,15 +110,16 @@ impl DbusConnectTargetParams {
             self.wep_key_type,
             enterprise_identity,
         )?;
-        if let Some(mut enterprise) = self.enterprise {
-            if enterprise.key_mgmt.is_none() {
-                enterprise.key_mgmt = request
-                    .target
-                    .enterprise
-                    .as_ref()
-                    .and_then(|defaults| defaults.key_mgmt.clone());
+        if let Some(enterprise) = self.enterprise {
+            for candidate in
+                std::iter::once(&mut request.candidate).chain(&mut request.alternatives)
+            {
+                let mut enterprise = enterprise.clone();
+                enterprise.key_mgmt = enterprise
+                    .key_mgmt
+                    .or_else(|| candidate.target.enterprise.take()?.key_mgmt);
+                candidate.target.enterprise = Some(enterprise);
             }
-            request.target.enterprise = Some(enterprise);
         }
         Ok(request)
     }
@@ -142,12 +131,15 @@ pub(crate) fn start_connect_target(
     owner: Option<String>,
     emitter: SignalEmitter<'static>,
 ) -> Result<Value> {
-    let target_ssid = params.validated_ssid().map_err(connect_validation_error)?;
-    let attempt =
-        runtime.begin_connect_attempt(params.attempt_key().map_err(connect_validation_error)?)?;
     let requested_identity = params
-        .requested_identity()
+        .validated_identity()
         .map_err(connect_validation_error)?;
+    let target_ssid = requested_identity.ssid_bytes.clone();
+    let attempt = runtime.begin_connect_attempt(
+        params
+            .attempt_key(&requested_identity)
+            .map_err(connect_validation_error)?,
+    )?;
     let target_display = crate::model::display_ssid(&target_ssid);
     let network_key = params.key.clone();
     let terminal_runtime = Arc::downgrade(runtime);
@@ -386,6 +378,55 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn target_validation_rejects_ambiguous_missing_and_invalid_selectors() -> anyhow::Result<()> {
+        let mut params =
+            super::DbusConnectTargetParams::for_target(example_connect_target(false), None, None);
+        assert_eq!(params.validated_identity()?.ssid_bytes, b"Example");
+        params.key = Some("ssid-hex:4578616d706c65".into());
+        assert!(params.validated_identity().is_err());
+        params.target = None;
+        assert_eq!(params.validated_identity()?.ssid_bytes, b"Example");
+        params.key = Some("ssid-hex:zz".into());
+        assert!(params.validated_identity().is_err());
+        params.key = None;
+        assert!(params.validated_identity().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_candidates_retain_enterprise_overrides() -> anyhow::Result<()> {
+        let fake = crate::test_support::workflows::FakeNm::new([], false)?;
+        let networks = fake
+            .nm
+            .network_entries_for_access_points(fake.nm.list_all_access_points()?)?;
+        let params = serde_json::from_value::<super::DbusConnectTargetParams>(json!({
+            "key": networks[0].key,
+            "enterprise": {"identity": "alice", "domain_suffix_match": "example.test"}
+        }))?;
+        let request = params.into_request(&fake.nm)?;
+        let enterprise = request
+            .candidate
+            .target
+            .enterprise
+            .as_ref()
+            .expect("enterprise options");
+        assert_eq!(enterprise.identity.as_deref(), Some("alice"));
+        assert_eq!(
+            enterprise.domain_suffix_match.as_deref(),
+            Some("example.test")
+        );
+        assert!(request.candidate.band.is_some());
+        assert!(!request.alternatives.is_empty());
+        assert!(
+            request
+                .alternatives
+                .iter()
+                .all(|candidate| { json!(candidate.target.enterprise) == json!(enterprise) })
+        );
+        Ok(())
+    }
+
+    #[test]
     fn connect_payloads_preserve_common_and_variant_specific_fields() {
         let target =
             ConnectTargetIdentity::from_target(&example_connect_target(false), Some("key"));
@@ -396,7 +437,7 @@ mod tests {
                 "started",
                 ConnectEvent::Started {
                     phase,
-                    target: target.clone(),
+                    target: &target,
                     message: message.clone(),
                 },
                 json!({"message":message}),
@@ -405,7 +446,7 @@ mod tests {
                 "progress",
                 ConnectEvent::Progress {
                     phase,
-                    target: target.clone(),
+                    target: &target,
                     message: message.clone(),
                     candidate: None,
                     previous_reason: None,
@@ -416,7 +457,7 @@ mod tests {
                 "cancelled",
                 ConnectEvent::Cancelled {
                     phase,
-                    target: target.clone(),
+                    target: &target,
                     message: message.clone(),
                 },
                 json!({"message":message}),
@@ -425,7 +466,7 @@ mod tests {
                 "cancelled",
                 ConnectEvent::Finished {
                     phase,
-                    target: target.clone(),
+                    target: &target,
                     outcome: &ConnectOutcome::Cancelled {
                         message: message.clone(),
                     },
@@ -478,7 +519,7 @@ mod tests {
             expected["target"] = json!(target);
             let event = ConnectEvent::Finished {
                 phase,
-                target: target.clone(),
+                target: &target,
                 outcome: &outcome,
             };
             assert_eq!(

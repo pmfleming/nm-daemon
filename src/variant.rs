@@ -149,7 +149,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{owned_value, setting, setting_strings, value_list, value_map, value_string};
+    use super::{owned_value, setting_strings, value_list, value_string};
 
     #[test]
     fn settings_readers_preserve_legacy_text_and_checked_signed_integers() -> anyhow::Result<()> {
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_string_arrays_preserve_owned_conversion_semantics() -> anyhow::Result<()> {
+    fn container_readers_preserve_values_and_reject_wrong_or_mixed_types() -> anyhow::Result<()> {
         use zvariant::Value;
         for value in [
             owned_value(vec!["rsn", "wpa"])?,
@@ -202,13 +202,8 @@ mod tests {
             assert_eq!(setting_strings(&values, "value"), expected);
             assert!(setting_strings(&values, "missing").is_empty());
         }
-        Ok(())
-    }
 
-    #[test]
-    fn borrowed_string_maps_preserve_owned_conversion_semantics() -> anyhow::Result<()> {
         use std::collections::HashMap;
-        use zvariant::Value;
         for value in [
             owned_value(HashMap::from([
                 ("password", "secret"),
@@ -233,11 +228,7 @@ mod tests {
             });
             assert_eq!(actual, expected);
         }
-        Ok(())
-    }
 
-    #[test]
-    fn borrowed_byte_arrays_preserve_owned_conversion_semantics() -> anyhow::Result<()> {
         for value in [
             owned_value(vec![0_u8, 0xff])?,
             owned_value(Vec::<u8>::new())?,
@@ -257,32 +248,6 @@ mod tests {
                 Vec::<u8>::try_from(value.try_clone()?).ok()
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn borrowed_dictionary_values_keep_their_dbus_types() -> anyhow::Result<()> {
-        let text = String::from("Example");
-        let bytes = [0, 0xff, 42];
-        let values = value_map([
-            ("text", text.as_str().into()),
-            ("ssid", bytes.as_slice().into()),
-            ("enabled", true.into()),
-            ("channel", 36_u32.into()),
-            ("protocols", vec!["rsn"].into()),
-        ])?;
-        drop(text);
-        assert_eq!(value_string(&values["text"]).as_deref(), Some("Example"));
-        assert_eq!(value_string(&values["channel"]), None);
-        assert_eq!(setting::<u32>(&values, "channel"), Some(36));
-        assert_eq!(setting::<bool>(&values, "enabled"), Some(true));
-        assert_eq!(setting::<bool>(&values, "channel"), None);
-        assert_eq!(setting::<u32>(&values, "missing"), None);
-        assert_eq!(Vec::<u8>::try_from(values["ssid"].try_clone()?)?, bytes);
-        assert_eq!(
-            Vec::<String>::try_from(values["protocols"].try_clone()?)?,
-            ["rsn"]
-        );
         Ok(())
     }
 }

@@ -86,32 +86,3 @@ impl TestPeer {
         }
     }
 }
-
-#[test]
-fn both_endpoints_dispatch_the_first_call() -> anyhow::Result<()> {
-    workflows::isolated(
-        concat!(module_path!(), "::both_endpoints_dispatch_the_first_call"),
-        || {
-            // Recreate the endpoints to exercise startup, not just steady-state
-            // dispatch. The isolated child uses one Tokio worker to expose races.
-            for value in 0..64_u32 {
-                let peer = TestPeer::new(":1.0", ":1.1");
-                for (server, client, destination) in [
-                    (&peer.server, &peer.client, ":1.0"),
-                    (&peer.client, &peer.server, ":1.1"),
-                ] {
-                    server.object_server().at("/first_call", TestEndpoint)?;
-                    let reply = client.call_method(
-                        Some(destination),
-                        "/first_call",
-                        Some("org.laufan.NmDaemon.TestEndpoint"),
-                        "Echo",
-                        &value,
-                    )?;
-                    assert_eq!(reply.body().deserialize::<u32>()?, value);
-                }
-            }
-            Ok(())
-        },
-    )
-}

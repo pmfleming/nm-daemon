@@ -1205,6 +1205,7 @@ mod tests {
 
     #[test]
     fn nm_cancellation_during_lookup_prevents_prompt_and_stored_reply() {
+        use zbus::DBusError;
         for complete in [false, true] {
             let mut request = pending_request("early-cancel", "early-cancel-key");
             request.flags = super::ALLOW_INTERACTION;
@@ -1232,10 +1233,11 @@ mod tests {
                 "no frontend prompt exists yet"
             );
             release.send(()).unwrap();
-            assert!(matches!(
-                worker.join().unwrap(),
-                Err(super::SecretAgentError::UserCanceled(_))
-            ));
+            let error = worker.join().unwrap().unwrap_err();
+            assert_eq!(
+                error.name().as_str(),
+                "org.freedesktop.NetworkManager.SecretAgent.UserCanceled"
+            );
             super::with_pending_registry(|registry| {
                 assert!(!registry.inflight.contains_key(&key));
                 assert!(!registry.requests.contains_key("early-cancel"));
@@ -1297,7 +1299,10 @@ mod tests {
                             &request,
                             SecretResponse {
                                 password: None,
-                                values: HashMap::from([("pin".into(), "1234".into())]),
+                                values: HashMap::from([
+                                    ("pin".into(), "1234".into()),
+                                    ("not-requested".into(), "ignored".into()),
+                                ]),
                                 save: false,
                                 cancelled: false,
                             },
@@ -1317,23 +1322,9 @@ mod tests {
                 };
                 assert_eq!(values["password"], "stored-password");
                 assert_eq!(values["pin"], "1234");
+                assert!(!values.contains_key("not-requested"));
             }
         }
-    }
-
-    #[test]
-    fn secret_errors_have_network_manager_names() {
-        use zbus::DBusError;
-        let mut connection = ConnectionSettings::new();
-        let request = pending_request("cancel-name", "cancel-name-key");
-        let error = apply_secret_response(&mut connection, &request, SecretResponse::cancelled())
-            .err()
-            .unwrap();
-        assert_eq!(
-            error.name().as_str(),
-            "org.freedesktop.NetworkManager.SecretAgent.UserCanceled"
-        );
-        assert!(connection.is_empty());
     }
 
     #[test]
@@ -1356,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_secret_response_is_scoped_to_notified_owner() {
+    fn pending_secrets_are_owner_scoped_and_timed_out_registrations_are_removed() {
         let mut registry = PendingRegistry::default();
         let (sender, _receiver) = mpsc::channel();
         registry.insert(
@@ -1371,33 +1362,6 @@ mod tests {
         assert!(registry.remove_for_owner("owned", None).is_none());
         assert!(registry.remove_for_owner("owned", Some(":1.7")).is_some());
         assert!(!registry.requests.contains_key("owned"));
-    }
-    #[test]
-    fn pending_secret_delivery_observes_delay_and_timeout_cleanup() {
-        let delivered = pending_request("timed-delivery", "timed-delivery-key");
-        let (registration, displaced) = register_pending(&delivered, vec![":1.1".into()]).unwrap();
-        assert!(displaced.is_none());
-        let sender = std::thread::spawn(|| {
-            std::thread::sleep(Duration::from_millis(20));
-            remove_pending("timed-delivery")
-                .expect("timed request remains registered")
-                .send(SecretResponse {
-                    password: Some("secret".to_string()),
-                    values: HashMap::new(),
-                    save: true,
-                    cancelled: false,
-                })
-                .unwrap();
-        });
-        let started = Instant::now();
-        let response = registration
-            .recv_timeout(Duration::from_millis(250))
-            .unwrap();
-        sender.join().unwrap();
-        assert!(started.elapsed() >= Duration::from_millis(20));
-        assert_eq!(response.password.as_deref(), Some("secret"));
-        assert!(response.save);
-        drop(registration);
 
         let timed_out = pending_request("timed-out", "timed-out-key");
         let (registration, displaced) = register_pending(&timed_out, vec![":1.1".into()]).unwrap();
@@ -1409,42 +1373,6 @@ mod tests {
         drop(registration);
         assert!(remove_pending("timed-out").is_none());
     }
-    #[test]
-    fn secret_response_applies_only_requested_named_values() {
-        let request = PendingSecretRequest {
-            cancelled: Default::default(),
-            nm_owner: None,
-            id: "named-values".to_string(),
-            key: "named-values-key".to_string(),
-            connection_path: "/test/connection".to_string(),
-            setting_name: "802-1x".to_string(),
-            hints: Vec::new(),
-            secret_keys: vec!["password".to_string(), "pin".to_string()],
-            flags: 0,
-        };
-        let mut connection = ConnectionSettings::new();
-        let response = SecretResponse {
-            password: None,
-            values: HashMap::from([
-                ("password".to_string(), "secret".to_string()),
-                ("pin".to_string(), "1234".to_string()),
-                ("not-requested".to_string(), "ignored".to_string()),
-            ]),
-            save: false,
-            cancelled: false,
-        };
-
-        assert!(
-            apply_secret_response(&mut connection, &request, response)
-                .unwrap()
-                .is_none()
-        );
-        let values = &connection["802-1x"];
-        assert_eq!(value_string(&values["password"]).as_deref(), Some("secret"));
-        assert_eq!(value_string(&values["pin"]).as_deref(), Some("1234"));
-        assert!(!values.contains_key("not-requested"));
-    }
-
     fn pending_request(id: &str, key: &str) -> PendingSecretRequest {
         PendingSecretRequest {
             cancelled: Default::default(),

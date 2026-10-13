@@ -386,7 +386,7 @@ mod tests {
     use crate::cache::CacheRead;
 
     #[test]
-    fn read_distinguishes_missing_corrupt_and_available() {
+    fn reads_distinguish_cache_states_and_reject_symlinks() {
         let directory = TestDirectory::new("read-states");
         let repository = Repository {
             root: directory.path.clone(),
@@ -412,29 +412,16 @@ mod tests {
                 .unwrap(),
             CacheRead::Available(_)
         ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn read_rejects_symlinked_cache_files() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TestDirectory::new("symlink-read");
-        fs::create_dir_all(&directory.path).unwrap();
-        fs::write(directory.path.join("target.json"), "{\"ok\":true}").unwrap();
-        symlink(
-            directory.path.join("target.json"),
-            directory.path.join("value.json"),
-        )
-        .unwrap();
-
-        assert!(
-            Repository {
-                root: directory.path.clone()
-            }
-            .read_json::<serde_json::Value>("value.json")
-            .is_err()
-        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(repository.path("value.json"), repository.path("link.json"))
+                .unwrap();
+            assert!(
+                repository
+                    .read_json::<serde_json::Value>("link.json")
+                    .is_err()
+            );
+        }
     }
 
     #[test]

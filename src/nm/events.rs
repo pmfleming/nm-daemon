@@ -260,34 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_loss_clears_both_health_caches_and_wakes_waiters() {
-        let events = NetworkEvents::default();
-        events.notify_health(HealthSignal {
-            owner: ":1.0".into(),
-            subject: HealthSubject::Device,
-            path: "/devices/1".into(),
-            state: 120,
-            previous_state: Some(70),
-            reason: 17,
-            observed_at: Instant::now(),
-        });
-        let before = events.generation();
-        events.clear_health();
-        assert!(
-            events
-                .latest_health(HealthSubject::Device, "/devices/1")
-                .is_none()
-        );
-        assert!(
-            events
-                .latest_detailed_health(HealthSubject::Device, "/devices/1")
-                .is_none()
-        );
-        assert_ne!(events.generation(), before);
-    }
-
-    #[test]
-    fn neutral_followup_does_not_erase_recent_detailed_health_reason() {
+    fn detailed_health_survives_neutral_updates_but_not_owner_loss() {
         let events = NetworkEvents::default();
         let signal = |reason| HealthSignal {
             owner: ":1.0".into(),
@@ -315,5 +288,18 @@ mod tests {
                 .reason,
             17
         );
+        let before = events.generation();
+        events.clear_health();
+        assert!(
+            events
+                .latest_health(HealthSubject::Device, "/devices/1")
+                .is_none()
+        );
+        assert!(
+            events
+                .latest_detailed_health(HealthSubject::Device, "/devices/1")
+                .is_none()
+        );
+        assert_ne!(events.generation(), before);
     }
 }

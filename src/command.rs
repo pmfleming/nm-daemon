@@ -484,7 +484,7 @@ pub(crate) mod tests {
     use crate::error::ErrorOperation;
 
     #[test]
-    fn runner_returns_typed_nonzero_exit_with_captured_output() {
+    fn runner_reports_exit_output_deadline_and_pre_spawn_cancellation() {
         let request = CommandRequest::new("sh", ErrorOperation::Status, Duration::from_secs(1))
             .args(["-c", "printf stdout; printf stderr >&2; exit 7"]);
 
@@ -494,10 +494,7 @@ pub(crate) mod tests {
         assert_eq!(failure.exit_code, Some(7));
         assert_eq!(failure.stdout, "stdout");
         assert_eq!(failure.stderr, "stderr");
-    }
 
-    #[test]
-    fn runner_enforces_deadline_and_pre_spawn_cancellation() {
         let timeout = CommandRequest::new("sh", ErrorOperation::Status, Duration::from_millis(20))
             .args(["-c", "while :; do :; done"]);
         let failure = SystemCommandRunner.run(&timeout, None).unwrap_err();

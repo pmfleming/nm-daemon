@@ -163,13 +163,11 @@ pub(crate) fn refresh_payloads(
 }
 
 fn log_typed_refresh_error<T>(result: anyhow::Result<T>) -> Option<T> {
-    match result {
-        Ok(value) => Some(value),
-        Err(error) => {
-            tracing::warn!(error = %crate::error::err_chain(&error), "shared subscription refresh failed");
-            None
-        }
-    }
+    result
+        .inspect_err(|error| {
+            tracing::warn!(error = %crate::error::err_chain(error), "shared subscription refresh failed");
+        })
+        .ok()
 }
 
 fn emit_network_changes(
@@ -345,7 +343,7 @@ mod tests {
     use super::{network_delta, network_entry_changed};
 
     #[test]
-    fn network_delta_reports_added_removed_and_changed_entries() {
+    fn network_deltas_report_content_changes_but_ignore_only_volatile_age_and_snapshot_fields() {
         let previous = json!({
             "networks": [
                 { "key": "removed", "strength": 20 },
@@ -383,9 +381,7 @@ mod tests {
             json!([{ "key": "changed", "strength": 70 }])
         );
         assert_eq!(delta["snapshot"], snapshot);
-    }
-    #[test]
-    fn network_delta_ignores_snapshot_metadata_only_changes() {
+
         let previous = json!({
             "networks": [{
                 "key": "same",

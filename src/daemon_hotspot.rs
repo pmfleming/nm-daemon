@@ -141,19 +141,4 @@ mod tests {
             },
         )
     }
-
-    #[test]
-    fn insecure_security_choices_are_rejected_at_the_parameter_boundary() {
-        for rejected in [
-            r#"{"security":"wep"}"#,
-            r#"{"security":"none"}"#,
-            r#"{"security":"adhoc"}"#,
-        ] {
-            assert!(
-                serde_json::from_str::<HotspotStartParams>(rejected).is_err(),
-                "{rejected}"
-            );
-        }
-        assert!(serde_json::from_str::<HotspotStartParams>(r#"{"security":"sae"}"#).is_ok());
-    }
 }

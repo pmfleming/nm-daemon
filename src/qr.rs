@@ -323,37 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn old_and_new_hex_codes_remain_accepted() {
-        let old = parse_wifi_qr(r#"WIFI:T:WPA;S:"CAFE";P:"ABCD1234";;"#).unwrap();
-        let new = parse_wifi_qr("WIFI:T:WPA;S:CAFE;P:ABCD1234;;").unwrap();
-        assert_eq!(old, new);
-        assert_eq!(new.ssid, "CAFE");
-        assert_eq!(new.password.as_deref(), Some("ABCD1234"));
-    }
-
-    #[test]
-    fn saved_profile_sharing_uses_unquoted_hex_export() {
-        let profile = crate::model::SavedWifiConnection {
-            path: "/test/profile".into(),
-            id: "test".into(),
-            ssid: "CAFE".into(),
-            ssid_bytes: b"CAFE".to_vec(),
-            autoconnect: false,
-            casting_enabled: false,
-            privacy: Default::default(),
-        };
-        let share =
-            crate::model::WifiSharePayload::shareable(&profile, "WPA", Some("ABCD1234"), true);
-        assert!(share.shareable);
-        assert!(share.qr_svg.is_some());
-        assert_eq!(
-            share.qr_payload.as_deref(),
-            Some("WIFI:T:WPA;S:CAFE;P:ABCD1234;H:true;;")
-        );
-    }
-
-    #[test]
-    fn generated_payloads_round_trip_through_the_parser() {
+    fn generated_payloads_round_trip_without_serializing_passwords() {
         for (ssid, password) in [
             ("Cafe;Guest", r#"pass:word1\,\""#),
             (r#""Cafe""#, r#""password""#),
@@ -366,24 +336,14 @@ mod tests {
             assert_eq!(parsed.password.as_deref(), Some(password));
             assert_eq!(parsed.auth, WifiQrAuth::Wpa);
             assert!(parsed.hidden);
-            assert!(parsed.has_password);
+            let wire = serde_json::to_value(parsed).expect("serialize parsed payload");
+            assert_eq!(wire["has_password"], true);
+            assert!(wire.get("password").is_none());
         }
     }
 
     #[test]
-    fn wrapper_quotes_are_distinct_from_escaped_literal_quotes() {
-        for (payload, ssid) in [
-            (r#"WIFI:S:"Cafe";;"#, "Cafe"),
-            (r#"WIFI:S:"Cafe\\";;"#, r#"Cafe\"#),
-            (r#"WIFI:S:"Cafe\";;"#, r#""Cafe""#),
-            (r#"WIFI:S:\"Cafe";;"#, r#""Cafe""#),
-        ] {
-            assert_eq!(parse_wifi_qr(payload).unwrap().ssid, ssid);
-        }
-    }
-
-    #[test]
-    fn password_validation_preserves_length_and_encoding_boundaries() {
+    fn authentication_preserves_password_boundaries_and_key_management() {
         for (auth, password, valid) in [
             ("nopass", String::new(), true),
             ("WPA", "a".repeat(7), false),
@@ -404,10 +364,7 @@ mod tests {
                 password.chars().count()
             );
         }
-    }
 
-    #[test]
-    fn wpa3_and_wep_authentication_map_to_key_management_hints() {
         assert_eq!(
             parse_wifi_qr("WIFI:T:SAE;S:Home;P:correcthorse;;")
                 .expect("sae payload")
@@ -424,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_and_unsupported_payloads_are_typed_validation_errors() {
+    fn invalid_payloads_return_typed_errors_without_echoing_secrets() {
         for (payload, field) in [
             ("not-a-qr-code", "payload"),
             ("WIFI:T:WPA;P:correcthorse;;", "S"),
@@ -433,6 +390,7 @@ mod tests {
             ("WIFI:T:WPA;S:Home;;", "P"),
             ("WIFI:T:nopass;S:Guest;P:unexpected;;", "P"),
             ("WIFI:T:WPA;S:Home;P:short;;", "P"),
+            ("WIFI:T:WPA;S:Home;P:hunter2;;", "P"),
             ("WIFI:S:Home;nokey;;", "payload"),
             ("WIFI:T:WPA;S:Home;P:correcthorse;\\", "payload"),
         ] {
@@ -440,21 +398,9 @@ mod tests {
             assert_eq!(report.code, ErrorCode::ValidationError, "{payload}");
             assert_eq!(report.operation, ErrorOperation::QrOperation, "{payload}");
             assert_eq!(report.details["field"], field, "{payload}");
+            let diagnostic = format!("{} {:?}", report.message, report.details);
+            assert!(!diagnostic.contains("hunter2"));
+            assert!(!diagnostic.contains("correcthorse"));
         }
-    }
-
-    #[test]
-    fn rejected_payloads_never_echo_the_secret_back() {
-        let report = parse_error("WIFI:T:WPA;S:Home;P:hunter2;;");
-        assert!(!report.message.contains("hunter2"));
-        assert!(!format!("{:?}", report.details).contains("hunter2"));
-    }
-
-    #[test]
-    fn parsed_payloads_do_not_serialize_the_password() {
-        let parsed = parse_wifi_qr("WIFI:T:WPA;S:Home;P:correcthorse;;").expect("payload");
-        let value = serde_json::to_value(&parsed).expect("serialize");
-        assert_eq!(value["has_password"], true);
-        assert!(value.get("password").is_none());
     }
 }

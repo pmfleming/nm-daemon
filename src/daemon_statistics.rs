@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn interval_defaults_and_bounds_are_enforced() {
+    fn watch_intervals_are_bounded_and_cancellation_does_not_wait_for_them() {
         assert_eq!(params(None).interval_ms().unwrap(), DEFAULT_INTERVAL_MS);
         assert_eq!(params(Some(500)).interval_ms().unwrap(), 500);
         for rejected in [0, 199, 60_001] {
@@ -230,10 +230,7 @@ mod tests {
             assert_eq!(report.code, ErrorCode::ValidationError);
             assert_eq!(report.operation, ErrorOperation::Statistics);
         }
-    }
 
-    #[test]
-    fn an_already_cancelled_watch_does_not_wait_for_the_interval() {
         let cancellation = AtomicBool::new(true);
         let started = std::time::Instant::now();
         assert!(!sleep_until_cancelled(

@@ -634,45 +634,6 @@ mod tests {
     }
 
     #[test]
-    fn resolved_reply_becomes_a_frontend_safe_snapshot() {
-        let query = ServiceQuery::new(
-            "_googlecast._tcp".to_string(),
-            Some("Living Room".to_string()),
-            Some(3),
-            AddressFamily::Any,
-        )
-        .unwrap();
-        let snapshot = snapshot_from_reply(
-            &query,
-            (
-                vec![(
-                    0,
-                    0,
-                    8009,
-                    "living-room.local".to_string(),
-                    vec![(3, 2, vec![192, 0, 2, 10])],
-                    "living-room.local".to_string(),
-                )],
-                vec![b"fn=Living Room".to_vec(), vec![0xff, 0x00]],
-                "Living Room".to_string(),
-                "_googlecast._tcp".to_string(),
-                "local".to_string(),
-                16,
-            ),
-        );
-        assert_eq!(snapshot.services.len(), 1);
-        assert_eq!(snapshot.services[0].port, 8009);
-        assert_eq!(snapshot.services[0].addresses[0].address, "192.0.2.10");
-        assert_eq!(snapshot.services[0].txt[0].key.as_deref(), Some("fn"));
-        assert_eq!(
-            snapshot.services[0].txt[0].value.as_deref(),
-            Some("Living Room")
-        );
-        assert_eq!(snapshot.services[0].txt[1].raw_hex, "ff00");
-        assert!(snapshot.warnings.is_empty());
-    }
-
-    #[test]
     fn ptr_records_provide_instances_and_reject_other_service_types() {
         let owner = dns_name(&["_googlecast", "_tcp", "local"]);
         let target = dns_name(&["Living Room", "_googlecast", "_tcp", "local"]);

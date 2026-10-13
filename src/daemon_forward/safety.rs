@@ -1,8 +1,11 @@
 //! A failed wait is not evidence that an effect was never dispatched.
-use zbus::names::OwnedUniqueName;
+use anyhow::Result;
+use serde_json::{Value, json};
+use zbus::{blocking::Proxy, names::OwnedUniqueName};
 
-use super::*;
+use super::parse_response;
 use crate::error::{DomainError, ErrorCode, ErrorSource};
+use crate::protocol::{DBUS_INTERFACE, DBUS_OBJECT_PATH, Method, Stream};
 
 pub(super) struct Reply {
     pub body: String,

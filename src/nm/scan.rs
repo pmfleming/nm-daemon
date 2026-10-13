@@ -426,7 +426,7 @@ mod tests {
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport, ErrorSource};
 
     #[test]
-    fn scan_completion_must_be_newer_than_the_request_watermark() {
+    fn scans_require_fresh_completion_and_retry_only_owner_scoped_failures() {
         let token = ScanCompletionToken {
             last_scan_before_request: 100,
             requested_at_boottime_ms: Some(200),
@@ -434,9 +434,7 @@ mod tests {
         assert!(!scan_completed(150, token));
         assert!(scan_completed(200, token));
         assert!(scan_completed(201, token));
-    }
-    #[test]
-    fn a_joiner_retries_only_owner_scoped_failures() {
+
         let report = |code| ErrorReport {
             code,
             operation: ErrorOperation::Scan,

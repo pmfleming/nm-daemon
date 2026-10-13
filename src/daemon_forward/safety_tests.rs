@@ -7,16 +7,17 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use serde_json::json;
+use serde_json::{Value, json};
 use zbus::{
-    blocking::{Connection, connection::Builder},
+    blocking::{Connection, Proxy, connection::Builder},
     message::Header,
     object_server::SignalEmitter,
 };
 
-use super::*;
-use crate::cli::Cli;
+use super::{ForwardOutcome, dispatch_forward, forward_connect, safety};
+use crate::cli::{Cli, Command, WifiCommand};
 use crate::error::{ErrorOperation, ErrorReport};
+use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Method, Stream};
 use crate::test_support::{bus::TestBus, workflows::isolated};
 
 #[derive(Clone, Copy)]
@@ -217,38 +218,11 @@ fn applied_but_unanswered_calls_never_fall_back() -> Result<()> {
                     Method::VpnConnect,
                 ),
             ] {
-                let fixture = Fixture::new(Reply::Stall)?;
-                assert_unknown(
-                    dispatch_forward(&fixture.proxy()?, &command(&args)),
-                    method.as_str(),
-                );
-                assert_eq!(fixture.effects.load(Ordering::SeqCst), 1);
-                assert_eq!(
-                    fixture.owners.lock().unwrap().len(),
-                    1,
-                    "No ID: do not guess a recovery request"
-                );
-            }
-            Ok(())
-        },
-    )
-}
-
-#[test]
-fn disconnect_daemon_errors_and_bad_replies_are_not_unavailability() -> Result<()> {
-    isolated(
-        concat!(
-            module_path!(),
-            "::disconnect_daemon_errors_and_bad_replies_are_not_unavailability"
-        ),
-        || {
-            for reply in [Reply::Disconnect, Reply::ServiceUnknown, Reply::Malformed] {
-                for (args, method) in [
-                    (vec!["wifi", "disconnect"], Method::WifiDisconnect),
-                    (
-                        vec!["wifi", "connect", "Example"],
-                        Method::WifiConnectTarget,
-                    ),
+                for reply in [
+                    Reply::Stall,
+                    Reply::Disconnect,
+                    Reply::ServiceUnknown,
+                    Reply::Malformed,
                 ] {
                     let fixture = Fixture::new(reply)?;
                     assert_unknown(
@@ -256,6 +230,11 @@ fn disconnect_daemon_errors_and_bad_replies_are_not_unavailability() -> Result<(
                         method.as_str(),
                     );
                     assert_eq!(fixture.effects.load(Ordering::SeqCst), 1);
+                    assert_eq!(
+                        fixture.owners.lock().unwrap().len(),
+                        1,
+                        "No ID: do not guess a recovery request"
+                    );
                 }
             }
             Ok(())
@@ -289,7 +268,7 @@ fn absent_service_allows_direct_fallback_without_dispatch() -> Result<()> {
             let ForwardOutcome::DirectConnect(request) = forward_connect(&proxy, request)? else {
                 panic!("missing preserved direct-connect request")
             };
-            assert_eq!(request.target.ssid.as_str(), "Example");
+            assert_eq!(request.candidate.target.ssid.as_str(), "Example");
             assert_eq!(
                 request.password.as_deref(),
                 Some("test-secret-already-read-from-stdin")
@@ -334,15 +313,23 @@ fn known_operation_recovers_with_same_owner_status_read() -> Result<()> {
             "::known_operation_recovers_with_same_owner_status_read"
         ),
         || {
-            let fixture = Fixture::new(Reply::Recoverable)?;
-            assert!(matches!(
-                dispatch_forward(&fixture.proxy()?, &command(&["wifi", "connect", "Example"]))?,
-                ForwardOutcome::Handled
-            ));
-            assert_eq!(fixture.effects.load(Ordering::SeqCst), 1);
-            let owners = fixture.owners.lock().unwrap();
-            assert_eq!(owners.len(), 2);
-            assert_eq!(owners[0], owners[1], "Recovery must not change bus owner");
+            for terminal in ["succeeded", "failed", "cancelled"] {
+                let fixture = Fixture::new(Reply::Recoverable)?;
+                let mut status = terminal_status();
+                status["data"]["result"]["event"]["event"] = json!(terminal);
+                *fixture.status.lock().unwrap() = status.to_string();
+                let result =
+                    dispatch_forward(&fixture.proxy()?, &command(&["wifi", "connect", "Example"]));
+                if terminal == "succeeded" {
+                    assert!(matches!(result?, ForwardOutcome::Handled));
+                } else {
+                    assert!(result.is_err_and(|error| crate::output::is_reported_error(&error)));
+                }
+                assert_eq!(fixture.effects.load(Ordering::SeqCst), 1);
+                let owners = fixture.owners.lock().unwrap();
+                assert_eq!(owners.len(), 2);
+                assert_eq!(owners[0], owners[1], "Recovery must not change bus owner");
+            }
             Ok(())
         },
     )
@@ -386,30 +373,6 @@ fn incomplete_or_foreign_status_keeps_outcome_unknown() -> Result<()> {
                     2,
                     "Only one recovery read is attempted"
                 );
-            }
-            Ok(())
-        },
-    )
-}
-
-#[test]
-fn recovered_failure_is_reported_without_replay() -> Result<()> {
-    isolated(
-        concat!(
-            module_path!(),
-            "::recovered_failure_is_reported_without_replay"
-        ),
-        || {
-            for terminal in ["failed", "cancelled"] {
-                let fixture = Fixture::new(Reply::Recoverable)?;
-                let mut status = terminal_status();
-                status["data"]["result"]["event"]["event"] = json!(terminal);
-                *fixture.status.lock().unwrap() = status.to_string();
-                let result =
-                    dispatch_forward(&fixture.proxy()?, &command(&["wifi", "connect", "Example"]));
-                assert!(result.is_err_and(|error| crate::output::is_reported_error(&error)));
-                assert_eq!(fixture.effects.load(Ordering::SeqCst), 1);
-                assert_eq!(fixture.owners.lock().unwrap().len(), 2);
             }
             Ok(())
         },

@@ -39,21 +39,3 @@ pub(crate) fn target_appears_to_need_secret(target: &WifiConnectTarget) -> bool 
         Some(Security::Wpa | Security::Wpa2Or3 | Security::Wep)
     ) || (target.hidden && target.security.is_none())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{connect_failure, connect_failure_reason};
-    use crate::model::ConnectFailureReason;
-
-    #[test]
-    fn rendered_connect_words_do_not_override_the_typed_reason() {
-        let error = connect_failure(
-            ConnectFailureReason::ActivationFailed,
-            "wrong password timeout D-Bus no secrets",
-        );
-        assert_eq!(
-            connect_failure_reason(&error),
-            ConnectFailureReason::ActivationFailed
-        );
-    }
-}

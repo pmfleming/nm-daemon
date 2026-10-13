@@ -541,7 +541,33 @@ mod tests {
     }
 
     #[test]
-    fn private_ca_directories_are_rejected_and_can_be_explicitly_repaired() {
+    fn security_policy_rejects_unsafe_modes_eap_and_ca_settings_and_allows_explicit_repair() {
+        assert!(validate_mode("infrastructure").is_ok());
+        assert!(validate_mode("ap").is_ok());
+        assert!(validate_mode("adhoc").is_err());
+        for enterprise in [
+            ProfileEnterpriseUpdate {
+                eap: Some(vec!["tls".into(), "not-a-method".into()]),
+                ..Default::default()
+            },
+            ProfileEnterpriseUpdate {
+                ca_cert: Some("/etc/ssl/ca.pem".into()),
+                ..Default::default()
+            },
+        ] {
+            let error = apply_advanced(
+                &mut settings(),
+                &WifiProfileAdvancedUpdate {
+                    enterprise: Some(enterprise),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
+                ErrorCode::ValidationError
+            );
+        }
         for (nm_key, api_key) in [("ca-path", "ca_path"), ("phase2-ca-path", "phase2_ca_path")] {
             let mut original = settings();
             original.insert(
@@ -592,7 +618,8 @@ mod tests {
     }
 
     #[test]
-    fn version_ignores_insertion_order_and_only_volatile_connection_fields() -> anyhow::Result<()> {
+    fn version_ignores_order_and_volatile_fields_but_rejects_stale_edits_as_conflicts()
+    -> anyhow::Result<()> {
         let mut original = settings();
         original.insert(
             "ipv4".into(),
@@ -602,6 +629,8 @@ mod tests {
             ]),
         );
         let token = profile_version(&original);
+        assert!(check_expected_version(&original, None).is_ok());
+        assert!(check_expected_version(&original, Some(&token)).is_ok());
         let mut reordered = ConnectionSettings::new();
         for (key, values) in &original {
             reordered.insert(
@@ -628,21 +657,14 @@ mod tests {
             .entry("connection".into())
             .or_default()
             .insert("id".into(), owned_value("Changed".to_string())?);
-        assert!(check_expected_version(&reordered, Some(&token)).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn a_stale_expected_version_is_a_typed_conflict() {
-        let settings = settings();
-        let current = profile_version(&settings);
-        assert!(check_expected_version(&settings, None).is_ok());
-        assert!(check_expected_version(&settings, Some(&current)).is_ok());
-
-        let error = check_expected_version(&settings, Some("0000000000000000")).unwrap_err();
+        let error = check_expected_version(&reordered, Some(&token)).unwrap_err();
         let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
         assert_eq!(report.code, ErrorCode::Conflict);
-        assert_eq!(report.details["current_version"], current);
+        assert_eq!(
+            report.details["current_version"],
+            profile_version(&reordered)
+        );
+        Ok(())
     }
 
     #[test]
@@ -696,35 +718,5 @@ mod tests {
         assert!(!wireless.contains_key("bssid"));
         assert!(!wireless.contains_key("band"));
         assert!(!wireless.contains_key("channel"));
-    }
-    #[test]
-    fn rejects_insecure_modes_unknown_eap_methods_and_unsupported_certificate_uris() {
-        assert!(validate_mode("infrastructure").is_ok());
-        assert!(validate_mode("ap").is_ok());
-        assert!(validate_mode("adhoc").is_err());
-
-        for enterprise in [
-            ProfileEnterpriseUpdate {
-                eap: Some(vec!["tls".into(), "not-a-method".into()]),
-                ..Default::default()
-            },
-            ProfileEnterpriseUpdate {
-                ca_cert: Some("/etc/ssl/ca.pem".into()),
-                ..Default::default()
-            },
-        ] {
-            let error = apply_advanced(
-                &mut settings(),
-                &WifiProfileAdvancedUpdate {
-                    enterprise: Some(enterprise),
-                    ..Default::default()
-                },
-            )
-            .unwrap_err();
-            assert_eq!(
-                ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
-                ErrorCode::ValidationError
-            );
-        }
     }
 }

@@ -11,7 +11,9 @@ use serde::Serialize;
 use zvariant::OwnedObjectPath;
 
 use super::inventory::{active_connection_state_name, device_state_name};
-use super::{ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, HealthSignal, HealthSubject, Nm};
+use super::{
+    ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, HealthSignal, HealthSubject, Nm, nonempty_string,
+};
 use crate::model::reason::ReasonCategory;
 use crate::model::{
     TypedReason, active_connection_state_reason, device_state_reason, vpn_state_name,
@@ -137,10 +139,7 @@ impl Nm {
         let Ok(device) = self.proxy(path, DEVICE_IFACE) else {
             return;
         };
-        event.device_iface = device
-            .get_property::<String>("Interface")
-            .ok()
-            .filter(|iface| !iface.is_empty());
+        event.device_iface = nonempty_string(&device, "Interface");
         event.device_type = device.get_property::<u32>("DeviceType").ok();
         let active = device
             .get_property::<OwnedObjectPath>("ActiveConnection")
@@ -157,18 +156,9 @@ impl Nm {
         let Ok(active) = self.proxy(path, ACTIVE_CONNECTION_IFACE) else {
             return;
         };
-        event.id = active
-            .get_property::<String>("Id")
-            .ok()
-            .filter(|id| !id.is_empty());
-        event.uuid = active
-            .get_property::<String>("Uuid")
-            .ok()
-            .filter(|uuid| !uuid.is_empty());
-        event.connection_type = active
-            .get_property::<String>("Type")
-            .ok()
-            .filter(|value| !value.is_empty());
+        event.id = nonempty_string(&active, "Id");
+        event.uuid = nonempty_string(&active, "Uuid");
+        event.connection_type = nonempty_string(&active, "Type");
         let profile = active
             .get_property::<OwnedObjectPath>("Connection")
             .ok()
@@ -372,7 +362,6 @@ mod tests {
         HEALTH_FAILURE_CORRELATION_WINDOW, HealthTransitionKind, classify_transition, describe,
         recent_detailed_device_failure,
     };
-    use crate::model::reason::ReasonCategory;
     use crate::nm::{HealthSignal, HealthSubject};
 
     fn signal(subject: HealthSubject, state: u32, reason: u32) -> HealthSignal {
@@ -406,22 +395,6 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn each_subject_uses_its_own_state_and_reason_vocabulary() {
-        let (state, previous, reason) = describe(&signal(HealthSubject::Device, 120, 7));
-        assert_eq!(state, "failed");
-        assert_eq!(previous, Some("ip-config"));
-        assert_eq!(reason.name, "no-secrets");
-        assert_eq!(reason.category, ReasonCategory::Authentication);
-
-        let (state, _, reason) = describe(&signal(HealthSubject::ActiveConnection, 4, 2));
-        assert_eq!(state, "deactivated");
-        assert_eq!(reason.name, "user-disconnected");
-
-        let (state, _, reason) = describe(&signal(HealthSubject::Vpn, 6, 9));
-        assert_eq!(state, "failed");
-        assert_eq!(reason.name, "no-secrets");
-    }
     #[test]
     fn observed_traces_distinguish_success_sleep_and_actionable_failures() {
         use HealthSubject::{ActiveConnection, Device, Vpn};
@@ -470,6 +443,10 @@ mod tests {
                 .unzip();
             assert_eq!(classify_trace(&signals), expected, "{name}");
         }
+        let (state, _, reason) = describe(&signal(HealthSubject::Device, 9_999, 9_999));
+        assert_eq!(state, "unknown");
+        assert_eq!(reason.name, "unknown");
+        assert_eq!(reason.code, 9_999);
     }
 
     #[test]
@@ -485,12 +462,5 @@ mod tests {
         let generic = signal(HealthSubject::Device, 120, 1);
         assert!(!recent_detailed_device_failure(Some(&generic)));
         assert!(!recent_detailed_device_failure(None));
-    }
-    #[test]
-    fn unmapped_codes_stay_typed_instead_of_being_dropped() {
-        let (state, _, reason) = describe(&signal(HealthSubject::Device, 9_999, 9_999));
-        assert_eq!(state, "unknown");
-        assert_eq!(reason.name, "unknown");
-        assert_eq!(reason.code, 9_999);
     }
 }

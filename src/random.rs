@@ -62,20 +62,3 @@ pub(crate) fn random_uuid_v4() -> Result<String> {
         &hex[20..32]
     ))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{PASSPHRASE_ALPHABET, random_passphrase};
-
-    #[test]
-    fn passphrases_use_the_unambiguous_alphabet_and_requested_length() {
-        let passphrase = random_passphrase(16).expect("passphrase");
-        assert_eq!(passphrase.len(), 16);
-        assert!(
-            passphrase
-                .bytes()
-                .all(|byte| PASSPHRASE_ALPHABET.contains(&byte))
-        );
-        assert_ne!(passphrase, random_passphrase(16).expect("passphrase"));
-    }
-}

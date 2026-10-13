@@ -264,8 +264,8 @@ mod tests {
         json!({"status":"finished", "stream":"wifi.connect", "event":{"event":"succeeded", "result":{"suggest_open_portal":true, "connectivity":status}}})
     }
     #[test]
-    fn automatic_uses_authoritative_connect_proof_and_current_network() {
-        let status = status();
+    fn automatic_proof_and_episode_identity_follow_the_current_network_not_its_label() {
+        let mut status = status();
         let p = params(Mode::Automatic);
         assert!(validate(&p, ":1.4", &status, &proof(&status), 100).is_ok());
         assert!(validate(&p, ":1.4", &status, &Value::Null, 100).is_err());
@@ -275,10 +275,7 @@ mod tests {
         let mut full = status.clone();
         full.captive_portal = false;
         assert!(validate(&p, ":1.4", &full, &proof(&status), 100).is_err());
-    }
-    #[test]
-    fn reconnects_and_nm_restarts_change_episode_but_names_do_not() {
-        let mut status = status();
+
         let first = episode(":1.4", &status).unwrap();
         status.primary_connection.as_mut().unwrap().id = "Renamed".into();
         assert_eq!(first, episode(":1.4", &status).unwrap());

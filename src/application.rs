@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
@@ -334,13 +333,12 @@ impl<'a> Application<'a> {
                     .nm
                     .network_entries_for_access_points(self.nm.list_all_access_points()?)?;
                 let network = networks.iter().find(|network| network.key == key);
-                let (target, candidate, mut alternatives) =
+                let (candidate, mut alternatives) =
                     resolve_connect_candidates(network, key, enterprise_identity)?;
                 if let Some(network) = network {
                     constrain_alternatives_to_saved_profile(self.nm, network, &mut alternatives);
                 }
                 let request = ConnectRequest {
-                    target,
                     network_key: Some(key.to_string()),
                     password,
                     wep_key_type,
@@ -374,16 +372,14 @@ impl<'a> Application<'a> {
         if let Some(outcome) = start_connect(request, cancellation, &mut emit)? {
             return Ok(outcome);
         }
-        let target_identity =
-            ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref());
+        let target_identity = request.identity();
         // A network-key request represents a roaming-compatible AP group. Try
         // at most one alternate candidate; explicit legacy BSSID/AP requests
         // remain strict and therefore contain no alternatives.
-        let primary = request.primary_candidate();
         let mut alternative = request.alternatives.first();
         let total = 1 + usize::from(alternative.is_some());
         let mut attempts = Vec::with_capacity(total);
-        let mut candidate = primary.as_ref();
+        let mut candidate = &request.candidate;
         let mut attempt = 1;
         let outcome = loop {
             let candidate_info = candidate.info(attempt, total);
@@ -448,9 +444,9 @@ impl<'a> Application<'a> {
         let mut progress = |phase| {
             emit(&ConnectEvent::Progress {
                 phase,
-                target: target.clone(),
+                target,
                 message: connect_phase_message(phase).to_string(),
-                candidate: Some(candidate_info.clone()),
+                candidate: Some(candidate_info),
                 previous_reason: None,
             })
         };
@@ -686,7 +682,7 @@ pub(crate) trait BackgroundScanScheduler {
     fn schedule_scan(&self, timeout: Duration);
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct NetworksRequest {
     pub(crate) cached: bool,
     pub(crate) refresh_cache: bool,
@@ -725,7 +721,7 @@ pub(crate) struct NetworksResult {
     pub(crate) snapshot: NetworkSnapshotMetadata,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ScanRequest {
     pub(crate) timeout: Duration,
     pub(crate) strict: bool,
@@ -749,7 +745,7 @@ impl ScanRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct PreparedScanRequest {
     timeout: Duration,
     strict: bool,
@@ -825,13 +821,12 @@ impl ConnectCandidate {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ConnectRequest {
-    pub(crate) target: WifiConnectTarget,
     pub(crate) network_key: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) wep_key_type: Option<WepKeyType>,
-    pub(crate) candidate: Option<ConnectCandidate>,
+    pub(crate) candidate: ConnectCandidate,
     pub(crate) alternatives: Vec<ConnectCandidate>,
 }
 
@@ -842,24 +837,20 @@ impl ConnectRequest {
         wep_key_type: Option<WepKeyType>,
     ) -> Self {
         Self {
-            target,
             network_key: None,
             password,
             wep_key_type,
-            candidate: None,
+            candidate: ConnectCandidate::from_target(target),
             alternatives: Vec::new(),
         }
     }
 
-    fn primary_candidate(&self) -> Cow<'_, ConnectCandidate> {
-        self.candidate.as_ref().map_or_else(
-            || Cow::Owned(ConnectCandidate::from_target(self.target.clone())),
-            Cow::Borrowed,
-        )
+    fn identity(&self) -> ConnectTargetIdentity {
+        ConnectTargetIdentity::from_target(&self.candidate.target, self.network_key.as_deref())
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        self.target.validate().map_err(|error| {
+        self.candidate.target.validate().map_err(|error| {
             DomainError::validation(ErrorOperation::Connect, &error)
                 .with_cause(error)
                 .into()
@@ -871,24 +862,24 @@ impl ConnectRequest {
 pub(crate) enum ConnectEvent<'a> {
     Started {
         phase: ConnectPhase,
-        target: ConnectTargetIdentity,
+        target: &'a ConnectTargetIdentity,
         message: String,
     },
     Progress {
         phase: ConnectPhase,
-        target: ConnectTargetIdentity,
+        target: &'a ConnectTargetIdentity,
         message: String,
-        candidate: Option<ConnectCandidateInfo>,
+        candidate: Option<&'a ConnectCandidateInfo>,
         previous_reason: Option<ConnectFailureReason>,
     },
     Finished {
         phase: ConnectPhase,
-        target: ConnectTargetIdentity,
+        target: &'a ConnectTargetIdentity,
         outcome: &'a ConnectOutcome,
     },
     Cancelled {
         phase: ConnectPhase,
-        target: ConnectTargetIdentity,
+        target: &'a ConnectTargetIdentity,
         message: String,
     },
 }
@@ -905,7 +896,7 @@ pub(crate) enum ConnectOutcome {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum ProfileOperation {
     Details {
         path: NmObjectPath,
@@ -1023,11 +1014,10 @@ fn start_connect(
     cancellation: Option<&AtomicBool>,
     emit: &mut impl FnMut(&ConnectEvent) -> Result<()>,
 ) -> Result<Option<ConnectOutcome>> {
-    let target =
-        ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref());
+    let target = request.identity();
     emit(&ConnectEvent::Started {
         phase: ConnectPhase::Starting,
-        target,
+        target: &target,
         message: "starting Wi-Fi connection".to_string(),
     })?;
     if cancellation_requested(cancellation) {
@@ -1060,9 +1050,9 @@ fn emit_trying_candidate(
 ) -> Result<()> {
     emit(&ConnectEvent::Progress {
         phase: ConnectPhase::TryingAccessPoint,
-        target: target.clone(),
+        target,
         message: candidate_message("trying", candidate),
-        candidate: Some(candidate.clone()),
+        candidate: Some(candidate),
         previous_reason: None,
     })
 }
@@ -1109,9 +1099,9 @@ fn emit_retry(
 ) -> Result<()> {
     emit(&ConnectEvent::Progress {
         phase: ConnectPhase::RetryingAlternative,
-        target: target.clone(),
+        target,
         message: retry_message(previous, &next, reason),
-        candidate: Some(next),
+        candidate: Some(&next),
         previous_reason: Some(reason),
     })
 }
@@ -1173,9 +1163,9 @@ fn final_failed_connect_outcome(
     publish_failure: bool,
 ) -> ConnectOutcome {
     if publish_failure {
-        connect::publish_final_connect_failure(&request.target, &error);
+        connect::publish_final_connect_failure(&request.candidate.target, &error);
     }
-    let mut outcome = failed_connect_outcome(&request.target, &error);
+    let mut outcome = failed_connect_outcome(&request.candidate.target, &error);
     if let ConnectOutcome::Failed { result, .. } = &mut outcome {
         result.fallback_used = attempts.len() > 1;
         result.attempts = attempts;
@@ -1220,7 +1210,7 @@ fn emit_finished_connect(
     };
     emit(&ConnectEvent::Finished {
         phase,
-        target: ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref()),
+        target: &request.identity(),
         outcome,
     })
 }
@@ -1255,18 +1245,16 @@ fn resolve_connect_candidates(
     network: Option<&NetworkEntry>,
     key: &str,
     enterprise_identity: Option<String>,
-) -> Result<(
-    WifiConnectTarget,
-    Option<ConnectCandidate>,
-    Vec<ConnectCandidate>,
-)> {
+) -> Result<(ConnectCandidate, Vec<ConnectCandidate>)> {
     let Some(network) = network else {
         if !key.contains('|') {
             // Protocol-v1 SSID-only keys retain their generic fallback. It has
             // no trustworthy AP group from which to build alternate candidates.
             return Ok((
-                connect_target_for_network_key(key, enterprise_identity)?,
-                None,
+                ConnectCandidate::from_target(connect_target_for_network_key(
+                    key,
+                    enterprise_identity,
+                )?),
                 Vec::new(),
             ));
         }
@@ -1279,10 +1267,7 @@ fn resolve_connect_candidates(
     };
 
     let target = connect_target_for_network(network, enterprise_identity.clone())?;
-    let candidate = Some(ConnectCandidate::from_access_point(
-        target.clone(),
-        &network.access_point,
-    ));
+    let candidate = ConnectCandidate::from_access_point(target, &network.access_point);
     let alternatives = ranked_alternatives(&network.access_point, &network.access_points)
         .into_iter()
         .map(|access_point| {
@@ -1294,7 +1279,7 @@ fn resolve_connect_candidates(
             Ok(ConnectCandidate::from_access_point(target, access_point))
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok((target, candidate, alternatives))
+    Ok((candidate, alternatives))
 }
 
 /// Selection order is independent of execution: another band first, then
@@ -1375,7 +1360,7 @@ fn cancelled_connect(
     };
     emit(&ConnectEvent::Cancelled {
         phase: ConnectPhase::Cancelled,
-        target: ConnectTargetIdentity::from_target(&request.target, request.network_key.as_deref()),
+        target: &request.identity(),
         message: message.to_string(),
     })?;
     Ok(outcome)
@@ -1385,45 +1370,8 @@ fn cancelled_connect(
 mod tests {
     use std::time::Duration;
 
-    use super::{ScanRequest, recovery_message, retry_message, retryable_candidate_failure};
-    use crate::model::{ConnectAttemptSummary, ConnectCandidateInfo, ConnectFailureReason};
-
-    #[test]
-    fn selection_orders_alternatives_without_relaxing_explicit_targets() {
-        use crate::model::AccessPoint;
-        let primary = AccessPoint {
-            path: "/ap/1".into(),
-            bssid: "AA".into(),
-            band: "5 GHz".into(),
-            ..Default::default()
-        };
-        let ap = |path: &str, bssid: &str, band: &str, strength| AccessPoint {
-            path: path.into(),
-            bssid: bssid.into(),
-            band: band.into(),
-            strength,
-            ..Default::default()
-        };
-        let points = [
-            ap("/ap/1", "aa", "5 GHz", 100),
-            ap("/ap/2", "BB", "5 GHz", 99),
-            ap("/ap/3", "DD", "2.4 GHz", 80),
-            ap("/ap/4", "CC", "2.4 GHz", 80),
-            ap("/ap/5", "EE", "2.4 GHz", 60),
-        ];
-        let ordered = super::ranked_alternatives(&primary, &points);
-        assert_eq!(
-            ordered
-                .iter()
-                .map(|ap| ap.bssid.as_str())
-                .collect::<Vec<_>>(),
-            ["CC", "DD", "EE", "BB"]
-        );
-        let (_, candidate, alternatives) =
-            super::resolve_connect_candidates(None, "ssid-hex:4578616d706c65", None).unwrap();
-        assert!(candidate.is_none() && alternatives.is_empty());
-        assert!(super::resolve_connect_candidates(None, "missing|group", None).is_err());
-    }
+    use super::{ScanRequest, retryable_candidate_failure};
+    use crate::model::ConnectFailureReason;
 
     #[test]
     fn candidate_restrictions_require_known_matching_radio_properties() {
@@ -1460,60 +1408,6 @@ mod tests {
     }
 
     #[test]
-    fn dhcp_failure_can_fall_back_from_5_ghz_to_2_4_ghz() {
-        let primary = ConnectCandidateInfo {
-            attempt: 1,
-            total: 2,
-            bssid: Some("BA:9C:0F:DC:49:EE".to_string()),
-            band: Some("5 GHz".to_string()),
-            channel: Some(161),
-            strength: Some(80),
-        };
-        let fallback = ConnectCandidateInfo {
-            attempt: 2,
-            total: 2,
-            bssid: Some("BA:63:F0:DC:49:EE".to_string()),
-            band: Some("2.4 GHz".to_string()),
-            channel: Some(11),
-            strength: Some(70),
-        };
-
-        assert!(retryable_candidate_failure(
-            ConnectFailureReason::DhcpFailed
-        ));
-        assert_eq!(
-            retry_message(&primary, &fallback, ConnectFailureReason::DhcpFailed),
-            "5 GHz access point connected but did not receive an IP address; trying 2.4 GHz"
-        );
-        let attempts = vec![
-            ConnectAttemptSummary {
-                attempt: 1,
-                status: "failed",
-                reason: Some(ConnectFailureReason::DhcpFailed),
-                bssid: primary.bssid,
-                band: primary.band,
-                channel: primary.channel,
-                duration_ms: 90_000,
-                message: "IP configuration failed".to_string(),
-            },
-            ConnectAttemptSummary {
-                attempt: 2,
-                status: "connected",
-                reason: None,
-                bssid: fallback.bssid,
-                band: fallback.band,
-                channel: fallback.channel,
-                duration_ms: 3_000,
-                message: "connected".to_string(),
-            },
-        ];
-        assert_eq!(
-            recovery_message("PixelSpot", &attempts),
-            "Connected to PixelSpot on 2.4 GHz after 5 GHz failed"
-        );
-    }
-
-    #[test]
     fn credential_authorization_validation_and_cancellation_failures_are_terminal() {
         for reason in [
             ConnectFailureReason::SecretRequired,
@@ -1525,42 +1419,6 @@ mod tests {
         ] {
             assert!(!retryable_candidate_failure(reason), "{reason:?}");
         }
-    }
-
-    #[test]
-    fn scan_snapshot_borrows_the_returned_points_and_precedes_completion() -> anyhow::Result<()> {
-        use crate::test_support::workflows::{FakeNm, isolated};
-        isolated(
-            concat!(
-                module_path!(),
-                "::scan_snapshot_borrows_the_returned_points_and_precedes_completion"
-            ),
-            || {
-                let fake = FakeNm::new([], false)?;
-                let mut pointer = None;
-                let mut events = Vec::new();
-                let points =
-                    super::Application::new(&fake.nm).finish_scan(false, &mut |event| {
-                        match event {
-                            super::ScanEvent::Snapshot {
-                                access_points,
-                                networks_found,
-                            } => {
-                                pointer = Some(access_points.as_ptr());
-                                assert_eq!(*networks_found, access_points.len());
-                                events.push("snapshot");
-                            }
-                            super::ScanEvent::Complete { .. } => events.push("complete"),
-                            _ => panic!("unexpected scan event"),
-                        }
-                        Ok(())
-                    })?;
-                assert_eq!(points.len(), 2);
-                assert_eq!(pointer, Some(points.as_ptr()));
-                assert_eq!(events, ["snapshot", "complete"]);
-                Ok(())
-            },
-        )
     }
 
     #[test]

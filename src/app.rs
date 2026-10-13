@@ -155,7 +155,11 @@ fn with_nm<T>(f: impl FnOnce(&Nm) -> Result<T>) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use anyhow::Result;
+    use clap::Parser;
+
+    use super::try_forward;
+    use crate::cli::Cli;
 
     #[test]
     fn explicit_direct_mode_bypasses_forwarding() -> Result<()> {

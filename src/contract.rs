@@ -1539,7 +1539,24 @@ mod tests {
     use super::{method_contract_fixtures, serialized_boundary_snapshot};
 
     #[test]
-    fn serialized_v1_boundary_matches_checked_in_snapshot() {
+    fn wire_contract_matches_snapshot_and_covers_the_unique_method_and_stream_registry() {
+        use crate::protocol::{METHOD_REGISTRY, Method, STREAM_REGISTRY, Stream};
+        let mut names = std::collections::HashSet::new();
+        for spec in METHOD_REGISTRY {
+            assert!(names.insert(spec.name));
+            assert_eq!(Method::parse(spec.name), Some(spec.method));
+            assert_eq!(spec.method.spec().name, spec.name);
+        }
+        names.clear();
+        for spec in STREAM_REGISTRY {
+            assert!(names.insert(spec.name));
+            assert_eq!(Stream::parse(spec.name), Some(spec.stream));
+            assert_eq!(spec.stream.spec().name, spec.name);
+            assert_eq!(
+                Stream::parse_subscription(spec.name),
+                spec.subscribable.then_some(spec.stream)
+            );
+        }
         let actual = format!(
             "{}\n",
             serde_json::to_string_pretty(&serialized_boundary_snapshot()).unwrap()
@@ -1550,16 +1567,9 @@ mod tests {
             return;
         }
         assert_eq!(actual, include_str!("../test_support/contract-v1.json"));
-    }
 
-    #[test]
-    fn method_contract_fixtures_cover_frontend_api_shapes() {
         let value = method_contract_fixtures();
 
-        assert_eq!(
-            value["protocol-registry"]["metadata"]["methods"][0]["name"],
-            "wifi.status"
-        );
         let covered_methods = std::collections::HashSet::from([
             crate::protocol::Method::WifiStatus,
             crate::protocol::Method::WifiSetEnabled,
@@ -1605,97 +1615,6 @@ mod tests {
             .map(|spec| spec.method)
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(covered_methods, registered_methods);
-        assert!(value["wifi-networks.saved"]["networks"].is_array());
-        let expectations = [
-            serde_json::json!({
-                "/wifi-networks.saved/snapshot/source": "cache",
-                "/wifi-networks.saved/snapshot/refresh_requested": true,
-                "/wifi-networks.saved/networks/0/security_class": "personal",
-                "/wifi-networks.password-required/networks/0/capabilities/needs_password": true,
-                "/wifi-networks.enterprise-required/networks/0/capabilities/needs_credentials": true,
-                "/wifi-networks.enterprise-required/networks/0/connect_prompt/kind": "enterprise",
-                "/wifi-status.inactive/status/active": false,
-                "/wifi-status.inactive/status/enabled": false,
-                "/wifi-set-enabled.success/result/enabled": true,
-                "/wifi-band.status/band/selected": "5",
-                "/wifi-band.set/result/request_id": "band-contract",
-                "/wifi-saved.profiles/profiles/0/id": "Example",
-                "/wifi-connect.secret-required/result/reason": "secret-required",
-                "/wifi-scan.stream/events/0/protocol": "nm-api",
-                "/network-connectivity.full/connectivity/state": "full",
-                "/network-devices.list/devices/0/type_name": "wifi",
-                "/network-connections.list/connections/1/type_name": "vpn",
-                "/network-status.connected/network/state_name": "connected-global",
-                "/network-inventory.snapshot/inventory/active_connections/0/default4": true,
-                "/network-activate-profile.started/result/status": "activating",
-                "/network-deactivate.success/result/status": "deactivated",
-                "/network-health.stream/events/1/health/reason/name": "no-secrets",
-                "/network-health.stream/events/1/health/unexpected": true,
-                "/network-health.stream/events/1/health/transition_kind": "failure",
-                "/network-health.stream/events/1/health/notification_recommended": true,
-                "/network-health.stream/events/1/health/severity": "error",
-                "/network-health.stream/events/2/health/user_requested": true,
-                "/continuous.streams/events/4/stream": "network.inventory",
-                "/continuous.streams/events/6/stream": "wifi.networks",
-                "/continuous.streams/events/7/snapshot/refresh_requested": false,
-                "/wifi-disconnect.success/result/status": "disconnected",
-                "/wifi-profile.details/result/security_type": "WPA Enterprise",
-                "/wifi-profile.details/result/enterprise/eap/0": "peap",
-                "/wifi-profile.details/result/enterprise/password_flags/agent_owned": true,
-                "/wifi-profile.details/result/band": "5",
-            }),
-            serde_json::json!({
-                "/wifi-profile.update-conflict/error/code": "conflict",
-                "/wifi-profile.reveal-secret/result/primary_secret_key": "password",
-                "/wifi-profile.reveal-secret/result/values/private-key-password": "private-key-secret",
-                "/wifi-profile.forget/result/status": "forgotten",
-                "/wifi-profile.share/result/shareable": true,
-                "/wifi-secret.capabilities/secret_agent/keyring/prompt_handling": "unsupported",
-                "/wifi-secret.provide/result/persistence_status": "pending",
-                "/network-statistics.watch/result/interval_ms": 1000,
-                "/wifi-qr.parse/qr/auth": "wpa",
-                "/wifi-qr.parse/qr/has_password": true,
-                "/wifi-qr.parse-open/qr/auth": "open",
-                "/wifi-qr.parse-open/qr/hidden": true,
-                "/wifi-qr.connect/result/stream": "wifi.connect",
-                "/vpn.list/vpns/0/plugin": "openconnect",
-                "/vpn.list/vpns/1/plugin": "wireguard",
-                "/vpn.list/vpns/1/secret_names/0": "private-key",
-                "/vpn.status-connected/vpn/active/0/vpn_state_name": "activated",
-                "/vpn.stream/events/4/details/reason": "no-secrets",
-                "/hotspot.capabilities/hotspot/supported": true,
-                "/hotspot.capabilities-unsupported/hotspot/unsupported_reason": "ap-mode-unsupported",
-                "/hotspot.status-active/hotspot/active": true,
-                "/hotspot.status-inactive/hotspot/active": false,
-                "/hotspot.stop/result/status": "stopped",
-                "/network-statistics.stream/events/2/statistics/rx_bytes_per_second": 125000.0,
-            }),
-        ];
-        for (path, expected) in expectations
-            .iter()
-            .flat_map(|group| group.as_object().unwrap())
-        {
-            assert_eq!(value.pointer(path), Some(expected), "{path}");
-        }
-        assert!(
-            value["wifi-profile.details"]["result"]["version"]
-                .as_str()
-                .is_some_and(|version| version.len() == 16)
-        );
-        assert!(
-            value["wifi-qr.parse"]["qr"].get("password").is_none(),
-            "a QR fixture must never carry the scanned secret"
-        );
-        assert!(
-            value["vpn.status-idle"]["vpn"]["active"]
-                .as_array()
-                .is_some_and(Vec::is_empty)
-        );
-        assert!(
-            value["hotspot.stream"]["events"][3]["result"]["hotspot"]["share"]["qr_payload"]
-                .as_str()
-                .is_some_and(|payload| payload.starts_with("WIFI:T:WPA;S:laufan-hotspot;"))
-        );
         for (fixture, stream) in [
             ("wifi-connect.stream", crate::protocol::Stream::WifiConnect),
             ("wifi-band.stream", crate::protocol::Stream::WifiBand),

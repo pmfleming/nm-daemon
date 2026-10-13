@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use zvariant::OwnedObjectPath;
 
-use super::{ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, Nm};
+use super::{ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, Nm, nonempty_string};
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     ActiveConnectionSummary, ConnectivityStatus, NetworkConnectionSummary, NetworkDeactivateResult,
@@ -91,22 +91,17 @@ impl Nm {
             radios: self.radio_status()?,
             connectivity: self
                 .with_portal_context(ConnectivityStatus::from_nm_code(connectivity_code)),
-            connectivity_check_uri: root
-                .get_property::<String>("ConnectivityCheckUri")
-                .ok()
-                .filter(|uri| !uri.is_empty()),
+            connectivity_check_uri: nonempty_string(&root, "ConnectivityCheckUri"),
             connectivity_check_enabled: root
                 .get_property("ConnectivityCheckEnabled")
                 .unwrap_or(false),
-            primary_connection_type: root
-                .get_property::<String>("PrimaryConnectionType")
-                .ok()
-                .filter(|value| !value.is_empty())
-                .or_else(|| {
+            primary_connection_type: nonempty_string(&root, "PrimaryConnectionType").or_else(
+                || {
                     primary_connection
                         .as_ref()
                         .map(|active| active.connection_type.clone())
-                }),
+                },
+            ),
             primary_connection,
             activating_connection: summary_for(object_path_property(&root, "ActivatingConnection")),
             default4: active_connections
@@ -225,7 +220,7 @@ impl Nm {
         Ok(NetworkDeviceSummary {
             path: path.to_string(),
             interface: device.get_property("Interface").unwrap_or_default(),
-            ip_interface: nonempty(device.get_property("IpInterface").ok()),
+            ip_interface: nonempty_string(&device, "IpInterface"),
             device_type,
             type_name: device_type_name(device_type),
             state,
@@ -233,9 +228,9 @@ impl Nm {
             state_reason: device_state_reason(state_reason.1),
             managed: device.get_property("Managed").unwrap_or(false),
             autoconnect: device.get_property("Autoconnect").unwrap_or(false),
-            driver: nonempty(device.get_property("Driver").ok()),
-            firmware_version: nonempty(device.get_property("FirmwareVersion").ok()),
-            hw_address: nonempty(device.get_property("HwAddress").ok()),
+            driver: nonempty_string(&device, "Driver"),
+            firmware_version: nonempty_string(&device, "FirmwareVersion"),
+            hw_address: nonempty_string(&device, "HwAddress"),
             mtu: device.get_property("Mtu").ok().filter(|mtu| *mtu > 0),
             carrier: self.device_carrier(path, device_type),
             speed_mbps: self.device_speed_mbps(path, device_type),
@@ -449,10 +444,6 @@ fn object_path_list_property(proxy: &zbus::blocking::Proxy<'_>, name: &str) -> V
         .filter(|path| path.as_str() != "/")
         .map(|path| path.to_string())
         .collect()
-}
-
-fn nonempty(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.is_empty())
 }
 
 /// NetworkManager exposes carrier/speed on the type-specific device interface.

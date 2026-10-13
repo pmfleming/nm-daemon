@@ -275,34 +275,14 @@ mod tests {
     use crate::generated::SCAN_REQUEST_INTERVAL;
 
     #[test]
-    fn one_caller_owns_the_scan_and_the_rest_join_it() {
-        let scheduler = ScanScheduler::default();
-        assert_eq!(
-            scheduler.claim("/devices/1", &[]),
-            ScanTurn::Request { generation: 1 }
-        );
-        assert_eq!(
-            scheduler.claim("/devices/1", &[]),
-            ScanTurn::Join { generation: 1 }
-        );
-        // A different device is scheduled independently.
-        assert_eq!(
-            scheduler.claim("/devices/2", &[]),
-            ScanTurn::Request { generation: 1 }
-        );
-
-        scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
-        assert_eq!(
-            scheduler.claim("/devices/1", &[]),
-            ScanTurn::Request { generation: 2 }
-        );
-    }
-
-    #[test]
     fn targeted_scans_only_join_a_scope_that_covers_their_ssids() {
         let scheduler = ScanScheduler::default();
         let cafe = vec![b"Cafe".to_vec()];
         let cafe_and_office = vec![b"Office".to_vec(), b"Cafe".to_vec()];
+        assert!(matches!(
+            scheduler.claim("/devices/2", &[]),
+            ScanTurn::Request { .. }
+        ));
         assert_eq!(
             scheduler.claim("/devices/1", &cafe_and_office),
             ScanTurn::Request { generation: 1 }

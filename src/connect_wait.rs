@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn informative_activation_failure_survives_later_generic_snapshots() {
+    fn informative_failure_survives_generic_snapshots_and_expires_at_the_grace_deadline() {
         let status = |reason| crate::nm::WifiActivationStatus {
             iface: "wlan0".to_string(),
             device_state: 30,
@@ -412,7 +412,7 @@ mod tests {
             active_connection_path: None,
             active_connection_state: None,
         };
-        let since = Instant::now();
+        let since = Instant::now() - ACTIVATION_FAILURE_GRACE;
         let mut pending = Some(PendingFailure {
             since,
             status: status(super::NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE),
@@ -425,22 +425,9 @@ mod tests {
             super::NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE
         );
         assert_eq!(pending.since, since);
-    }
-
-    #[test]
-    fn terminal_failure_grace_sets_the_next_wake_instead_of_waiting_to_timeout() {
         let wait = ActivationWait {
             saw_progress: true,
-            pending_failure: Some(super::PendingFailure {
-                since: Instant::now() - ACTIVATION_FAILURE_GRACE,
-                status: crate::nm::WifiActivationStatus {
-                    iface: "wlan0".to_string(),
-                    device_state: 30,
-                    device_state_reason: (30, 0),
-                    active_connection_path: None,
-                    active_connection_state: None,
-                },
-            }),
+            pending_failure: Some(pending),
             last_status: None,
         };
         assert_eq!(

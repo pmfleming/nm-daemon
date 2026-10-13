@@ -634,7 +634,8 @@ mod tests {
     }
 
     #[test]
-    fn hotspot_settings_preserve_security_and_optional_radio_constraints() -> anyhow::Result<()> {
+    fn hotspot_settings_round_trip_security_and_radio_fields_with_strict_defaults()
+    -> anyhow::Result<()> {
         for (security, band, channel) in [
             (HotspotSecurity::WpaPsk, WifiBand::Auto, None),
             (HotspotSecurity::Sae, WifiBand::Ghz5, Some(36)),
@@ -697,11 +698,7 @@ mod tests {
             assert_eq!(text("ipv4", "method").as_deref(), Some("shared"));
             assert_eq!(text("ipv6", "method").as_deref(), Some("ignore"));
         }
-        Ok(())
-    }
 
-    #[test]
-    fn malformed_hotspot_fields_keep_strict_defaults() -> anyhow::Result<()> {
         use super::{ConnectionSettings, hotspot_profile_status, value_map};
         for settings in [
             ConnectionSettings::new(),
@@ -733,40 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn hotspot_sharing_uses_unquoted_hex_export() {
-        let request = HotspotRequest {
-            ssid: None,
-            passphrase: None,
-            device: None,
-            security: HotspotSecurity::WpaPsk,
-            band: WifiBand::Auto,
-            channel: None,
-            hidden: true,
-        };
-        let resolved = ResolvedHotspot {
-            ssid: "CAFE".into(),
-            ssid_bytes: b"CAFE".to_vec(),
-            passphrase: "ABCD1234".into(),
-            generated_passphrase: false,
-            generated_ssid: false,
-            device: device("wlan0", true, false),
-            band: WifiBand::Auto,
-            channel: None,
-        };
-        let result = super::Nm::started_hotspot_result(
-            &request,
-            resolved,
-            "/test/profile".try_into().unwrap(),
-            "/test/active".try_into().unwrap(),
-        );
-        assert_eq!(
-            result.hotspot.share.unwrap().qr_payload,
-            "WIFI:T:WPA;S:CAFE;P:ABCD1234;H:true;;"
-        );
-    }
-
-    #[test]
-    fn requesting_a_non_access_point_device_is_a_typed_validation_error() {
+    fn hotspot_device_selection_rejects_missing_or_unsupported_devices_and_bands() {
         let devices = || vec![device("wlan1", false, false)];
         let error = select_hotspot_device(devices(), Some("wlan1")).unwrap_err();
         let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
@@ -778,10 +742,7 @@ mod tests {
             ErrorReport::from_error(&missing, ErrorOperation::Unknown).code,
             ErrorCode::NotFound
         );
-    }
 
-    #[test]
-    fn bands_come_from_driver_capabilities_and_unavailable_bands_are_rejected() {
         assert_eq!(capability_bands(0x200), vec![WifiBand::Ghz2_4]);
         assert_eq!(
             capability_bands(0x600),

@@ -258,10 +258,7 @@ impl Nm {
             return (None, None);
         };
         let state = proxy.get_property::<u32>("VpnState").ok();
-        let banner = proxy
-            .get_property::<String>("Banner")
-            .ok()
-            .filter(|banner| !banner.is_empty());
+        let banner = super::nonempty_string(&proxy, "Banner");
         (state, banner)
     }
 
@@ -497,16 +494,13 @@ mod tests {
     }
 
     #[test]
-    fn connection_completes_on_plugin_state_and_falls_back_to_active_state() {
+    fn plugin_and_active_states_distinguish_success_failure_and_requested_disconnect() {
         assert!(vpn_is_connected(&status(Some(5), 1, 1)));
         assert!(!vpn_is_connected(&status(Some(3), 1, 1)));
         // WireGuard has no plugin state.
         assert!(vpn_is_connected(&status(None, 2, 1)));
         assert!(!vpn_is_connected(&status(None, 1, 1)));
-    }
 
-    #[test]
-    fn terminal_vpn_states_map_to_typed_failure_codes() {
         // NM_VPN_CONNECTION_STATE_REASON_NO_SECRETS
         let missing_secrets = vpn_failure(&status(Some(6), 1, 9)).expect("failure");
         let report = ErrorReport::from_error(&missing_secrets, ErrorOperation::Unknown);

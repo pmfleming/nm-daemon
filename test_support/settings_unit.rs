@@ -4,102 +4,76 @@ use super::{
 };
 use crate::model::{TargetIpAddress, TargetIpSettings, WifiProfileUpdate};
 use crate::nm::ip_settings::replace as replace_ip_settings;
+use crate::variant::{owned_value, setting, value_map};
 use std::collections::{BTreeMap, HashMap};
-use zvariant::{OwnedValue, Value};
 
 #[test]
-fn profile_matching_requires_both_band_and_channel_and_handles_unknown_frequency() {
-    for (band, channel, frequency, expected) in [
-        (Some("a"), 36, 5180, true),
-        (Some("a"), 36, 5200, false),
-        (Some("a"), 0, 2412, false),
-        (Some("a"), 0, 0, false),
-        (None, 1, 0, false),
-        (None, 0, 0, true),
-        (Some("6GHz"), 1, 5955, true),
+fn profile_matching_obeys_identity_and_radio_restrictions_in_both_paths() -> anyhow::Result<()> {
+    for (band, channel, frequency, ssid, bssid, expected) in [
+        (Some("a"), 36, 5180, "Example", "00:11:22:33:44:FF", true),
+        (Some("a"), 36, 5200, "Example", "00:11:22:33:44:FF", false),
+        (Some("a"), 0, 2412, "Example", "00:11:22:33:44:FF", false),
+        (Some("a"), 0, 0, "Example", "00:11:22:33:44:FF", false),
+        (None, 1, 0, "Example", "00:11:22:33:44:FF", false),
+        (None, 0, 0, "Example", "00-11-22-33-44-ff", true),
+        (Some("6GHz"), 1, 5955, "Example", "00:11:22:33:44:FF", true),
+        (None, 0, 0, "example", "00:11:22:33:44:FF", false),
+        (None, 0, 0, "Example", "00:11:22:33:44:55", false),
+        (None, 0, 0, "Example", "invalid", false),
     ] {
-        let mut settings = wifi_settings("Example", "802-11-wireless");
+        let mut settings = wifi_settings("Example", "802-11-wireless")?;
         let wireless = settings.get_mut("802-11-wireless").unwrap();
         if let Some(band) = band {
-            wireless.insert(
-                "band".into(),
-                crate::nm::owned_value(band.to_string()).unwrap(),
-            );
+            wireless.insert("band".into(), owned_value(band)?);
         }
+        wireless.insert("channel".into(), owned_value(channel as u32)?);
         wireless.insert(
-            "channel".into(),
-            crate::nm::owned_value(channel as u32).unwrap(),
+            "bssid".into(),
+            owned_value(vec![0_u8, 17, 34, 51, 68, 255])?,
         );
         let ap = crate::model::AccessPoint {
-            ssid: "Example".into(),
+            ssid: ssid.into(),
+            bssid: bssid.into(),
             frequency,
             ..Default::default()
         };
-        assert_eq!(super::settings_match_access_point(&settings, &ap), expected);
-        let path = zvariant::OwnedObjectPath::try_from("/settings/1").unwrap();
+        let path = zvariant::OwnedObjectPath::try_from("/settings/1")?;
         let candidate =
             super::saved_wifi_profile_candidate_from_settings(&path, &settings).unwrap();
+        assert_eq!(
+            super::settings_match_access_point(&settings, &ap),
+            expected,
+            "{band:?}/{channel}/{frequency}/{ssid}/{bssid}"
+        );
         assert_eq!(
             candidate.matcher.matches_access_point(&ap),
             expected,
             "inventory and activation must agree"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn cached_and_direct_profile_matching_share_exact_ssid_and_bssid_rules() {
-    let mut settings = wifi_settings("Example", "802-11-wireless");
-    settings.get_mut("802-11-wireless").unwrap().insert(
-        "bssid".into(),
-        crate::nm::owned_value(vec![0_u8, 17, 34, 51, 68, 255]).unwrap(),
-    );
-    let path = zvariant::OwnedObjectPath::try_from("/settings/1").unwrap();
-    let candidate = super::saved_wifi_profile_candidate_from_settings(&path, &settings).unwrap();
-    for (ssid, bssid, expected) in [
-        ("Example", "00:11:22:33:44:FF", true),
-        ("Example", "00-11-22-33-44-ff", true),
-        ("example", "00:11:22:33:44:FF", false),
-        ("Example", "00:11:22:33:44:55", false),
-        ("Example", "invalid", false),
-    ] {
-        let ap = crate::model::AccessPoint {
-            ssid: ssid.into(),
-            bssid: bssid.into(),
-            ..Default::default()
-        };
-        assert_eq!(super::settings_match_access_point(&settings, &ap), expected);
-        assert_eq!(candidate.matcher.matches_access_point(&ap), expected);
-    }
-}
-
-#[test]
-fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets() {
-    let mut settings = wifi_settings("Example", "802-11-wireless");
+fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets()
+-> anyhow::Result<()> {
+    let mut settings = wifi_settings("Example", "802-11-wireless")?;
     settings.insert(
-        "802-11-wireless-security".to_string(),
-        HashMap::from([
-            (
-                "key-mgmt".to_string(),
-                owned_value(Value::new("wpa-psk".to_string())),
-            ),
-            ("psk-flags".to_string(), owned_value(Value::new(1_u32))),
-        ]),
+        "802-11-wireless-security".into(),
+        value_map([("key-mgmt", "wpa-psk".into()), ("psk-flags", 1_u32.into())])?,
     );
     assert!(wifi_settings_need_secret_agent(&settings, None, None));
-
     settings
         .get_mut("802-11-wireless-security")
-        .expect("security settings")
-        .insert("psk-flags".to_string(), owned_value(Value::new(4_u32)));
+        .unwrap()
+        .insert("psk-flags".into(), owned_value(4_u32)?);
     assert!(!wifi_settings_need_secret_agent(&settings, None, None));
-
     settings
         .get_mut("802-11-wireless-security")
-        .expect("security settings")
+        .unwrap()
         .remove("psk-flags");
-    let mut secrets = ConnectionSettings::new();
-    secrets.insert("802-11-wireless-security".to_string(), HashMap::new());
+    let mut secrets =
+        ConnectionSettings::from([("802-11-wireless-security".into(), HashMap::new())]);
     assert!(wifi_settings_need_secret_agent(
         &settings,
         Some(&secrets),
@@ -107,32 +81,29 @@ fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets()
     ));
     secrets
         .get_mut("802-11-wireless-security")
-        .expect("secret settings")
-        .insert(
-            "psk".to_string(),
-            owned_value(Value::new("correct horse battery staple".to_string())),
-        );
+        .unwrap()
+        .insert("psk".into(), owned_value("correct horse battery staple")?);
     assert!(!wifi_settings_need_secret_agent(
         &settings,
         Some(&secrets),
         None
     ));
+    Ok(())
 }
 
 #[test]
-fn ip_profile_defaults_and_family_specific_fields_are_preserved() -> anyhow::Result<()> {
+fn ip_profiles_preserve_defaults_signed_values_and_family_boundaries() -> anyhow::Result<()> {
     let mut settings = ConnectionSettings::new();
     let defaults = profile_ip_settings(&settings, "ipv4");
     assert_eq!(defaults.method, "auto");
-    assert!(defaults.may_fail);
-    assert!(!defaults.ignore_auto_routes);
+    assert!(defaults.may_fail && !defaults.ignore_auto_routes);
     for family in ["ipv4", "ipv6"] {
         settings.insert(
             family.into(),
-            crate::variant::value_map([
+            value_map([
                 ("dhcp-client-id", "client".into()),
-                ("dad-timeout", 42_u32.into()),
-                ("ip6-privacy", (-1_i64).into()),
+                ("dad-timeout", (-1_i32).into()),
+                ("ip6-privacy", (-1_i32).into()),
                 ("route-metric", 99_u32.into()),
                 ("may-fail", false.into()),
             ])?,
@@ -142,11 +113,39 @@ fn ip_profile_defaults_and_family_specific_fields_are_preserved() -> anyhow::Res
             parsed.dhcp_client_id.as_deref(),
             (family == "ipv4").then_some("client")
         );
-        assert_eq!(parsed.dad_timeout, (family == "ipv4").then_some(42));
+        assert_eq!(parsed.dad_timeout, (family == "ipv4").then_some(-1));
         assert_eq!(parsed.ip6_privacy, (family == "ipv6").then_some(-1));
         assert_eq!(parsed.route_metric, Some(99));
         assert!(!parsed.may_fail);
     }
+    let ipv4 = TargetIpSettings {
+        method: Some("manual".into()),
+        addresses: vec![TargetIpAddress {
+            address: "192.0.2.20".into(),
+            prefix: 24,
+        }],
+        gateway: Some("192.0.2.1".into()),
+        dns: vec!["1.1.1.1".into()],
+        ignore_auto_dns: Some(true),
+        ..Default::default()
+    };
+    let mut update = WifiProfileUpdate {
+        mac_address_policy: "stable".into(),
+        metered: "no".into(),
+        ipv4: ipv4.clone(),
+        ..Default::default()
+    };
+    validate_profile_update(&update)?;
+    replace_ip_settings(&mut settings, "ipv4", &ipv4)?;
+    let parsed = profile_ip_settings(&settings, "ipv4");
+    assert_eq!(parsed.method, "manual");
+    assert_eq!(parsed.addresses[0].address, "192.0.2.20");
+    assert_eq!(parsed.addresses[0].prefix, 24);
+    assert_eq!(parsed.gateway.as_deref(), Some("192.0.2.1"));
+    assert_eq!(parsed.dns, ["1.1.1.1"]);
+    assert!(parsed.ignore_auto_dns);
+    update.ipv4.dns = vec!["2001:db8::53".into()];
+    assert!(validate_profile_update(&update).is_err());
     Ok(())
 }
 
@@ -154,24 +153,21 @@ fn ip_profile_defaults_and_family_specific_fields_are_preserved() -> anyhow::Res
 fn profile_snapshot_decoding_preserves_defaults_empty_values_and_radio_restrictions()
 -> anyhow::Result<()> {
     let path = zvariant::OwnedObjectPath::try_from("/settings/1")?;
-    let mut settings = wifi_settings("Example", "802-11-wireless");
+    let mut settings = wifi_settings("Example", "802-11-wireless")?;
     let defaults = super::wifi_profile_details(&path, &settings)?;
     assert_eq!(defaults.mode, "infrastructure");
     assert_eq!(
         (defaults.mtu, defaults.channel, defaults.bssid),
         (None, None, None)
     );
-    settings
-        .get_mut("connection")
-        .unwrap()
-        .extend(crate::variant::value_map([
-            ("autoconnect-priority", (-42_i32).into()),
-            ("zone", "".into()),
-        ])?);
+    settings.get_mut("connection").unwrap().extend(value_map([
+        ("autoconnect-priority", (-42_i32).into()),
+        ("zone", "".into()),
+    ])?);
     settings
         .get_mut("802-11-wireless")
         .unwrap()
-        .extend(crate::variant::value_map([
+        .extend(value_map([
             ("mode", "".into()),
             ("mtu", 0_u32.into()),
             ("channel", 36_u32.into()),
@@ -203,233 +199,124 @@ fn profile_snapshot_decoding_preserves_defaults_empty_values_and_radio_restricti
             .as_deref(),
         Some("00:11:22:33:44:55")
     );
-    assert!(super::wifi_profile_details(&path, &wifi_settings("Example", "vpn")).is_err());
+    assert!(super::wifi_profile_details(&path, &wifi_settings("Example", "vpn")?).is_err());
     assert!(super::wifi_profile_details(&path, &ConnectionSettings::new()).is_err());
     Ok(())
 }
 
 #[test]
-fn signed_nm_ip_properties_survive_decoding() -> anyhow::Result<()> {
-    let mut settings = ConnectionSettings::new();
-    for (section, key) in [("ipv4", "dad-timeout"), ("ipv6", "ip6-privacy")] {
+fn profile_secrets_use_the_security_specific_section_key_and_validation() -> anyhow::Result<()> {
+    for (management, section, key, password, foreign_key) in [
+        (
+            "wpa-psk",
+            "802-11-wireless-security",
+            "psk",
+            "new-password",
+            "pin",
+        ),
+        ("wpa-eap", "802-1x", "password", "new-password", "psk"),
+        (
+            "none",
+            "802-11-wireless-security",
+            "wep-key2",
+            "abcde",
+            "pin",
+        ),
+    ] {
+        let mut settings = wifi_settings("Example", "802-11-wireless")?;
         settings.insert(
-            section.into(),
-            crate::variant::value_map([(key, (-1_i32).into())])?,
+            "802-11-wireless-security".into(),
+            value_map([
+                ("key-mgmt", management.into()),
+                ("wep-tx-keyidx", 2_u32.into()),
+                ("wep-key-type", 1_u32.into()),
+            ])?,
         );
+        settings.insert(
+            "802-1x".into(),
+            value_map([("password-flags", 1_u32.into())])?,
+        );
+        let spec = profile_secret_spec(&settings);
+        assert_eq!(spec.setting_name, Some(section));
+        assert_eq!(spec.primary_secret_key, Some(key));
+        let readable = ConnectionSettings::from([(
+            section.into(),
+            value_map([(key, "old-password".into()), ("pin", "1234".into())])?,
+        )]);
+        let values = profile_secret_values(&settings, Some(&readable), &spec);
+        assert_eq!(values.get(key).map(String::as_str), Some("old-password"));
+        let mut update = WifiProfileUpdate {
+            password: Some(password.into()),
+            ..Default::default()
+        };
+        if management == "wpa-eap" {
+            assert_eq!(values.get("pin").map(String::as_str), Some("1234"));
+            assert!(wifi_settings_need_secret_agent(
+                &settings,
+                Some(&readable),
+                None
+            ));
+            update
+                .secrets
+                .insert("private-key-password".into(), "private-secret".into());
+        }
+        update_profile_secrets(&mut settings, &update)?;
+        assert_eq!(
+            setting_text(&settings[section], key).as_deref(),
+            Some(password)
+        );
+        if management == "wpa-eap" {
+            assert_eq!(
+                setting_text(&settings[section], "private-key-password").as_deref(),
+                Some("private-secret")
+            );
+            assert_eq!(
+                setting::<u32>(&settings[section], "private-key-password-flags"),
+                Some(0)
+            );
+        }
+        update.secrets = BTreeMap::from([(foreign_key.into(), "1234".into())]);
+        assert!(update_profile_secrets(&mut settings, &update).is_err());
+        if management == "none" {
+            update.secrets = BTreeMap::from([("wep-key0".into(), "bad".into())]);
+            assert!(update_profile_secrets(&mut settings, &update).is_err());
+            for (index, expected) in [
+                (u32::MAX, "wep-key3"),
+                (0, "wep-key0"),
+                (1, "wep-key1"),
+                (2, "wep-key2"),
+            ] {
+                settings
+                    .get_mut(section)
+                    .unwrap()
+                    .insert("wep-tx-keyidx".into(), owned_value(index)?);
+                assert_eq!(
+                    profile_secret_spec(&settings).primary_secret_key,
+                    Some(expected)
+                );
+            }
+            settings
+                .get_mut(section)
+                .unwrap()
+                .insert("wep-tx-keyidx".into(), owned_value(2_i32)?);
+            assert_eq!(
+                profile_secret_spec(&settings).primary_secret_key,
+                Some("wep-key0")
+            );
+        }
     }
-    assert_eq!(profile_ip_settings(&settings, "ipv4").dad_timeout, Some(-1));
-    assert_eq!(profile_ip_settings(&settings, "ipv6").ip6_privacy, Some(-1));
     Ok(())
 }
 
-#[test]
-fn advanced_profile_ip_settings_round_trip_and_validate_address_families() {
-    let ipv4 = TargetIpSettings {
-        method: Some("manual".to_string()),
-        addresses: vec![TargetIpAddress {
-            address: "192.0.2.20".to_string(),
-            prefix: 24,
-        }],
-        gateway: Some("192.0.2.1".to_string()),
-        dns: vec!["1.1.1.1".to_string()],
-        ignore_auto_dns: Some(true),
-        ..Default::default()
-    };
-    let update = WifiProfileUpdate {
-        autoconnect: true,
-        metered: "no".to_string(),
-        hidden: false,
-        mac_address_policy: "stable".to_string(),
-        send_hostname: true,
-        ipv4: ipv4.clone(),
-        ipv6: TargetIpSettings {
-            method: Some("auto".to_string()),
-            ..Default::default()
-        },
-        password: None,
-        secrets: BTreeMap::new(),
-        expected_version: None,
-        advanced: Default::default(),
-    };
-    validate_profile_update(&update).expect("valid advanced profile");
-
-    let mut settings = ConnectionSettings::new();
-    replace_ip_settings(&mut settings, "ipv4", &ipv4).expect("write IPv4 settings");
-    let parsed = profile_ip_settings(&settings, "ipv4");
-    assert_eq!(parsed.method, "manual");
-    assert_eq!(parsed.addresses[0].address, "192.0.2.20");
-    assert_eq!(parsed.addresses[0].prefix, 24);
-    assert_eq!(parsed.gateway.as_deref(), Some("192.0.2.1"));
-    assert_eq!(parsed.dns, vec!["1.1.1.1"]);
-    assert!(parsed.ignore_auto_dns);
-
-    let invalid = WifiProfileUpdate {
-        ipv4: TargetIpSettings {
-            dns: vec!["2001:db8::53".to_string()],
-            ..ipv4
-        },
-        ..update
-    };
-    assert!(validate_profile_update(&invalid).is_err());
-}
-
-#[test]
-fn enterprise_profile_secrets_use_the_8021x_section_and_support_named_updates() {
-    let mut settings = wifi_settings("Example", "802-11-wireless");
-    settings.insert(
-        "802-11-wireless-security".to_string(),
-        HashMap::from([(
-            "key-mgmt".to_string(),
-            owned_value(Value::new("wpa-eap".to_string())),
-        )]),
-    );
-    settings.insert(
-        "802-1x".to_string(),
-        HashMap::from([("password-flags".to_string(), owned_value(Value::new(1_u32)))]),
-    );
-    let mut readable = ConnectionSettings::new();
-    readable.insert(
-        "802-1x".to_string(),
-        HashMap::from([
-            (
-                "password".to_string(),
-                owned_value(Value::new("old-password".to_string())),
-            ),
-            (
-                "pin".to_string(),
-                owned_value(Value::new("1234".to_string())),
-            ),
-        ]),
-    );
-
-    let spec = profile_secret_spec(&settings);
-    assert_eq!(spec.setting_name, Some("802-1x"));
-    assert_eq!(spec.primary_secret_key, Some("password"));
-    let values = profile_secret_values(&settings, Some(&readable), &spec);
-    assert_eq!(
-        values.get("password").map(String::as_str),
-        Some("old-password")
-    );
-    assert_eq!(values.get("pin").map(String::as_str), Some("1234"));
-    assert!(wifi_settings_need_secret_agent(
-        &settings,
-        Some(&readable),
-        None
-    ));
-
-    let update = WifiProfileUpdate {
-        password: Some("new-password".to_string()),
-        secrets: BTreeMap::from([(
-            "private-key-password".to_string(),
-            "private-secret".to_string(),
-        )]),
-        ..Default::default()
-    };
-    update_profile_secrets(&mut settings, &update).expect("update enterprise secrets");
-    let enterprise = settings.get("802-1x").expect("802.1X section");
-    assert_eq!(
-        setting_text(enterprise, "password").as_deref(),
-        Some("new-password")
-    );
-    assert_eq!(
-        setting_text(enterprise, "private-key-password").as_deref(),
-        Some("private-secret")
-    );
-    assert_eq!(
-        enterprise
-            .get("private-key-password-flags")
-            .and_then(|value| value.try_clone().ok())
-            .and_then(|value| u32::try_from(value).ok()),
-        Some(0)
-    );
-}
-
-#[test]
-fn wep_profile_updates_validate_and_replace_the_active_named_key() {
-    let mut settings = wifi_settings("Example", "802-11-wireless");
-    settings.insert(
-        "802-11-wireless-security".to_string(),
-        HashMap::from([
-            (
-                "key-mgmt".to_string(),
-                owned_value(Value::new("none".to_string())),
-            ),
-            ("wep-tx-keyidx".to_string(), owned_value(Value::new(2_u32))),
-            ("wep-key-type".to_string(), owned_value(Value::new(1_u32))),
-        ]),
-    );
-    assert_eq!(super::wep_secret_key(None), "wep-key0");
-    assert_eq!(super::wep_secret_key(Some(&HashMap::new())), "wep-key0");
-    for (index, key) in [
-        (Value::new(u32::MAX), "wep-key3"),
-        (Value::new(2_i32), "wep-key0"),
-        (Value::new("2"), "wep-key0"),
-        (Value::new(0_u32), "wep-key0"),
-        (Value::new(1_u32), "wep-key1"),
-        (Value::new(2_u32), "wep-key2"),
-    ] {
-        settings
-            .get_mut("802-11-wireless-security")
-            .unwrap()
-            .insert("wep-tx-keyidx".into(), owned_value(index));
-        assert_eq!(profile_secret_spec(&settings).primary_secret_key, Some(key));
-    }
-
-    let update = WifiProfileUpdate {
-        password: Some("abcde".to_string()),
-        ..Default::default()
-    };
-    update_profile_secrets(&mut settings, &update).expect("update active WEP key");
-    assert_eq!(
-        settings
-            .get("802-11-wireless-security")
-            .and_then(|section| setting_text(section, "wep-key2"))
-            .as_deref(),
-        Some("abcde")
-    );
-
-    let invalid = WifiProfileUpdate {
-        secrets: BTreeMap::from([("wep-key0".to_string(), "bad".to_string())]),
-        ..Default::default()
-    };
-    assert!(update_profile_secrets(&mut settings, &invalid).is_err());
-}
-
-#[test]
-fn profile_secret_updates_reject_keys_for_another_security_type() {
-    let mut settings = wifi_settings("Example", "802-11-wireless");
-    settings.insert(
-        "802-11-wireless-security".to_string(),
-        HashMap::from([(
-            "key-mgmt".to_string(),
-            owned_value(Value::new("wpa-psk".to_string())),
-        )]),
-    );
-    let update = WifiProfileUpdate {
-        secrets: BTreeMap::from([("pin".to_string(), "1234".to_string())]),
-        ..Default::default()
-    };
-    assert!(update_profile_secrets(&mut settings, &update).is_err());
-}
-fn wifi_settings(ssid: &str, connection_type: &str) -> ConnectionSettings {
-    let mut settings = ConnectionSettings::new();
-    settings.insert(
-        "connection".to_string(),
-        HashMap::from([(
-            "type".to_string(),
-            owned_value(Value::new(connection_type.to_string())),
-        )]),
-    );
-    settings.insert(
-        "802-11-wireless".to_string(),
-        HashMap::from([(
-            "ssid".to_string(),
-            owned_value(Value::new(ssid.as_bytes().to_vec())),
-        )]),
-    );
-    settings
-}
-
-fn owned_value(value: Value<'_>) -> OwnedValue {
-    OwnedValue::try_from(value).expect("owned value")
+fn wifi_settings(ssid: &str, connection_type: &str) -> anyhow::Result<ConnectionSettings> {
+    Ok(ConnectionSettings::from([
+        (
+            "connection".into(),
+            value_map([("type", connection_type.into())])?,
+        ),
+        (
+            "802-11-wireless".into(),
+            value_map([("ssid", ssid.as_bytes().into())])?,
+        ),
+    ]))
 }

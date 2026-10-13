@@ -113,11 +113,7 @@ impl Nm {
         {
             return Ok(Some(match_));
         }
-        if target
-            .ap_path
-            .as_ref()
-            .map(NmObjectPath::as_str)
-            .is_some_and(|value| !value.is_empty())
+        if target.ap_path.is_some()
             && let Some(match_) =
                 self.visible_access_point_matching(&devices, target, target_ssid.as_ref(), true)?
         {
@@ -305,13 +301,11 @@ fn target_matches_device(target: &WifiConnectTarget, device: &WifiDevice) -> boo
         .device_path
         .as_ref()
         .map(NmObjectPath::as_str)
-        .filter(|value| !value.is_empty())
         .is_none_or(|path| device.path.as_str() == path)
         && target
             .ifname
             .as_ref()
             .map(InterfaceName::as_str)
-            .filter(|value| !value.is_empty())
             .is_none_or(|ifname| device.iface == ifname)
 }
 

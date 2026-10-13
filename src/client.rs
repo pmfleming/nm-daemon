@@ -76,7 +76,7 @@ mod tests {
     use shelllist_daemon_tokio::{CorrelationPolicy, TrackedKind};
 
     #[test]
-    fn correlates_result_and_subscription_envelopes() {
+    fn correlates_responses_and_all_registered_operation_and_subscription_streams() {
         for (data, kind) in [
             (
                 json!({"result": {"request_id": "id"}}),
@@ -90,10 +90,7 @@ mod tests {
             let tracked = NmCorrelation.response_id(&json!({"data": data})).unwrap();
             assert_eq!((tracked.id.as_str(), tracked.kind), ("id", kind));
         }
-    }
 
-    #[test]
-    fn every_operation_and_continuous_stream_is_correlated_with_its_response() {
         for spec in crate::protocol::STREAM_REGISTRY {
             let expected = matches!(
                 spec.delivery,

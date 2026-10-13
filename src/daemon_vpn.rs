@@ -153,6 +153,14 @@ mod tests {
     #[test]
     fn late_cancellation_disconnects_the_vpn_without_deleting_its_profile() -> anyhow::Result<()> {
         use crate::test_support::workflows::{ACTIVE, FakeNm, Outcome, isolated};
+        for rejected in [0, 301] {
+            assert!(
+                connect(&format!(r#"{{"uuid":"u","timeout":{rejected}}}"#))
+                    .split()
+                    .is_err()
+            );
+        }
+        assert!(connect(r#"{"uuid":"u","timeout":300}"#).split().is_ok());
         isolated(
             concat!(
                 module_path!(),
@@ -184,15 +192,5 @@ mod tests {
 
     fn connect(json: &str) -> VpnConnectParams {
         serde_json::from_str(json).expect("connect params")
-    }
-    #[test]
-    fn out_of_range_timeouts_are_rejected_before_activation_starts() {
-        for rejected in [
-            r#"{"uuid":"u","timeout":0}"#,
-            r#"{"uuid":"u","timeout":301}"#,
-        ] {
-            assert!(connect(rejected).split().is_err(), "{rejected}");
-        }
-        assert!(connect(r#"{"uuid":"u","timeout":300}"#).split().is_ok());
     }
 }

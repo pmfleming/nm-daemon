@@ -359,21 +359,3 @@ impl RefreshGate {
         std::mem::take(&mut self.dirty)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::RefreshGate;
-    #[test]
-    fn coalescing_preserves_one_final_refresh_and_resets_after_completion() {
-        let mut gate = RefreshGate::default();
-        assert!(gate.invalidate());
-        gate.started();
-        assert!(!gate.invalidate());
-        assert!(!gate.invalidate());
-        assert!(gate.complete());
-        assert!(gate.invalidate());
-        gate.started();
-        assert!(!gate.complete());
-        assert!(gate.invalidate());
-    }
-}

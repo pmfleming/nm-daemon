@@ -113,20 +113,14 @@ impl Nm {
             .ok()
             .and_then(|devices| devices.into_iter().next())
             .and_then(|device| {
-                self.proxy(device.as_str(), DEVICE_IFACE)
-                    .ok()?
-                    .get_property::<String>("Interface")
-                    .ok()
-            })
-            .filter(|iface| !iface.is_empty());
+                let proxy = self.proxy(device.as_str(), DEVICE_IFACE).ok()?;
+                super::nonempty_string(&proxy, "Interface")
+            });
         Some(PrimaryConnectionIdentity {
             path: path.to_string(),
             id: active.get_property("Id").unwrap_or_default(),
             uuid: active.get_property("Uuid").unwrap_or_default(),
-            type_name: root
-                .get_property::<String>("PrimaryConnectionType")
-                .ok()
-                .filter(|value| !value.is_empty())
+            type_name: super::nonempty_string(root, "PrimaryConnectionType")
                 .or_else(|| Some(connection_type.clone()))
                 .filter(|value| !value.is_empty()),
             connection_type,

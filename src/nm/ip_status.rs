@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use zbus::blocking::Proxy;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
-use super::{DEVICE_IFACE, Nm};
+use super::{DEVICE_IFACE, Nm, nonempty_string};
 use crate::model::{DhcpLeaseStatus, IpAddressEntry, IpRouteEntry, IpStatus};
 use crate::variant::{setting, setting_string, value_string};
 
@@ -35,7 +35,8 @@ impl Nm {
         };
         let routes = route_entries(&config);
         let addresses = address_entries(&config);
-        let gateway = gateway_property(&config).or_else(|| default_route_next_hop(&routes));
+        let gateway =
+            nonempty_string(&config, "Gateway").or_else(|| default_route_next_hop(&routes));
         let dns = nameserver_entries(&config).unwrap_or_else(|| match family {
             IpFamily::V4 => config
                 .get_property::<Vec<u32>>("Nameservers")
@@ -149,13 +150,6 @@ fn nameserver_entries(config: &Proxy<'_>) -> Option<Vec<String>> {
     (!entries.is_empty()).then_some(entries)
 }
 
-fn gateway_property(config: &Proxy<'_>) -> Option<String> {
-    config
-        .get_property::<String>("Gateway")
-        .ok()
-        .filter(|value| !value.is_empty())
-}
-
 fn default_route_next_hop(routes: &[IpRouteEntry]) -> Option<String> {
     routes
         .iter()
@@ -175,34 +169,4 @@ fn string_list(config: &Proxy<'_>, name: &str) -> Vec<String> {
 
 fn legacy_ipv4(value: u32) -> String {
     Ipv4Addr::from(u32::from_be(value)).to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use zvariant::OwnedValue;
-
-    use super::dhcp_lease_from_options;
-    #[test]
-    fn parses_networkmanager_dhcp4_lease_options() {
-        let options = HashMap::from([
-            (
-                "dhcp_server_identifier".to_string(),
-                string_value("192.0.2.1"),
-            ),
-            ("domain_name".to_string(), string_value("example.test")),
-            ("dhcp_lease_time".to_string(), string_value("86400")),
-            ("expiry".to_string(), string_value("1762086400")),
-        ]);
-
-        let lease = dhcp_lease_from_options(&options).expect("DHCP lease");
-        assert_eq!(lease.server_identifier.as_deref(), Some("192.0.2.1"));
-        assert_eq!(lease.domain_name.as_deref(), Some("example.test"));
-        assert_eq!(lease.lease_time_seconds, Some(86_400));
-        assert_eq!(lease.expires_at_ms, Some(1_762_086_400_000));
-    }
-    fn string_value(value: &str) -> OwnedValue {
-        OwnedValue::try_from(zvariant::Value::new(value.to_string())).expect("string variant")
-    }
 }

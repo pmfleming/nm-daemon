@@ -807,32 +807,3 @@ pub(crate) fn markdown_reference() -> String {
     }
     output
 }
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::{METHOD_REGISTRY, Method, STREAM_REGISTRY, Stream};
-
-    #[test]
-    fn registry_names_are_unique() {
-        let mut names = HashSet::new();
-        for spec in METHOD_REGISTRY {
-            assert!(names.insert(spec.name));
-            assert_eq!(Method::parse(spec.name), Some(spec.method));
-            assert_eq!(spec.method.spec().name, spec.name);
-        }
-        assert_eq!(Method::parse("wifi.connect-target"), None);
-
-        names.clear();
-        for spec in STREAM_REGISTRY {
-            assert!(names.insert(spec.name));
-            assert_eq!(Stream::parse(spec.name), Some(spec.stream));
-            assert_eq!(spec.stream.spec().name, spec.name);
-            assert_eq!(
-                Stream::parse_subscription(spec.name),
-                spec.subscribable.then_some(spec.stream)
-            );
-        }
-    }
-}

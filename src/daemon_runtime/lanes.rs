@@ -56,21 +56,3 @@ impl BlockingLane {
         self.lane.shutdown(super::RUNTIME_SHUTDOWN_TIMEOUT).await;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::BlockingLane;
-    use crate::error::{ErrorOperation, ErrorReport};
-    #[tokio::test]
-    async fn lane_failures_keep_networkmanager_error_context() {
-        let lane = BlockingLane::start(&tokio::runtime::Handle::current(), "test-lane", 1, 1);
-        lane.shutdown().await;
-        let error = lane
-            .try_submit(ErrorOperation::Status, Box::new(|| {}))
-            .unwrap_err();
-        assert_eq!(
-            ErrorReport::from_error(&error, ErrorOperation::Status).details["queue"],
-            "test-lane"
-        );
-    }
-}

@@ -136,10 +136,7 @@ mod tests {
                 .unwrap()
                 .contains("elements")
         );
-    }
 
-    #[test]
-    fn interface_names_cannot_inject_rules_or_enable_an_unmanaged_link() {
         for name in ["", "wlan\"0", "a\nb", "wlan0;", "1234567890123456", "é"] {
             assert!(validate_interface(name).is_err(), "{name:?}");
         }

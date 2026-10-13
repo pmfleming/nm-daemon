@@ -326,6 +326,15 @@ impl Nm {
     }
 }
 
+/// Best-effort optional text: missing, malformed, and empty values are absent.
+/// Preserve whitespace; this is not a user-input normalization boundary.
+fn nonempty_string(proxy: &Proxy<'_>, name: &str) -> Option<String> {
+    proxy
+        .get_property::<String>(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
 fn uncached_proxy(
     conn: &Connection,
     destination: &str,

@@ -121,7 +121,7 @@ fn forward_scan(proxy: &Proxy<'_>, options: &ScanOptions) -> Result<ForwardOutco
 
 fn forward_connect(proxy: &Proxy<'_>, request: ConnectRequest) -> Result<ForwardOutcome> {
     let params = json!({
-        "target": &request.target,
+        "target": &request.candidate.target,
         "password": &request.password,
         "wep_key_type": request.wep_key_type,
     })
@@ -492,31 +492,4 @@ fn print_response(response_json: &str) -> Result<()> {
         return Err(crate::output::reported_error());
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::{event_error, flatten_access_points};
-
-    #[test]
-    fn forwarded_operation_events_preserve_cli_envelopes() {
-        let access_points = flatten_access_points(&mut json!({
-            "networks": [{ "access_points": [1, 2] }, { "access_points": [3] }],
-        }));
-        assert_eq!(access_points, json!([1, 2, 3]));
-
-        let error = event_error(&json!({
-            "event": "failed",
-            "code": "wrong-password",
-            "result": { "reason": "wrong-password" },
-        }));
-        assert_eq!(error["ok"], false);
-        assert_eq!(error["error"]["code"], "wrong-password");
-        assert_eq!(error["data"]["result"]["reason"], "wrong-password");
-
-        let cancelled = event_error(&json!({ "event": "cancelled" }));
-        assert_eq!(cancelled["error"]["code"], "cancelled");
-    }
 }

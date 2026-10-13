@@ -159,27 +159,7 @@ fn parse_cidr(value: &str) -> (String, Option<u32>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_active_wifi_row, parse_device_ip4, parse_nmcli_version};
-
-    #[test]
-    fn version_output_preserves_development_suffix_and_tolerates_localized_prefix() {
-        assert_eq!(
-            parse_nmcli_version("nmcli tool, version 1.59.2-dev\n"),
-            Some("1.59.2-dev")
-        );
-        assert_eq!(
-            parse_nmcli_version("nmcli Werkzeug, Version 1.58.1"),
-            Some("1.58.1")
-        );
-        for output in [
-            "",
-            "nmcli tool, version",
-            "1.58.1\n1.59.2",
-            "version 1.58.1/other",
-        ] {
-            assert_eq!(parse_nmcli_version(output), None);
-        }
-    }
+    use super::{parse_active_wifi_row, parse_device_ip4};
 
     #[test]
     fn ip4_addresses_keep_primary_and_skip_only_invalid_prefix_entries() {

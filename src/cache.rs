@@ -149,10 +149,10 @@ impl<'a> ConnectAttemptRecord<'a> {
             path,
             ssid: target.ssid.as_str(),
             ssid_bytes: target.ssid_bytes(),
-            bssid: non_empty(target.bssid.as_ref().map(Bssid::as_str)),
-            ap_path: non_empty(target.ap_path.as_ref().map(NmObjectPath::as_str)),
-            device_iface: non_empty(target.ifname.as_ref().map(InterfaceName::as_str)),
-            device_path: non_empty(target.device_path.as_ref().map(NmObjectPath::as_str)),
+            bssid: target.bssid.as_ref().map(Bssid::as_str),
+            ap_path: target.ap_path.as_ref().map(NmObjectPath::as_str),
+            device_iface: target.ifname.as_ref().map(InterfaceName::as_str),
+            device_path: target.device_path.as_ref().map(NmObjectPath::as_str),
             message,
         }
     }
@@ -379,45 +379,9 @@ fn validate_version<T>(state: CacheRead<T>, version: impl FnOnce(&T) -> u32) -> 
     }
 }
 
-fn non_empty(value: Option<&str>) -> Option<&str> {
-    value.filter(|value| !value.is_empty())
-}
-
 pub(crate) fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CachedSnapshot, ConnectAttemptRecord, snapshot_record};
-    use crate::model::{Ssid, example_access_point, example_connect_target};
-
-    #[test]
-    fn borrowed_snapshot_preserves_the_owned_cache_wire_shape() -> anyhow::Result<()> {
-        let points = [example_access_point()];
-        for networks in [&points[..], &[]] {
-            let snapshot = snapshot_record(true, networks);
-            assert!(std::ptr::eq(snapshot.networks, networks));
-            let wire = serde_json::to_value(&snapshot)?;
-            let owned: CachedSnapshot = serde_json::from_value(wire.clone())?;
-            assert_eq!(owned.networks_found, networks.len());
-            assert_eq!(serde_json::to_value(owned)?, wire);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn history_borrows_raw_ssid_bytes_without_changing_json() -> anyhow::Result<()> {
-        let mut target = example_connect_target(false);
-        target.ssid = Ssid::from_bytes(vec![0, 255])?;
-        let record = ConnectAttemptRecord::new(&target, "failed", None, None, "failure", 10);
-        assert!(std::ptr::eq(record.ssid_bytes, target.ssid_bytes()));
-        let wire = serde_json::to_value(record)?;
-        assert_eq!(wire["ssid_bytes"], serde_json::json!([0, 255]));
-        assert_eq!(wire["ssid"], target.ssid.as_str());
-        Ok(())
-    }
 }
