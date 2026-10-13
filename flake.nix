@@ -16,7 +16,10 @@
       daemonFramework,
     }:
     let
-      systems = [ "x86_64-linux" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
     in
     {
@@ -186,21 +189,19 @@
       devShells = forAllSystems (
         system: pkgs: {
           default = pkgs.mkShell {
-            packages = with pkgs; [
-              cargo
-              cargo-llvm-cov
-              cargo-machete
-              clippy
-              gcc
-              heaptrack
-              just
-              llvmPackages.llvm
-              pkg-config
-              python3
-              rust-analyzer
-              rustc
-              rustfmt
-            ];
+            packages =
+              (daemonFramework.lib.toolchain pkgs).packages
+              ++ (with pkgs; [
+                cargo-llvm-cov
+                cargo-machete
+                gcc
+                heaptrack
+                just
+                llvmPackages.llvm
+                pkg-config
+                python3
+                rust-analyzer
+              ]);
 
             LLVM_COV = "${pkgs.llvmPackages.llvm}/bin/llvm-cov";
             LLVM_PROFDATA = "${pkgs.llvmPackages.llvm}/bin/llvm-profdata";

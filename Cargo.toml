@@ -23,8 +23,8 @@ tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-th
 url = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-zbus = { version = "5", features = ["tokio", "blocking-api"] }
-zvariant = "5"
+zbus = { version = "5.18", features = ["tokio", "blocking-api"] }
+zvariant = "5.13.1"
 
 [dev-dependencies]
-zbus = { version = "5", features = ["tokio", "blocking-api", "bus-impl", "p2p"] }
+zbus = { version = "5.18", features = ["tokio", "blocking-api", "bus-impl", "p2p"] }
