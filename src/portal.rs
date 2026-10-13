@@ -270,7 +270,8 @@ mod tests {
         assert!(validate(&p, ":1.4", &status, &proof(&status), 100).is_ok());
         assert!(validate(&p, ":1.4", &status, &Value::Null, 100).is_err());
         let mut stale = proof(&status);
-        stale["event"]["data"]["result"]["connectivity"]["primary_connection"]["path"] = json!("/active/2");
+        stale["event"]["data"]["result"]["connectivity"]["primary_connection"]["path"] =
+            json!("/active/2");
         assert!(validate(&p, ":1.4", &status, &stale, 100).is_err());
         let mut full = status.clone();
         full.captive_portal = false;

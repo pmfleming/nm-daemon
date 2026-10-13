@@ -342,7 +342,9 @@ fn request_id(response: &Value) -> Result<String> {
 }
 
 fn flatten_access_points(event: &mut Value) -> Value {
-    let networks = event.pointer_mut("/data/networks").and_then(Value::as_array_mut);
+    let networks = event
+        .pointer_mut("/data/networks")
+        .and_then(Value::as_array_mut);
     Value::Array(
         networks
             .into_iter()
@@ -360,7 +362,10 @@ fn event_error(event: &Value) -> Value {
     } else {
         ("internal-error", "operation failed")
     };
-    let details = event.pointer("/error/details").cloned().unwrap_or_else(|| json!({}));
+    let details = event
+        .pointer("/error/details")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let data = event
         .pointer("/data/result")
         .map(|result| json!({ "result": result }))

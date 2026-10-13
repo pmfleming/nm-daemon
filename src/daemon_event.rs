@@ -1,8 +1,8 @@
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
+use shelllist_daemon_core::{ApiError, ApiIdentity, Correlation, wire::Event};
 use zbus::object_server::SignalEmitter;
-use shelllist_daemon_core::{ApiIdentity, ApiError, Correlation, wire::Event};
 
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport, best_effort};
 use crate::output::api_data_value;
@@ -16,12 +16,25 @@ pub(crate) fn event_value(
 ) -> Value {
     let mut error = None;
     if let Some(code) = data.get("code").and_then(Value::as_str) {
-        error = Some(ApiError::new(code, data["message"].as_str().unwrap_or("Operation failed")).with_details(data["details"].clone()));
+        error = Some(
+            ApiError::new(code, data["message"].as_str().unwrap_or("Operation failed"))
+                .with_details(data["details"].clone()),
+        );
     }
     // Correlation is envelope-owned. Domain IDs must not override it.
-    if let Some(object) = data.as_object_mut() { object.remove("request_id"); }
-    let mut envelope = Event::new(ApiIdentity::new(crate::output::API_PROTOCOL, crate::output::API_VERSION), stream.as_str(), event, request_id.map_or(Correlation::None, Correlation::Request), data);
-    if let Some(error) = error { envelope = envelope.with_error(error); }
+    if let Some(object) = data.as_object_mut() {
+        object.remove("request_id");
+    }
+    let mut envelope = Event::new(
+        ApiIdentity::new(crate::output::API_PROTOCOL, crate::output::API_VERSION),
+        stream.as_str(),
+        event,
+        request_id.map_or(Correlation::None, Correlation::Request),
+        data,
+    );
+    if let Some(error) = error {
+        envelope = envelope.with_error(error);
+    }
     envelope.into_value().expect("NM event is JSON")
 }
 
@@ -41,11 +54,19 @@ pub(crate) fn emit_json_event(
     event: &str,
     data: Value,
 ) -> Result<()> {
-    emit_prepared_event(emitter, stream, event_value(stream, request_id, event, data))
+    emit_prepared_event(
+        emitter,
+        stream,
+        event_value(stream, request_id, event, data),
+    )
 }
 
 /// Stored operation results are already envelopes; never wrap them a second time.
-pub(crate) fn emit_prepared_event(emitter: &SignalEmitter<'_>, stream: Stream, value: Value) -> Result<()> {
+pub(crate) fn emit_prepared_event(
+    emitter: &SignalEmitter<'_>,
+    stream: Stream,
+    value: Value,
+) -> Result<()> {
     let event = value["event"].as_str().unwrap_or("");
     if !stream.spec().events.contains(&event) {
         return Err(DomainError::internal(

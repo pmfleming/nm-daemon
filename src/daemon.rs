@@ -82,6 +82,7 @@ fn log_daemon_started() {
 }
 
 struct NmDaemonInterface {
+    boundary: shelllist_daemon_tokio::ServiceBoundary,
     runtime: Arc<DaemonRuntime>,
     requests: Arc<shelllist_daemon_tokio::BlockingLane>,
     controls: Arc<shelllist_daemon_tokio::BlockingLane>,
@@ -90,6 +91,12 @@ struct NmDaemonInterface {
 impl NmDaemonInterface {
     fn new(runtime: Arc<DaemonRuntime>, tokio: &tokio::runtime::Handle) -> Self {
         Self {
+            boundary: shelllist_daemon_tokio::ServiceBoundary::new(
+                shelllist_daemon_core::ApiIdentity::new(
+                    crate::output::API_PROTOCOL,
+                    crate::output::API_VERSION,
+                ),
+            ),
             runtime,
             requests: Arc::new(shelllist_daemon_tokio::BlockingLane::start(
                 tokio,
@@ -110,7 +117,7 @@ impl NmDaemonInterface {
 
 #[zbus::interface(name = "org.laufan.NmDaemon2")]
 impl NmDaemonInterface {
-    /// Dispatches an nm-api v1 method and returns its JSON envelope.
+    /// Dispatches an nm-api v2 method and returns its JSON envelope.
     async fn call(
         &self,
         method: &str,
@@ -118,29 +125,39 @@ impl NmDaemonInterface {
         #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> String {
+        let admitted =
+            match self
+                .boundary
+                .call(header.sender().map(|s| s.as_str()), method, params_json)
+            {
+                Ok(admitted) => admitted,
+                Err(response) => return response,
+            };
         let method = method.to_string();
         let params_json = params_json.to_string();
         let owner = header.sender().map(ToString::to_string);
         let emitter = directed_emitter(&emitter, &header);
         let runtime = Arc::clone(&self.runtime);
-        self.requests
-            .call_async(move || {
-                json_response(dispatch_call(
-                    &method,
-                    &params_json,
-                    owner,
-                    emitter,
-                    &runtime,
-                ))
-            })
-            .await
-            .unwrap_or_else(|error| {
-                json_response(Err(crate::error::DomainError::internal(
-                    ErrorOperation::Unknown,
-                    format!("D-Bus call task failed: {error}"),
-                )
-                .into()))
-            })
+        admitted.encoded(
+            self.requests
+                .call_async(move || {
+                    json_response(dispatch_call(
+                        &method,
+                        &params_json,
+                        owner,
+                        emitter,
+                        &runtime,
+                    ))
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    json_response(Err(crate::error::DomainError::internal(
+                        ErrorOperation::Unknown,
+                        format!("D-Bus call task failed: {error}"),
+                    )
+                    .into()))
+                }),
+        )
     }
 
     /// Subscribe to daemon event streams. Event signals are directed to the subscribing owner.
@@ -150,19 +167,30 @@ impl NmDaemonInterface {
         #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> String {
+        let admitted = match self
+            .boundary
+            .subscribe(header.sender().map(|s| s.as_str()), &streams)
+        {
+            Ok(admitted) => admitted,
+            Err(response) => return response,
+        };
         let owner = header.sender().map(ToString::to_string);
         let emitter = directed_emitter(&emitter, &header);
         let runtime = Arc::clone(&self.runtime);
-        self.requests
-            .call_async(move || json_response(subscribe_streams(streams, owner, emitter, &runtime)))
-            .await
-            .unwrap_or_else(|error| {
-                json_response(Err(crate::error::DomainError::internal(
-                    ErrorOperation::Subscribe,
-                    format!("D-Bus subscription task failed: {error}"),
-                )
-                .into()))
-            })
+        admitted.encoded(
+            self.requests
+                .call_async(move || {
+                    json_response(subscribe_streams(streams, owner, emitter, &runtime))
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    json_response(Err(crate::error::DomainError::internal(
+                        ErrorOperation::Subscribe,
+                        format!("D-Bus subscription task failed: {error}"),
+                    )
+                    .into()))
+                }),
+        )
     }
 
     /// Cancel a daemon request or subscription. In-flight NetworkManager calls may finish later.
@@ -172,6 +200,13 @@ impl NmDaemonInterface {
         #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> String {
+        let admitted = match self
+            .boundary
+            .cancel(header.sender().map(|s| s.as_str()), request_id)
+        {
+            Ok(admitted) => admitted,
+            Err(response) => return response,
+        };
         let request_id = request_id.to_string();
         let owner = header.sender().map(ToString::to_string);
         let emitter = directed_emitter(&emitter, &header);
@@ -207,7 +242,7 @@ impl NmDaemonInterface {
             })
             .await
         {
-            Ok(response) => response.to_string(),
+            Ok(response) => admitted.encode(&response),
             Err(error) => {
                 tracing::warn!(%error, "D-Bus cancellation task failed");
                 shelllist_daemon_core::error(shelllist_daemon_core::ApiIdentity::new(crate::output::API_PROTOCOL, crate::output::API_VERSION), shelllist_daemon_core::ApiError::new("outcome-unknown", "Cancellation acknowledgement unavailable")).to_string()
