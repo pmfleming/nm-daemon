@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
 
-use crate::daemon_event::emit_json_event_nonfatal;
+use crate::daemon_event::emit_subscription_event_nonfatal;
 use crate::daemon_runtime::{DaemonRuntime, next_request_id};
 use crate::error::{DomainError, ErrorOperation, ErrorReport, operation_result};
 use crate::output::{api_data_value, api_error_value_for};
@@ -117,12 +117,12 @@ pub(crate) fn subscribe_streams(
         emitter.clone(),
     )?;
     for stream in &streams {
-        emit_json_event_nonfatal(
+        emit_subscription_event_nonfatal(
             &emitter,
             *stream,
-            Some(&subscription_id),
+            &subscription_id,
             "subscribed",
-            json!({ "subscription_id": subscription_id, "stream": stream }),
+            json!({}),
         );
     }
     Ok(response)
@@ -132,11 +132,7 @@ pub(crate) fn json_response(result: Result<Value>) -> String {
     let value = result.unwrap_or_else(|err| {
         api_error_value_for(&ErrorReport::from_error(&err, ErrorOperation::Unknown))
     });
-    serde_json::to_string(&value).unwrap_or_else(|err| {
-        format!(
-            r#"{{"protocol":"nm-api","version":1,"ok":false,"error":{{"code":"internal-error","message":"serialize D-Bus response JSON: {err}","details":{{}}}},"data":{{}}}}"#
-        )
-    })
+    value.to_string()
 }
 
 fn normalized_streams(streams: Vec<String>) -> Result<Vec<Stream>> {

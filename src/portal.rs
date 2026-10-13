@@ -261,7 +261,7 @@ mod tests {
         }
     }
     fn proof(status: &ConnectivityStatus) -> Value {
-        json!({"status":"finished", "stream":"wifi.connect", "event":{"event":"succeeded", "result":{"suggest_open_portal":true, "connectivity":status}}})
+        json!({"status":"finished", "stream":"wifi.connect", "event":{"event":"succeeded", "data":{"result":{"suggest_open_portal":true, "connectivity":status}}}})
     }
     #[test]
     fn automatic_proof_and_episode_identity_follow_the_current_network_not_its_label() {

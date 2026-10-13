@@ -5,7 +5,7 @@ use serde_json::{Map, Value, json};
 use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, NetworksRequest};
-use crate::daemon_event::emit_json_event_nonfatal;
+use crate::daemon_event::{emit_json_event_nonfatal, emit_subscription_event_nonfatal};
 use crate::nm::Nm;
 use crate::protocol::{Method, Stream};
 
@@ -182,11 +182,10 @@ fn emit_network_changes(
     };
     *last = Some(value.clone());
     payload.insert("initial".to_string(), json!(initial));
-    payload.insert("subscription_id".to_string(), json!(subscription_id));
-    emit_json_event_nonfatal(
+    emit_subscription_event_nonfatal(
         emitter,
         Stream::WifiNetworks,
-        Some(subscription_id),
+        subscription_id,
         "changed",
         Value::Object(payload),
     );
@@ -325,12 +324,11 @@ fn emit_on_change(
     }
     *last = Some(value.clone());
     let mut payload = Map::new();
-    payload.insert("subscription_id".to_string(), json!(subscription_id));
     payload.insert(method.spec().response_key.to_string(), value.clone());
-    emit_json_event_nonfatal(
+    emit_subscription_event_nonfatal(
         emitter,
         stream,
-        Some(subscription_id),
+        subscription_id,
         "changed",
         Value::Object(payload),
     );

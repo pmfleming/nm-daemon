@@ -1,9 +1,7 @@
 use anyhow::Result;
 use serde_json::Value;
 use shelllist_daemon_core::DaemonEndpoint;
-use shelllist_daemon_tokio::{
-    CallFailure, CancelMode, CorrelationPolicy, JsonlClientConfig, run_jsonl_client,
-};
+use shelllist_daemon_tokio::{CorrelationPolicy, JsonlClientConfig, run_jsonl_client};
 
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH};
 
@@ -19,9 +17,10 @@ impl CorrelationPolicy for NmCorrelation {
     }
 
     fn event_id(&self, stream: &str, event: &Value) -> Option<String> {
-        let correlated = needs_correlation(stream)
-            || event.get("event").and_then(Value::as_str) == Some("subscribed");
-        correlated
+        if let Some(subscription) = event.get("subscription_id").and_then(Value::as_str) {
+            return Some(subscription.to_owned());
+        }
+        needs_correlation(stream)
             .then(|| event.get("request_id").and_then(Value::as_str))
             .flatten()
             .map(str::to_owned)
@@ -49,18 +48,11 @@ fn needs_correlation(stream: &str) -> bool {
     })
 }
 
-fn call_failure(method: &str, error: &anyhow::Error) -> CallFailure {
-    tracing::warn!(%method, error = %error, error_chain = %format!("{error:#}"), "client call to daemon failed");
-    CallFailure::Transport(error.to_string())
-}
-
 /// Runs one frontend D-Bus session over atomic newline-delimited JSON messages.
 pub(crate) async fn run() -> Result<()> {
     run_jsonl_client(JsonlClientConfig {
         endpoint: ENDPOINT,
         correlation: NmCorrelation,
-        cancel_mode: CancelMode::Json,
-        call_failure,
         pending_event_limit: 32,
         max_in_flight_requests: 64,
         shutdown_timeout: Some(std::time::Duration::from_secs(5)),

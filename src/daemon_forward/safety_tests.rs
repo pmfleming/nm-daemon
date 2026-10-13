@@ -40,14 +40,14 @@ struct Service {
 
 fn terminal_status() -> Value {
     json!({
-        "protocol": "nm-api", "version": 1, "ok": true,
+        "protocol": "nm-api", "version": 2, "ok": true,
         "data": {"result": {
             "request_id": "connect-example", "status": "finished",
             "stream": Stream::WifiConnect,
             "event": {
-                "protocol": "nm-api", "version": 1,
+                "protocol": "nm-api", "version": 2,
                 "stream": Stream::WifiConnect, "request_id": "connect-example",
-                "event": "succeeded", "result": {"status": "connected"}
+                "event": "succeeded", "data": {"result": {"status": "connected"}}
             }
         }}
     })
@@ -83,12 +83,12 @@ impl Service {
             )),
             Reply::Malformed => Ok("not JSON".into()),
             Reply::Rejected => Ok(json!({
-                "protocol": "nm-api", "version": 1, "ok": false,
+                "protocol": "nm-api", "version": 2, "ok": false,
                 "error": {"code": "validation-error", "message": "Rejected"}
             })
             .to_string()),
             Reply::Success => Ok(json!({
-                "protocol": "nm-api", "version": 1, "ok": true, "data": {"result": {}}
+                "protocol": "nm-api", "version": 2, "ok": true, "data": {"result": {}}
             })
             .to_string()),
             Reply::Recoverable => {
@@ -102,7 +102,7 @@ impl Service {
                     )
                     .await?;
                 Ok(json!({
-                    "protocol": "nm-api", "version": 1, "ok": true,
+                    "protocol": "nm-api", "version": 2, "ok": true,
                     "data": {"result": {"request_id": "connect-example"}}
                 })
                 .to_string())
@@ -352,7 +352,7 @@ fn incomplete_or_foreign_status_keeps_outcome_unknown() -> Result<()> {
                 ("/data/result/stream", json!(Stream::Vpn)),
                 ("/data/result/event/request_id", json!("foreign")),
                 ("/data/result/event/stream", json!(Stream::Vpn)),
-                ("/data/result/event/version", json!(2)),
+                ("/data/result/event/version", json!(1)),
                 ("/data/result/event/event", json!("progress")),
             ] {
                 let mut status = terminal_status();

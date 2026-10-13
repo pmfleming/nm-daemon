@@ -216,12 +216,12 @@ impl NmDaemonInterface {
             .call_async(move || {
                 let outcome = runtime.cancel(&request_id, owner.as_deref());
                 if outcome.subscription {
-                    emit_json_event_nonfatal(
+                    crate::daemon_event::emit_subscription_event_nonfatal(
                         &emitter,
                         Stream::DaemonSubscription,
-                        Some(&request_id),
+                        &request_id,
                         "cancelled",
-                        json!({ "subscription_id": request_id, "found": true }),
+                        json!({ "found": true }),
                     );
                 }
                 if outcome.task || !outcome.found() {
@@ -410,16 +410,30 @@ mod tests {
         .unwrap();
         let runtime = DaemonRuntime::start(nm, tokio_runtime.handle().clone()).unwrap();
 
-        let daemon = TestPeer::new(":1.2", ":1.3");
-        daemon
-            .server
-            .object_server()
-            .at(
+        // Admission requires a broker-authenticated sender, not a nameless P2P caller.
+        let bus = crate::test_support::bus::TestBus::new().unwrap();
+        let _daemon = zbus::blocking::connection::Builder::address(bus.address())
+            .unwrap()
+            .name(crate::protocol::DBUS_BUS_NAME)
+            .unwrap()
+            .serve_at(
                 DBUS_OBJECT_PATH,
                 NmDaemonInterface::new(Arc::clone(&runtime), tokio_runtime.handle()),
             )
+            .unwrap()
+            .build()
             .unwrap();
-        let proxy = Proxy::new(&daemon.client, ":1.2", DBUS_OBJECT_PATH, DBUS_INTERFACE).unwrap();
+        let client = zbus::blocking::connection::Builder::address(bus.address())
+            .unwrap()
+            .build()
+            .unwrap();
+        let proxy = Proxy::new(
+            &client,
+            crate::protocol::DBUS_BUS_NAME,
+            DBUS_OBJECT_PATH,
+            DBUS_INTERFACE,
+        )
+        .unwrap();
 
         let response_json: String = proxy.call("Call", &("network.connectivity", "{}")).unwrap();
         let response: Value = serde_json::from_str(&response_json).unwrap();

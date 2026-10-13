@@ -1058,7 +1058,7 @@ mod tests {
                         let _ = wait.recv_timeout(std::time::Duration::from_secs(5));
                     },
                 )?;
-                let progress = json!({"request_id":id, "event":"progress", "phase":"verifying", "message":"Verifying Wi-Fi activation"});
+                let progress = json!({"request_id":id, "event":"progress", "data":{"phase":"verifying", "message":"Verifying Wi-Fi activation"}});
                 runtime.store_connect_progress(&id, Some("other"), progress.clone());
                 assert!(runtime.request_status(&id, Some("owner"))["event"].is_null());
                 runtime.store_connect_progress(&id, Some("owner"), progress.clone());
@@ -1079,14 +1079,14 @@ mod tests {
                     &id,
                     Some("owner".into()),
                     Stream::WifiConnect,
-                    json!({"request_id":id, "event":"succeeded", "result":{"suggest_open_portal":true}}),
+                    json!({"request_id":id, "event":"succeeded", "data":{"result":{"suggest_open_portal":true}}}),
                 );
                 assert_eq!(
                     terminal["event"], "cancelled",
                     "deadline won the completion race"
                 );
                 assert!(
-                    terminal.get("result").is_none(),
+                    terminal["data"].get("result").is_none(),
                     "cancelled operation cannot authorize a portal"
                 );
                 runtime.expire_connect(&id);
@@ -1112,7 +1112,7 @@ mod tests {
                     &completed,
                     Some("owner".into()),
                     Stream::WifiConnect,
-                    json!({"request_id":completed, "event":"succeeded"}),
+                    json!({"request_id":completed, "event":"succeeded", "data":{}}),
                 );
                 runtime.expire_connect(&completed);
                 assert!(runtime.cancel_task(&completed, Some("owner")).is_none());

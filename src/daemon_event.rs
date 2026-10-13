@@ -38,13 +38,26 @@ pub(crate) fn event_value(
     envelope.into_value().expect("NM event is JSON")
 }
 
-pub(crate) fn event_json(
+pub(crate) fn emit_subscription_event_nonfatal(
+    emitter: &SignalEmitter<'_>,
     stream: Stream,
-    request_id: Option<&str>,
+    subscription_id: &str,
     event: &str,
     data: Value,
-) -> String {
-    event_value(stream, request_id, event, data).to_string()
+) {
+    let value = Event::new(
+        ApiIdentity::new(crate::output::API_PROTOCOL, crate::output::API_VERSION),
+        stream.as_str(),
+        event,
+        Correlation::Subscription(subscription_id),
+        data,
+    )
+    .into_value()
+    .expect("NM subscription event is JSON");
+    best_effort(
+        format!("failed to emit subscription event {stream}.{event}"),
+        || emit_prepared_event(emitter, stream, value),
+    );
 }
 
 pub(crate) fn emit_json_event(

@@ -115,10 +115,10 @@ fn terminal_owner_fence_does_not_depend_on_watcher_delivery() -> Result<()> {
                 &id,
                 None,
                 crate::protocol::Stream::WifiConnect,
-                serde_json::json!({"event":"succeeded", "result":{"portal":true}}),
+                serde_json::json!({"event":"succeeded", "data":{"result":{"portal":true}}}),
             );
             assert_eq!(event["event"], "cancelled");
-            assert!(event.get("result").is_none());
+            assert!(event["data"].get("result").is_none());
             release.send(())?;
             executor.block_on(runtime.shutdown());
             Ok(())
@@ -172,7 +172,7 @@ fn restart_recovers_registration_and_fences_pending_work_and_secrets() -> Result
                         id,
                         Some("frontend".into()),
                         crate::protocol::Stream::WifiConnect,
-                        serde_json::json!({"event":"succeeded", "result":{"portal":true}}),
+                        serde_json::json!({"event":"succeeded", "data":{"result":{"portal":true}}}),
                     );
                     done.send((cancelled.load(Ordering::Acquire), deleted.is_err(), event))
                         .unwrap();
@@ -227,7 +227,7 @@ fn restart_recovers_registration_and_fences_pending_work_and_secrets() -> Result
             let (cancelled, rejected, event) = completed.recv_timeout(Duration::from_secs(5))?;
             assert!(cancelled && rejected);
             assert_eq!(event["event"], "cancelled");
-            assert!(event.get("result").is_none());
+            assert!(event["data"].get("result").is_none());
             assert_eq!(
                 runtime.request_status(&id, Some("frontend"))["event"]["event"],
                 "cancelled"
