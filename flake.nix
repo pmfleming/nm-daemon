@@ -16,10 +16,7 @@
       daemonFramework,
     }:
     let
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-      ];
+      systems = [ "x86_64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
     in
     {
@@ -74,7 +71,7 @@
               description = "NetworkManager JSON/JSONL adapter and user D-Bus daemon";
               mainProgram = "nm-daemon";
               license = pkgs.lib.licenses.mit;
-              platforms = pkgs.lib.platforms.linux;
+              platforms = systems;
             };
           };
         in
@@ -110,7 +107,7 @@
             meta = {
               description = "Compare nm-daemon and nmcli Wi-Fi connection behavior for visible networks";
               mainProgram = "nm-daemon-connect-parity-probe";
-              platforms = pkgs.lib.platforms.linux;
+              platforms = systems;
             };
           };
         }
