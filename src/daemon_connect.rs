@@ -236,14 +236,14 @@ fn emit_connect_event(
                 STREAM,
                 event,
             );
-            let terminal_name = stored["event"].as_str().unwrap_or(name).to_string();
-            // Delivery failure must not overwrite authoritative completion with
-            // an unrelated transport error; operation.status can replay it.
-            emit_json_event_nonfatal(emitter, STREAM, Some(request_id), &terminal_name, stored);
+            // Delivery failure must not overwrite authoritative completion.
+            if let Err(error) = crate::daemon_event::emit_prepared_event(emitter, STREAM, stored) {
+                tracing::warn!(%error, "could not deliver retained terminal event");
+            }
             return Ok(());
         }
         runtime.store_connect_progress(request_id, terminal_owner, event.clone());
-        return emit_json_event(emitter, STREAM, Some(request_id), name, event);
+        return crate::daemon_event::emit_prepared_event(emitter, STREAM, event);
     }
     emit_json_event(emitter, STREAM, Some(request_id), name, data)
 }

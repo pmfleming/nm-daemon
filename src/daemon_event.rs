@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 use zbus::object_server::SignalEmitter;
+use shelllist_daemon_core::{ApiIdentity, ApiError, Correlation, wire::Event};
 
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport, best_effort};
 use crate::output::api_data_value;
@@ -13,18 +14,15 @@ pub(crate) fn event_value(
     event: &str,
     mut data: Value,
 ) -> Value {
-    if let Value::Object(object) = &mut data {
-        object.insert("protocol".to_string(), json!(crate::output::API_PROTOCOL));
-        object.insert("version".to_string(), json!(crate::output::API_VERSION));
-        object.insert("stream".to_string(), json!(stream));
-        object.insert("event".to_string(), json!(event));
-        if let Some(request_id) = request_id {
-            object
-                .entry("request_id".to_string())
-                .or_insert_with(|| json!(request_id));
-        }
+    let mut error = None;
+    if let Some(code) = data.get("code").and_then(Value::as_str) {
+        error = Some(ApiError::new(code, data["message"].as_str().unwrap_or("Operation failed")).with_details(data["details"].clone()));
     }
-    data
+    // Correlation is envelope-owned. Domain IDs must not override it.
+    if let Some(object) = data.as_object_mut() { object.remove("request_id"); }
+    let mut envelope = Event::new(ApiIdentity::new(crate::output::API_PROTOCOL, crate::output::API_VERSION), stream.as_str(), event, request_id.map_or(Correlation::None, Correlation::Request), data);
+    if let Some(error) = error { envelope = envelope.with_error(error); }
+    envelope.into_value().expect("NM event is JSON")
 }
 
 pub(crate) fn event_json(
@@ -43,6 +41,12 @@ pub(crate) fn emit_json_event(
     event: &str,
     data: Value,
 ) -> Result<()> {
+    emit_prepared_event(emitter, stream, event_value(stream, request_id, event, data))
+}
+
+/// Stored operation results are already envelopes; never wrap them a second time.
+pub(crate) fn emit_prepared_event(emitter: &SignalEmitter<'_>, stream: Stream, value: Value) -> Result<()> {
+    let event = value["event"].as_str().unwrap_or("");
     if !stream.spec().events.contains(&event) {
         return Err(DomainError::internal(
             ErrorOperation::EmitEvent,
@@ -52,7 +56,7 @@ pub(crate) fn emit_json_event(
         .with_detail("event", event)
         .into());
     }
-    crate::daemon::emit_event_signal(emitter, stream, event_json(stream, request_id, event, data))
+    crate::daemon::emit_event_signal(emitter, stream, value.to_string())
 }
 
 pub(crate) fn emit_json_event_nonfatal(

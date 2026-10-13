@@ -59,7 +59,7 @@ pub(crate) async fn run() -> Result<()> {
     run_jsonl_client(JsonlClientConfig {
         endpoint: ENDPOINT,
         correlation: NmCorrelation,
-        cancel_mode: CancelMode::Unit,
+        cancel_mode: CancelMode::Json,
         call_failure,
         pending_event_limit: 32,
         max_in_flight_requests: 64,

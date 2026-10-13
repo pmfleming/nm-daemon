@@ -53,7 +53,7 @@ fn terminal_status() -> Value {
     })
 }
 
-#[zbus::interface(name = "org.laufan.NmDaemon1")]
+#[zbus::interface(name = "org.laufan.NmDaemon2")]
 impl Service {
     async fn call(
         &self,

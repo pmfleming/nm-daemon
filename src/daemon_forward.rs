@@ -195,7 +195,7 @@ fn finish_operation_event(event: &Value) -> Result<bool> {
         Some("succeeded") => print_response(
             &crate::output::api_data_value(
                 "result",
-                event.get("result").unwrap_or(&Value::Null),
+                event.pointer("/data/result").unwrap_or(&Value::Null),
                 "serialize forwarded operation response JSON",
             )?
             .to_string(),
@@ -295,7 +295,7 @@ fn handle_scan_event(mut event: Value, access_points: &mut Value, quiet: bool) -
 
 fn log_scan_warning(event: &Value) {
     let message = event
-        .get("message")
+        .pointer("/data/message")
         .and_then(Value::as_str)
         .unwrap_or("unknown scan error");
     eprintln!("warning: scan failed: {message}; showing cached NetworkManager results");
@@ -342,7 +342,7 @@ fn request_id(response: &Value) -> Result<String> {
 }
 
 fn flatten_access_points(event: &mut Value) -> Value {
-    let networks = event.get_mut("networks").and_then(Value::as_array_mut);
+    let networks = event.pointer_mut("/data/networks").and_then(Value::as_array_mut);
     Value::Array(
         networks
             .into_iter()
@@ -360,9 +360,9 @@ fn event_error(event: &Value) -> Value {
     } else {
         ("internal-error", "operation failed")
     };
-    let details = event.get("details").cloned().unwrap_or_else(|| json!({}));
+    let details = event.pointer("/error/details").cloned().unwrap_or_else(|| json!({}));
     let data = event
-        .get("result")
+        .pointer("/data/result")
         .map(|result| json!({ "result": result }))
         .unwrap_or_else(|| json!({}));
     json!({
@@ -370,8 +370,8 @@ fn event_error(event: &Value) -> Value {
         "version": crate::output::API_VERSION,
         "ok": false,
         "error": {
-            "code": event.get("code").and_then(Value::as_str).unwrap_or(fallback_code),
-            "message": event.get("message").and_then(Value::as_str).unwrap_or(fallback_message),
+            "code": event.pointer("/error/code").and_then(Value::as_str).unwrap_or(fallback_code),
+            "message": event.pointer("/data/message").and_then(Value::as_str).unwrap_or(fallback_message),
             "details": details,
         },
         "data": data,

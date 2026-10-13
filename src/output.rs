@@ -12,7 +12,7 @@ use crate::model::{
 };
 
 pub(crate) const API_PROTOCOL: &str = "nm-api";
-pub(crate) const API_VERSION: u32 = 1;
+pub(crate) const API_VERSION: u32 = shelllist_daemon_core::CONTRACT_VERSION;
 const API: ApiIdentity = ApiIdentity::new(API_PROTOCOL, API_VERSION);
 
 #[derive(Debug)]

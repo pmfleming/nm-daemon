@@ -108,7 +108,7 @@ impl NmDaemonInterface {
     }
 }
 
-#[zbus::interface(name = "org.laufan.NmDaemon1")]
+#[zbus::interface(name = "org.laufan.NmDaemon2")]
 impl NmDaemonInterface {
     /// Dispatches an nm-api v1 method and returns its JSON envelope.
     async fn call(
@@ -171,12 +171,12 @@ impl NmDaemonInterface {
         request_id: &str,
         #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
-    ) {
+    ) -> String {
         let request_id = request_id.to_string();
         let owner = header.sender().map(ToString::to_string);
         let emitter = directed_emitter(&emitter, &header);
         let runtime = Arc::clone(&self.runtime);
-        if let Err(error) = self
+        match self
             .controls
             .call_async(move || {
                 let outcome = runtime.cancel(&request_id, owner.as_deref());
@@ -198,10 +198,20 @@ impl NmDaemonInterface {
                         json!({ "request_id": request_id, "found": outcome.task }),
                     );
                 }
+                let api = shelllist_daemon_core::ApiIdentity::new(crate::output::API_PROTOCOL, crate::output::API_VERSION);
+                if outcome.found() {
+                    shelllist_daemon_core::success(api, json!({"cancelled": request_id, "kind": if outcome.subscription {"subscription"} else {"operation"}, "cancellation_requested": true}))
+                } else {
+                    shelllist_daemon_core::error(api, shelllist_daemon_core::ApiError::new("request-not-found", "Request is unknown or belongs to another owner"))
+                }
             })
             .await
         {
-            tracing::warn!(%error, "D-Bus cancellation task failed");
+            Ok(response) => response.to_string(),
+            Err(error) => {
+                tracing::warn!(%error, "D-Bus cancellation task failed");
+                shelllist_daemon_core::error(shelllist_daemon_core::ApiIdentity::new(crate::output::API_PROTOCOL, crate::output::API_VERSION), shelllist_daemon_core::ApiError::new("outcome-unknown", "Cancellation acknowledgement unavailable")).to_string()
+            }
         }
     }
 
@@ -399,7 +409,7 @@ mod tests {
         assert_eq!(subscribed["subscription_id"], subscription_id);
 
         proxy
-            .call::<_, _, ()>("Cancel", &(subscription_id,))
+            .call::<_, _, String>("Cancel", &(subscription_id,))
             .unwrap();
         loop {
             let (stream, event) = next_event(&mut events);

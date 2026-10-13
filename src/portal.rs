@@ -100,7 +100,7 @@ pub(crate) fn validate(
             .primary_connection
             .as_ref()
             .expect("validated primary");
-        let result = &proof["event"]["result"];
+        let result = &proof["event"]["data"]["result"];
         let previous = &result["connectivity"]["primary_connection"];
         if params.fallback
             || !status.captive_portal
@@ -270,7 +270,7 @@ mod tests {
         assert!(validate(&p, ":1.4", &status, &proof(&status), 100).is_ok());
         assert!(validate(&p, ":1.4", &status, &Value::Null, 100).is_err());
         let mut stale = proof(&status);
-        stale["event"]["result"]["connectivity"]["primary_connection"]["path"] = json!("/active/2");
+        stale["event"]["data"]["result"]["connectivity"]["primary_connection"]["path"] = json!("/active/2");
         assert!(validate(&p, ":1.4", &status, &stale, 100).is_err());
         let mut full = status.clone();
         full.captive_portal = false;

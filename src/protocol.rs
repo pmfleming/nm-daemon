@@ -7,7 +7,7 @@ use crate::error::ErrorOperation;
 
 pub(crate) const DBUS_BUS_NAME: &str = "org.laufan.NmDaemon";
 pub(crate) const DBUS_OBJECT_PATH: &str = "/org/laufan/NmDaemon";
-pub(crate) const DBUS_INTERFACE: &str = "org.laufan.NmDaemon1";
+pub(crate) const DBUS_INTERFACE: &str = "org.laufan.NmDaemon2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Method {

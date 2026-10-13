@@ -283,13 +283,13 @@ impl DaemonRuntime {
             && event["event"] == "succeeded"
         {
             event["event"] = serde_json::json!("cancelled");
-            event["phase"] = serde_json::json!("cancelled");
-            event["message"] = serde_json::json!(if task.timed_out {
+            event["data"]["phase"] = serde_json::json!("cancelled");
+            event["data"]["message"] = serde_json::json!(if task.timed_out {
                 "Connection attempt timed out and was cancelled"
             } else {
                 "Connection cancelled"
             });
-            if let Some(object) = event.as_object_mut() {
+            if let Some(object) = event["data"].as_object_mut() {
                 object.remove("result");
             }
         }
