@@ -130,7 +130,7 @@
     "reason": "secret-required",
     "recovery_prompt": {
       "kind": "password",
-      "message": "Saved password failed. Enter a new Wi-Fi password.",
+      "message": "NetworkManager could not obtain credentials. Connect again or explicitly update the saved credentials.",
       "optional_fields": [],
       "required_fields": [
         "password"
@@ -270,7 +270,7 @@
             "reason": "secret-required",
             "recovery_prompt": {
               "kind": "password",
-              "message": "Saved password failed. Enter a new Wi-Fi password.",
+              "message": "NetworkManager could not obtain credentials. Connect again or explicitly update the saved credentials.",
               "optional_fields": [],
               "required_fields": [
                 "password"

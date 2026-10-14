@@ -22,17 +22,6 @@ pub(crate) fn connect_failure_from_error(
     DomainError::connect_from_error(reason, format!("{err:#}"), err).into()
 }
 
-pub(crate) fn should_return_secret_agent_error(
-    password: Option<&str>,
-    err: &anyhow::Error,
-) -> bool {
-    password.is_none()
-        && matches!(
-            connect_failure_reason(err),
-            ConnectFailureReason::PasswordUnavailable | ConnectFailureReason::SecretRequired
-        )
-}
-
 pub(crate) fn target_appears_to_need_secret(target: &WifiConnectTarget) -> bool {
     matches!(
         target.security.as_ref(),

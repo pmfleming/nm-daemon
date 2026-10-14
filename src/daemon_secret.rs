@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use zbus::blocking::Connection;
 use zbus::message::Header;
 
+#[cfg(test)]
+mod activation_tests;
 mod lifecycle;
 mod persistence;
 #[cfg(test)]
@@ -169,12 +171,25 @@ impl SecretAgentInterface {
             .iter()
             .all(|key| secret_may_be_saved(&connection, setting_name, key));
         request.nm_owner = Some(self.authorize(&header).await?);
+        request.activation = crate::activation::find(
+            request.nm_owner.as_deref().unwrap(),
+            &connection,
+            &request.connection_path,
+        );
+        if let Some(activation) = &request.activation {
+            request.deadline = request.deadline.min(activation.credential_deadline());
+        }
+        let _credential_guard = request
+            .activation
+            .as_ref()
+            .map(|scope| scope.track_credentials());
         let runtime = self.runtime.clone();
         // Register before scheduling/performing keyring I/O, not only when a prompt is needed.
         let inflight = InflightRegistration::new(&request, &runtime)?;
         let request_id = request.id.clone();
         let profile_path = request.connection_path.clone();
         let owner = request.nm_owner.clone();
+        let delivery_request = request.clone();
         let (connection, save) = secret_worker(move || {
             let _inflight = inflight;
             let mut save = None;
@@ -189,6 +204,10 @@ impl SecretAgentInterface {
             Ok::<_, SecretAgentError>((connection, save))
         })
         .await?;
+        if let Err(error) = ensure_delivery_live(&delivery_request) {
+            emit_secret_retired(&self.runtime, &delivery_request);
+            return Err(error);
+        }
         Ok(persistence::after_reply(
             connection,
             self.runtime.clone(),
@@ -282,13 +301,13 @@ fn resolve_secret_request(
     stored: impl FnOnce(&PendingSecretRequest, &mut ConnectionSettings) -> zbus::fdo::Result<bool>,
     interact: impl FnOnce(PendingSecretRequest, ConnectionSettings) -> SecretResult<ConnectionSettings>,
 ) -> SecretResult<ConnectionSettings> {
-    ensure_request_owner(&request)?;
+    ensure_delivery_live(&request)?;
     // A fresh request must not reuse a password NetworkManager already rejected.
     if request.flags & REQUEST_NEW != 0 {
         session::clear(Some(&request.connection_path));
     }
     let complete = request.flags & REQUEST_NEW == 0 && stored(&request, &mut connection)?;
-    ensure_request_owner(&request)?;
+    ensure_delivery_live(&request)?;
     if complete {
         return Ok(connection);
     }
@@ -371,43 +390,103 @@ fn wait_for_secret_response(
         .upgrade()
         .map(|runtime| runtime.subscriber_owners(Stream::WifiSecret))
         .unwrap_or_default();
+    ensure_delivery_live(&request)?;
+    if let Some(activation) = &request.activation {
+        activation.note_frontend_availability(!owners.is_empty());
+    }
     if owners.is_empty() {
         return Err(SecretAgentError::NoSecrets(
             "no frontend is subscribed to secret requests".into(),
         ));
     }
-    let (registration, displaced_request_id) = register_pending(&request, owners)?;
+    let (registration, displaced_request_id) =
+        register_pending(&request, owners).or_else(|error| {
+            ensure_delivery_live(&request)?;
+            Err(error)
+        })?;
     if let Some(displaced_request_id) = displaced_request_id {
         emit_secret_cancelled(runtime, &displaced_request_id);
     }
     // Publication and NM cancellation share the registry lock: a cancelled lookup
     // cannot publish a prompt, nor can "requested" be queued after "cancelled".
     with_pending_registry(|registry| {
-        if !registry.requests.contains_key(&request.id) || request.cancelled.load(Ordering::Acquire)
-        {
+        if !registry.requests.contains_key(&request.id) || !request.live() {
             return Err(SecretAgentError::UserCanceled(
                 "secret request cancelled before prompting".into(),
             ));
         }
         emit_secret_requested(runtime, &request);
         Ok(())
+    })
+    .or_else(|error| {
+        ensure_delivery_live(&request)?;
+        Err(error)
     })?;
 
-    let response = registration.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
-        // Retire before publishing expiry, including a reply racing that event.
+    let response = receive_live_response(&registration, &request).inspect_err(|_| {
         remove_pending(&request.id);
-        // A late submission must not look like a successful credential handoff.
-        emit_secret_event(
-            runtime,
-            &request.id,
-            "cancelled",
-            json!({"request_id": request.id, "reason": "expired"}),
-        );
-        SecretAgentError::NoSecrets(format!("timed out waiting for secret {}", request.id))
+        emit_secret_retired(runtime, &request);
     })?;
-    ensure_request_owner(&request)?;
+    if response.cancelled {
+        request.stop(crate::activation::CredentialStop::Cancelled);
+    }
     *save = apply_secret_response(&mut connection, &request, response)?;
     Ok(connection)
+}
+
+fn emit_secret_retired(runtime: &Weak<DaemonRuntime>, request: &PendingSecretRequest) {
+    emit_secret_event(
+        runtime,
+        &request.id,
+        "cancelled",
+        json!({
+            "request_id": request.id,
+            "reason": if Instant::now() >= request.deadline { "expired" } else { "activation-finished" },
+        }),
+    );
+}
+
+fn ensure_delivery_live(request: &PendingSecretRequest) -> SecretResult<()> {
+    ensure_request_owner(request)?;
+    if Instant::now() >= request.deadline {
+        request.stop(crate::activation::CredentialStop::Expired);
+        return Err(SecretAgentError::NoSecrets(
+            "Credential entry deadline expired".into(),
+        ));
+    }
+    if request
+        .activation
+        .as_ref()
+        .is_some_and(|activation| !activation.live())
+    {
+        return Err(SecretAgentError::UserCanceled(
+            "The owning activation ended".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn receive_live_response(
+    registration: &PendingRegistration,
+    request: &PendingSecretRequest,
+) -> SecretResult<SecretResponse> {
+    loop {
+        ensure_delivery_live(request)?;
+        let remaining = request.deadline.saturating_duration_since(Instant::now());
+        match registration.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(response) => {
+                ensure_delivery_live(request)?;
+                return Ok(response);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                ensure_delivery_live(request)?;
+                return Err(SecretAgentError::UserCanceled(
+                    "Credential request retired".into(),
+                ));
+            }
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -510,7 +589,14 @@ fn register_pending(
                 "secret request cancelled during lookup".into(),
             ));
         }
-        Ok(registry.insert(request.id.clone(), request.key.clone(), owners, tx))
+        if !request.live() {
+            return Err(SecretAgentError::NoSecrets(
+                "Credential request no longer belongs to a live activation".into(),
+            ));
+        }
+        let displaced = registry.insert(request.id.clone(), request.key.clone(), owners, tx);
+        registry.requests.get_mut(&request.id).unwrap().request = Some(request.clone());
+        Ok(displaced)
     })?;
     let displaced_request_id = displaced.map(|(request_id, sender)| {
         let _ = sender.send(SecretResponse::cancelled());
@@ -616,7 +702,7 @@ fn emit_secret_requested(runtime: &Weak<DaemonRuntime>, request: &PendingSecretR
             "flag_details": secret_flag_details(request.flags),
             "plugin_defined_secret_names": accepts_plugin_secret_names(&request.setting_name),
             "save_supported": request.save_supported,
-            "timeout_ms": SECRET_TIMEOUT.as_millis(),
+            "timeout_ms": request.deadline.saturating_duration_since(Instant::now()).as_millis(),
         }),
     );
 }
@@ -992,6 +1078,8 @@ fn secret_may_be_saved(connection: &ConnectionSettings, setting: &str, key: &str
 
 #[derive(Clone)]
 struct PendingSecretRequest {
+    deadline: Instant,
+    activation: Option<Arc<crate::activation::State>>,
     save_supported: bool,
     cancelled: Arc<AtomicBool>,
     nm_owner: Option<String>,
@@ -1014,6 +1102,8 @@ impl PendingSecretRequest {
         let connection_path = connection_path.to_string();
         let secret_keys = secret_keys_for(setting_name, &hints);
         Self {
+            deadline: Instant::now() + SECRET_TIMEOUT,
+            activation: None,
             save_supported: true,
             cancelled: Arc::new(AtomicBool::new(false)),
             nm_owner: None,
@@ -1024,6 +1114,20 @@ impl PendingSecretRequest {
             hints,
             secret_keys,
             flags,
+        }
+    }
+
+    fn live(&self) -> bool {
+        !self.cancelled.load(Ordering::Acquire)
+            && Instant::now() < self.deadline
+            && self
+                .activation
+                .as_ref()
+                .is_none_or(|activation| activation.live())
+    }
+    fn stop(&self, reason: crate::activation::CredentialStop) {
+        if let Some(activation) = &self.activation {
+            activation.stop(reason);
         }
     }
 
@@ -1138,6 +1242,7 @@ enum SecretPersistenceOutcome {
 }
 
 struct PendingEntry {
+    request: Option<PendingSecretRequest>,
     key: String,
     owners: HashSet<String>,
     sender: Sender<SecretResponse>,
@@ -1171,6 +1276,7 @@ impl PendingRegistry {
         if let Some(replaced) = self.requests.insert(
             request_id.clone(),
             PendingEntry {
+                request: None,
                 key,
                 owners: owners.into_iter().collect(),
                 sender,
@@ -1195,7 +1301,15 @@ impl PendingRegistry {
             .requests
             .get(request_id)
             .is_some_and(|entry| owner.is_some_and(|owner| entry.owners.contains(owner)));
-        authorized.then(|| self.remove(request_id)).flatten()
+        if !authorized {
+            return None;
+        }
+        let entry = self.requests.remove(request_id)?;
+        entry
+            .request
+            .as_ref()
+            .is_none_or(PendingSecretRequest::live)
+            .then_some(entry.sender)
     }
 
     fn cancel_by_key(&mut self, key: &str) -> Option<(String, Sender<SecretResponse>)> {
@@ -1491,6 +1605,8 @@ mod tests {
 
     fn pending_request(id: &str, key: &str) -> PendingSecretRequest {
         PendingSecretRequest {
+            deadline: Instant::now() + super::SECRET_TIMEOUT,
+            activation: None,
             save_supported: true,
             cancelled: Default::default(),
             nm_owner: None,

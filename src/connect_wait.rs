@@ -28,7 +28,7 @@ pub(crate) fn wait_for_active_target(
     target: &WifiConnectTarget,
     cancellation: Option<&AtomicBool>,
 ) -> Result<()> {
-    wait_for_active_target_path(nm, target, None, cancellation)
+    wait_for_active_target_path(nm, target, None, cancellation, None)
 }
 
 pub(crate) fn wait_for_active_target_path(
@@ -36,6 +36,7 @@ pub(crate) fn wait_for_active_target_path(
     target: &WifiConnectTarget,
     requested_active_path: Option<&OwnedObjectPath>,
     cancellation: Option<&AtomicBool>,
+    scope: Option<&crate::activation::State>,
 ) -> Result<()> {
     tracing::info!(
         ssid = %target.ssid,
@@ -47,29 +48,60 @@ pub(crate) fn wait_for_active_target_path(
         .inspect(|device| {
             tracing::debug!(ssid = %target.ssid, iface = %device.iface, device = %device.path, "cached activation device for signal-assisted wait loop");
         });
-    let deadline = Deadline::from_now(ACTIVATION_TIMEOUT)?;
+    let deadline = scope
+        .map(|scope| Deadline::at(scope.deadline))
+        .unwrap_or(Deadline::from_now(ACTIVATION_TIMEOUT)?);
     let mut wait = ActivationWait::default();
     let mut event_generation = nm.event_generation();
-    while !deadline.expired() {
+    loop {
         check_cancelled_and_abort(nm, target, cancellation)?;
+        if let Some(error) = scope.and_then(|scope| scope.error()) {
+            abort_requested(nm, requested_active_path);
+            return Err(error);
+        }
+        if deadline.expired() {
+            break;
+        }
         let requested_active_state =
             requested_active_path.and_then(|path| nm.active_connection_state(path));
         let (ssid_matches, status) =
             activation_observation(nm, activation_device.as_ref(), target)?;
-        if wait.observe(
-            target,
-            status,
-            ssid_matches,
-            requested_active_path,
-            requested_active_state,
-        )? {
+        if wait
+            .observe(
+                target,
+                status,
+                ssid_matches,
+                requested_active_path,
+                requested_active_state,
+            )
+            .map_err(|error| {
+                if let Some(scope) = scope {
+                    let error = scope.activation_error(error);
+                    if scope.error().is_some() {
+                        abort_requested(nm, requested_active_path);
+                    }
+                    error
+                } else {
+                    error
+                }
+            })?
+        {
             return Ok(());
         }
         // Cancellation wakes NetworkEvents, so a cancel racing this wait is
         // observed at the top of the next iteration without a second poll.
         event_generation = nm.wait_for_event(event_generation, wait.next_wake(deadline));
     }
+    abort_requested(nm, requested_active_path);
     Err(wait.timeout_error(target))
+}
+
+fn abort_requested(nm: &Nm, path: Option<&OwnedObjectPath>) {
+    if let Some(path) = path {
+        crate::error::best_effort("failed to abort expired credential activation", || {
+            nm.abort_requested_activation(path)
+        });
+    }
 }
 
 #[derive(Debug)]

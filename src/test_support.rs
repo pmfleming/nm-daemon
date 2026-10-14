@@ -25,6 +25,20 @@ pub(crate) struct TestPeer {
 }
 
 impl TestPeer {
+    pub(crate) fn on_bus(bus: &bus::TestBus) -> anyhow::Result<Self> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let (server, client) = {
+            let _entered = runtime.enter();
+            (bus.connect()?, bus.connect()?)
+        };
+        server.request_name(crate::nm::NM_DEST)?;
+        Ok(Self {
+            server,
+            client,
+            _runtime: runtime,
+        })
+    }
+
     pub(crate) fn new(server_name: &str, client_name: &str) -> Self {
         let (server_socket, client_socket) =
             UnixStream::pair().expect("create test peer socket pair");

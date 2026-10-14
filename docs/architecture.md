@@ -48,6 +48,8 @@ AlreadyActive
       └─ unsupported or failed ---------------------> Error
 ```
 
+Saved-profile activation delegates credential acquisition to NetworkManager; agent ownership never triggers a pre-activation GetSecrets probe or password replacement. `src/activation.rs` correlates native activation lifetimes with SecretAgent calls by NM owner/profile UUID, preassigning fresh UUIDs to new/volatile profiles. Credential entry shares the original activation deadline with a 15-second authentication reserve; scope retirement fences late submissions, preserves distinct cancellation/expiry/unavailable outcomes, and suppresses credential-timeout AP retries. See [manual-wifi-activation.md](manual-wifi-activation.md).
+
 A successful saved-profile activation or newly created profile enters `Verify`. A missing visible target may trigger one targeted `Rescan` before retrying the D-Bus states. There is no subprocess connection fallback. Failed profiles created during an attempt are cleaned up from one failure path.
 
 Verification requires the selected device to report activation and the exact SSID bytes to match. BSSID and NetworkManager AP object paths remain activation-selection hints because roaming or AP object replacement can legitimately change them during activation. The state machine records `already-active` or `dbus`, updates cache/history on completion, and checks cancellation between transitions and while waiting for activation.

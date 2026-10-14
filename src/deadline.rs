@@ -6,6 +6,10 @@ use anyhow::{Context, Result};
 pub(crate) struct Deadline(Instant);
 
 impl Deadline {
+    pub(crate) fn at(instant: Instant) -> Self {
+        Self(instant)
+    }
+
     pub(crate) fn from_now(timeout: Duration) -> Result<Self> {
         Instant::now()
             .checked_add(timeout)

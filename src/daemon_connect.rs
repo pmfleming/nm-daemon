@@ -469,7 +469,13 @@ mod tests {
                     crate::variant::setting::<bool>(&state.settings["connection"], "autoconnect"),
                     Some(false)
                 );
-                assert!(!state.settings["connection"].contains_key("uuid"));
+                assert!(
+                    uuid::Uuid::parse_str(
+                        crate::variant::setting::<&str>(&state.settings["connection"], "uuid")
+                            .unwrap()
+                    )
+                    .is_ok()
+                );
             }
         }
         Ok(())

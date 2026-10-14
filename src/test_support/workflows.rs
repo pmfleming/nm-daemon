@@ -28,13 +28,15 @@ pub(crate) enum Outcome {
     Connected,
     DhcpFailed,
     NoSecrets,
+    AwaitingSecrets,
     CancelBeforeWait,
     CancelOnSuccess,
 }
 
 pub(crate) struct State {
     script: VecDeque<Outcome>,
-    current: Option<Outcome>,
+    pub(crate) current: Option<Outcome>,
+    pub(crate) on_activate: Option<Arc<dyn Fn(ConnectionSettings) + Send + Sync>>,
     ap: String,
     hotspot: bool,
     vpn: bool,
@@ -62,6 +64,10 @@ impl State {
         if self.current == Some(Outcome::CancelBeforeWait) {
             self.cancellation.store(true, Ordering::Release);
         }
+        if let Some(callback) = self.on_activate.as_ref().map(Arc::clone) {
+            let settings = self.settings.clone();
+            std::thread::spawn(move || callback(settings));
+        }
         path(ACTIVE)
     }
 
@@ -72,7 +78,7 @@ impl State {
                 self.cancellation.store(true, Ordering::Release);
                 2
             }
-            Some(Outcome::CancelBeforeWait) => 1,
+            Some(Outcome::CancelBeforeWait | Outcome::AwaitingSecrets) => 1,
             _ => 4,
         }
     }
@@ -81,12 +87,27 @@ impl State {
 pub(crate) struct FakeNm {
     pub(crate) nm: Nm,
     pub(crate) state: Arc<Mutex<State>>,
-    peer: TestPeer,
+    pub(crate) peer: TestPeer,
 }
 
 impl FakeNm {
     pub(crate) fn new(script: impl IntoIterator<Item = Outcome>, vpn: bool) -> Result<Self> {
-        let peer = TestPeer::new(":1.0", ":1.1");
+        Self::with_peer(TestPeer::new(":1.0", ":1.1"), script, vpn, ":1.0")
+    }
+
+    pub(crate) fn on_bus(
+        bus: &super::bus::TestBus,
+        script: impl IntoIterator<Item = Outcome>,
+    ) -> Result<Self> {
+        Self::with_peer(TestPeer::on_bus(bus)?, script, false, crate::nm::NM_DEST)
+    }
+
+    fn with_peer(
+        peer: TestPeer,
+        script: impl IntoIterator<Item = Outcome>,
+        vpn: bool,
+        destination: &str,
+    ) -> Result<Self> {
         let settings = if vpn {
             ConnectionSettings::from([(
                 "connection".into(),
@@ -102,6 +123,7 @@ impl FakeNm {
         let state = Arc::new(Mutex::new(State {
             script: script.into_iter().collect(),
             current: None,
+            on_activate: None,
             ap: AP1.into(),
             hotspot: false,
             vpn,
@@ -129,7 +151,7 @@ impl FakeNm {
         let nm = Nm::with_connection_runner_destination_and_telemetry(
             peer.client.clone(),
             Arc::new(FakeCommands),
-            ":1.0",
+            destination,
             Arc::new(crate::nl80211::UnavailableWirelessTelemetry),
         )?;
         drop(server);
@@ -327,7 +349,9 @@ impl Profile {
     }
     fn get_secrets(&self, _setting: &str) -> zbus::fdo::Result<ConnectionSettings> {
         self.0.lock().unwrap().secret_probes += 1;
-        Err(zbus::fdo::Error::Failed("Agent-owned secrets are not visible through profile GetSecrets".into()))
+        Err(zbus::fdo::Error::Failed(
+            "Agent-owned secrets are not visible through profile GetSecrets".into(),
+        ))
     }
     fn delete(&self) {
         let mut state = self.0.lock().unwrap();
@@ -365,6 +389,8 @@ impl Device {
             Some(Outcome::Connected | Outcome::CancelOnSuccess)
         ) {
             100
+        } else if self.0.lock().unwrap().current == Some(Outcome::AwaitingSecrets) {
+            60 // NM_DEVICE_STATE_NEED_AUTH, not disconnected while prompting.
         } else {
             30
         }
@@ -672,7 +698,10 @@ pub(crate) fn isolated(name: &str, run: impl FnOnce() -> Result<()>) -> Result<(
         .env("XDG_RUNTIME_DIR", &directory)
         .env("XDG_STATE_HOME", &directory)
         // A regression must fail, not fall through to the live desktop keyring.
-        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/nm-workflow-bus")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent/nm-workflow-bus",
+        )
         .spawn()?;
     let deadline = Instant::now() + Duration::from_secs(45);
     let result = loop {

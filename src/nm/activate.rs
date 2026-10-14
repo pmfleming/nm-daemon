@@ -13,6 +13,7 @@ use crate::model::{WepKeyType, WifiConnectTarget};
 pub(crate) struct WifiActivation {
     pub(crate) profile_path: OwnedObjectPath,
     pub(crate) active_path: OwnedObjectPath,
+    pub(crate) scope: crate::activation::Guard,
 }
 
 impl Nm {
@@ -21,7 +22,7 @@ impl Nm {
         target: &WifiConnectTarget,
         password: Option<&str>,
         wep_key_type: Option<WepKeyType>,
-    ) -> Result<Option<OwnedObjectPath>> {
+    ) -> Result<Option<WifiActivation>> {
         if target.profile.remember == Some(false) {
             return Ok(None); // Never update a saved profile for a temporary join.
         }
@@ -31,6 +32,10 @@ impl Nm {
             return Ok(None);
         };
         self.prepare_saved_activation(&connection_path, target, password, wep_key_type)?;
+        let scope = self.activation_scope(
+            &self.connection_settings(&connection_path)?,
+            connection_path.as_str(),
+        )?;
         tracing::info!(
             ssid = %target.ssid,
             connection = %connection_path,
@@ -42,12 +47,15 @@ impl Nm {
         let active_connection: OwnedObjectPath = nm
             .call(
                 "ActivateConnection",
-                &(connection_path, device_path, specific_object),
+                &(connection_path.clone(), device_path, specific_object),
             )
-            .with_context(|| {
-                format!("ActivateConnection for saved Wi-Fi profile {}", target.ssid)
-            })?;
-        Ok(Some(active_connection))
+            .with_context(|| format!("ActivateConnection for saved Wi-Fi profile {}", target.ssid))
+            .map_err(|error| scope.state.activation_error(error))?;
+        Ok(Some(WifiActivation {
+            profile_path: connection_path,
+            active_path: active_connection,
+            scope,
+        }))
     }
 
     fn prepare_saved_activation(
@@ -175,6 +183,16 @@ impl Nm {
         let nm = self.root_proxy();
         if target.profile.remember == Some(false) {
             make_temporary(&mut settings)?;
+        }
+        // Supply a fresh UUID before activation so even an immediate GetSecrets
+        // callback can bind to this exact profile and deadline.
+        settings
+            .entry("connection".into())
+            .or_default()
+            .entry("uuid".into())
+            .or_insert(super::owned_value(uuid::Uuid::new_v4().to_string())?);
+        let scope = self.activation_scope(&settings, "/")?;
+        if target.profile.remember == Some(false) {
             let options = crate::variant::value_map([("persist", "volatile".into())])?;
             let (profile_path, active_path, _result): (
                 OwnedObjectPath,
@@ -185,10 +203,12 @@ impl Nm {
                     "AddAndActivateConnection2",
                     &(settings, device_path, specific_object, options),
                 )
-                .with_context(|| format!("temporary activation for Wi-Fi network {ssid}"))?;
+                .with_context(|| format!("temporary activation for Wi-Fi network {ssid}"))
+                .map_err(|error| scope.state.activation_error(error))?;
             return Ok(WifiActivation {
                 profile_path,
                 active_path,
+                scope,
             });
         }
         let (profile_path, active_path): (OwnedObjectPath, OwnedObjectPath) = nm
@@ -196,11 +216,34 @@ impl Nm {
                 "AddAndActivateConnection",
                 &(settings, device_path, specific_object),
             )
-            .with_context(|| format!("AddAndActivateConnection for Wi-Fi network {ssid}"))?;
+            .with_context(|| format!("AddAndActivateConnection for Wi-Fi network {ssid}"))
+            .map_err(|error| scope.state.activation_error(error))?;
         Ok(WifiActivation {
             profile_path,
             active_path,
+            scope,
         })
+    }
+
+    fn activation_scope(
+        &self,
+        settings: &ConnectionSettings,
+        path: &str,
+    ) -> Result<crate::activation::Guard> {
+        let events = self.events.clone();
+        Ok(crate::activation::Guard::new(
+            self.current_owner()?,
+            crate::activation::identity(settings, path),
+            std::time::Instant::now() + crate::generated::ACTIVATION_TIMEOUT,
+            move || events.notify(),
+        ))
+    }
+
+    pub(crate) fn abort_requested_activation(&self, path: &OwnedObjectPath) -> Result<()> {
+        self.ensure_current_owner()?;
+        self.root_proxy()
+            .call::<_, _, ()>("DeactivateConnection", &(path,))
+            .context("abort owned Wi-Fi activation")
     }
 
     pub(crate) fn wifi_activation_status_for(

@@ -6,9 +6,7 @@ use zvariant::OwnedObjectPath;
 
 use crate::cache;
 use crate::connect_cancel::check_cancelled;
-use crate::connect_error::{
-    connect_failure, connect_failure_from_error, should_return_secret_agent_error,
-};
+use crate::connect_error::{connect_failure, connect_failure_from_error};
 use crate::deadline::Deadline;
 use crate::error::{ErrorOperation, best_effort, ensure_domain};
 use crate::generated::{NOT_FOUND_RESCAN_TIMEOUT, POST_CONNECT_STATUS_WAIT};
@@ -89,6 +87,7 @@ struct ConnectionMachine<'a> {
     rescanned: bool,
     created_connection: Option<OwnedObjectPath>,
     activation_path: Option<OwnedObjectPath>,
+    activation_scope: Option<crate::activation::Guard>,
 }
 
 impl<'a> ConnectionMachine<'a> {
@@ -110,6 +109,7 @@ impl<'a> ConnectionMachine<'a> {
             rescanned: false,
             created_connection: None,
             activation_path: None,
+            activation_scope: None,
         }
     }
 
@@ -127,6 +127,8 @@ impl<'a> ConnectionMachine<'a> {
         match self.run_states() {
             Ok(outcome) => self.finish_success(outcome, started_at),
             Err(err) => {
+                // Retire prompts before potentially slow profile cleanup/history.
+                self.activation_scope.take();
                 self.cleanup_created_connection();
                 self.finish_failure(err, started_at, finalize_failure)
             }
@@ -184,9 +186,10 @@ impl<'a> ConnectionMachine<'a> {
             self.password,
             self.wep_key_type,
         ) {
-            Ok(Some(active_path)) => {
-                tracing::info!(ssid = %self.target.ssid, %active_path, "requested activation of saved Wi-Fi profile over D-Bus");
-                self.activation_path = Some(active_path);
+            Ok(Some(activation)) => {
+                tracing::info!(ssid = %self.target.ssid, active_path = %activation.active_path, "requested activation of saved Wi-Fi profile over D-Bus");
+                self.activation_path = Some(activation.active_path);
+                self.activation_scope = Some(activation.scope);
                 Ok(StateTransition::Next(ConnectionState::Verify(
                     ProfileKind::Saved,
                 )))
@@ -212,6 +215,7 @@ impl<'a> ConnectionMachine<'a> {
                 );
                 self.created_connection = Some(activation.profile_path);
                 self.activation_path = Some(activation.active_path);
+                self.activation_scope = Some(activation.scope);
                 Ok(StateTransition::Next(ConnectionState::Verify(
                     ProfileKind::Created,
                 )))
@@ -271,12 +275,8 @@ impl<'a> ConnectionMachine<'a> {
             failure = kind.failure_subject(self.rescanned),
             "D-Bus activation path failed"
         );
-        if should_return_secret_agent_error(self.password, &error) {
-            return Err(connect_failure_from_error(
-                ConnectFailureReason::PasswordUnavailable,
-                error,
-            ));
-        }
+        // Preserve missing/rejected/cancelled/expired outcomes, including the
+        // activation-scoped details; credential failures are terminal upstream.
         Err(error)
     }
 
@@ -301,7 +301,11 @@ impl<'a> ConnectionMachine<'a> {
             self.target,
             self.activation_path.as_ref(),
             self.cancellation,
+            self.activation_scope
+                .as_ref()
+                .map(|scope| scope.state.as_ref()),
         )?;
+        self.activation_scope.take(); // Credential prompts cannot outlive activation.
         let network = match kind {
             ProfileKind::Saved => "saved network",
             ProfileKind::Created => {

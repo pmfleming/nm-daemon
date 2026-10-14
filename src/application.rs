@@ -410,8 +410,13 @@ impl<'a> Application<'a> {
                 }
                 Err(error) => error,
             };
+            let report = ErrorReport::from_error(&error, ErrorOperation::Connect);
+            if report.code == crate::error::ErrorCode::Cancelled {
+                return cancelled_connect(request, &mut emit, &report.message);
+            }
             let reason = record_failed_attempt(&mut attempts, &candidate_info, started_at, &error);
-            if retryable_candidate_failure(reason)
+            if !report.details.contains_key("credential_outcome")
+                && retryable_candidate_failure(reason)
                 && let Some(next) = alternative.take()
             {
                 emit_retry(

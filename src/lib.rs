@@ -1,4 +1,5 @@
 mod actions;
+mod activation;
 mod app;
 mod application;
 mod auth;

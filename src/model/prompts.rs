@@ -78,7 +78,7 @@ pub(crate) fn recovery(reason: ConnectFailureReason) -> Option<NetworkConnectPro
     let message = match reason {
         ConnectFailureReason::WrongPassword => "Wrong password. Enter a new Wi-Fi password.",
         ConnectFailureReason::PasswordUnavailable | ConnectFailureReason::SecretRequired => {
-            "Saved password failed. Enter a new Wi-Fi password."
+            "NetworkManager could not obtain credentials. Connect again or explicitly update the saved credentials."
         }
         _ => return None,
     };
