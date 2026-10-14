@@ -74,6 +74,14 @@ impl Keyring {
         })
     }
 
+    /// Only credential requests allowing interaction and explicit saves may
+    /// open the desktop's unlock dialog. Background reads remain noninteractive.
+    pub(crate) fn interactive() -> Result<Self> {
+        let mut keyring = Self::new()?;
+        keyring.client.interactive = true;
+        Ok(keyring)
+    }
+
     pub(crate) fn lookup_secrets(
         &self,
         connection_path: &str,
@@ -163,6 +171,7 @@ impl Keyring {
 }
 
 struct SecretServiceClient {
+    interactive: bool,
     connection: Connection,
     destination: String,
     session: OwnedObjectPath,
@@ -180,6 +189,7 @@ impl SecretServiceClient {
             .context("open Secret Service session")?;
         drop(service);
         Ok(Self {
+            interactive: false,
             connection,
             destination,
             session,
@@ -261,6 +271,24 @@ impl SecretServiceClient {
             SECRET_COLLECTION_IFACE,
         )
         .context("create Secret Service collection proxy")?;
+        if collection_proxy.get_property::<bool>("Locked")? {
+            match self.unlock(vec![collection.clone()])? {
+                KeyringOutcome::Completed(_) => {
+                    if collection_proxy.get_property::<bool>("Locked")? {
+                        bail!("desktop keyring is still locked; unlock it and retry saving");
+                    }
+                }
+                KeyringOutcome::PromptUnsupported {
+                    operation, prompt, ..
+                } => {
+                    return Ok(KeyringOutcome::PromptUnsupported {
+                        operation,
+                        prompt,
+                        completed: (),
+                    });
+                }
+            }
+        }
         let props = HashMap::from([
             (ITEM_LABEL_KEY.to_string(), owned_value(label.to_string())?),
             (ITEM_ATTRIBUTES_KEY.to_string(), owned_value(attrs.clone())?),
@@ -349,9 +377,56 @@ impl SecretServiceClient {
             .context("unlock Secret Service items")?;
         if prompt.as_str() == NULL_PROMPT {
             Ok(KeyringOutcome::Completed(unlocked))
+        } else if self.interactive {
+            let result = self.complete_prompt(&prompt, std::time::Duration::from_secs(45))?;
+            let mut items = unlocked;
+            items.extend(
+                Vec::<OwnedObjectPath>::try_from(result)
+                    .context("decode Secret Service unlock result")?,
+            );
+            Ok(KeyringOutcome::Completed(items))
         } else {
             self.dismiss_prompt(prompt, KeyringPromptOperation::Unlock, unlocked)
         }
+    }
+
+    fn complete_prompt(
+        &self,
+        path: &OwnedObjectPath,
+        timeout: std::time::Duration,
+    ) -> Result<OwnedValue> {
+        use futures::StreamExt;
+        // This code runs on a blocking worker, never on the daemon executor.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let proxy = zbus::Proxy::new(
+                    self.connection.inner(),
+                    self.destination.as_str(),
+                    path.as_str(),
+                    SECRET_PROMPT_IFACE,
+                )
+                .await?;
+                // Subscribe before Prompt: a provider may complete synchronously.
+                let mut completed = proxy.receive_signal("Completed").await?;
+                proxy.call::<_, _, ()>("Prompt", &("",)).await?;
+                let result = tokio::time::timeout(timeout, completed.next()).await;
+                match result {
+                    Ok(Some(message)) => {
+                        let (dismissed, value): (bool, OwnedValue) =
+                            message.body().deserialize()?;
+                        if dismissed {
+                            bail!("desktop keyring unlock cancelled; unlock it and retry");
+                        }
+                        Ok(value)
+                    }
+                    _ => {
+                        let _ = proxy.call::<_, _, ()>("Dismiss", &()).await;
+                        bail!("desktop keyring unlock timed out; unlock it and retry")
+                    }
+                }
+            })
     }
 
     fn dismiss_prompt<T>(
@@ -572,6 +647,7 @@ mod tests {
             .at(ITEM_ONE_PATH, FakeItem { prompt: false })?;
         let keyring = super::Keyring {
             client: SecretServiceClient {
+                interactive: false,
                 connection: peer.client.clone(),
                 destination: ":1.0".into(),
                 session: object_path("/session/test"),
@@ -645,6 +721,11 @@ mod tests {
 
     #[zbus::interface(name = "org.freedesktop.Secret.Collection")]
     impl FakeCollection {
+        #[zbus(property)]
+        fn locked(&self) -> bool {
+            false
+        }
+
         fn create_item(
             &self,
             _properties: HashMap<String, OwnedValue>,
@@ -725,6 +806,7 @@ mod tests {
             )
             .unwrap();
         let client = SecretServiceClient {
+            interactive: false,
             connection: peer.client,
             destination: ":1.0".to_string(),
             session: object_path("/org/freedesktop/secrets/session/test"),
@@ -768,6 +850,72 @@ mod tests {
             }
         ));
         assert_eq!(dismissals.load(Ordering::Relaxed), 3);
+    }
+
+    struct UnlockPrompt {
+        dismissed: bool,
+        complete: bool,
+        dismissals: Arc<AtomicUsize>,
+    }
+
+    #[zbus::interface(name = "org.freedesktop.Secret.Prompt")]
+    impl UnlockPrompt {
+        async fn prompt(
+            &self,
+            _window: &str,
+            #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
+        ) -> zbus::fdo::Result<()> {
+            if self.complete {
+                let value = zvariant::Value::new(vec![object_path(COLLECTION_PATH)]);
+                Self::completed(&emitter, self.dismissed, value).await?;
+            }
+            Ok(())
+        }
+        fn dismiss(&self) {
+            self.dismissals.fetch_add(1, Ordering::Relaxed);
+        }
+        #[zbus(signal)]
+        async fn completed(
+            emitter: &zbus::object_server::SignalEmitter<'_>,
+            dismissed: bool,
+            result: zvariant::Value<'_>,
+        ) -> zbus::Result<()>;
+    }
+
+    #[test]
+    fn interactive_unlock_handles_immediate_completion_cancel_and_timeout() -> anyhow::Result<()> {
+        for (dismissed, complete) in [(false, true), (true, true), (false, false)] {
+            let peer = TestPeer::new(":1.0", ":1.1");
+            let dismissals = Arc::new(AtomicUsize::new(0));
+            peer.server.object_server().at(
+                PROMPT_PATH,
+                UnlockPrompt {
+                    dismissed,
+                    complete,
+                    dismissals: dismissals.clone(),
+                },
+            )?;
+            let client = SecretServiceClient {
+                interactive: true,
+                connection: peer.client.clone(),
+                destination: ":1.0".into(),
+                session: object_path("/session/test"),
+            };
+            let result = client.complete_prompt(
+                &object_path(PROMPT_PATH),
+                std::time::Duration::from_millis(100),
+            );
+            if complete && !dismissed {
+                assert_eq!(
+                    Vec::<OwnedObjectPath>::try_from(result?)?,
+                    vec![object_path(COLLECTION_PATH)]
+                );
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(dismissals.load(Ordering::Relaxed), usize::from(!complete));
+        }
+        Ok(())
     }
 
     fn object_path(path: &str) -> OwnedObjectPath {

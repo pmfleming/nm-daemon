@@ -445,7 +445,7 @@ SecretAgent registration is live when NetworkManager is available on the system 
 Events:
 
 - `requested`: NetworkManager needs one or more secrets.
-- `cancelled`: NetworkManager cancelled a pending secret request.
+- `cancelled`: NetworkManager cancelled a pending secret request, or it expired (`data.reason: "expired"`).
 - `persistence`: a `save:true`, NetworkManager `SaveSecrets`, or `DeleteSecrets` keyring action completed, required an unsupported prompt, or failed.
 
 Shelllist answers with named values, or explicitly cancels the request:
@@ -454,9 +454,9 @@ Shelllist answers with named values, or explicitly cancels the request:
 Call("wifi.secret.provide", "{\"request_id\":\"...\",\"values\":{\"psk\":\"...\"},\"save\":false,\"cancel\":false}")
 ```
 
-When `save:true`, the provide response reports `persistence_status: "pending"`; a subsequent `wifi.secret persistence` event reports `stored`, `prompt_unsupported`, or `failed`. The daemon cannot safely present desktop Secret Service prompts, so it dismisses them and never reports the prompted create/delete/unlock operation as complete. NetworkManager `SaveSecrets` and `DeleteSecrets` are also mapped to Secret Service store/delete operations for known secret keys and log the same explicit outcomes.
+When `save:true`, the provide response reports `persistence_status: "pending"`; a subsequent `wifi.secret persistence` event reports `stored`, `prompt_unsupported`, or `failed`. Interactive lookups and explicit saves support the desktop provider's unlock prompt, bounded to 45 seconds. Cancellation and timeout are failures; background lookups never present prompts. Saves unlock the collection before creating an item. Create/delete prompts remain unsupported. NetworkManager `SaveSecrets` emits a persistence result and returns failures instead of acknowledging a failed save; deletion retains its existing best-effort behavior.
 
-`wifi.secret.capabilities` reports `keyring.available`, `persistence_supported`, `default_save`, `prompt_handling: "unsupported"`, and `prompt_policy: "dismiss_and_report"`. Clients should use those fields instead of assuming that keyring availability means every operation can complete without user interaction.
+`wifi.secret.capabilities` reports `keyring.available`, `persistence_supported`, `default_save`, `prompt_handling: "unlock"`, and `prompt_policy: "interactive_unlock_with_timeout"`. Clients should use those fields instead of assuming that keyring availability means every operation can complete without user interaction.
 
 The agent registers with `RegisterWithCapabilities` and `NM_SECRET_AGENT_CAPABILITY_VPN_HINTS`, falling back to plain `Register` on NetworkManager builds that reject capabilities, so VPN plugins' own hints reach the frontend.
 

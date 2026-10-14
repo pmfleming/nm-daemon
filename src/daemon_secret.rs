@@ -197,10 +197,16 @@ impl SecretAgentInterface {
         #[zbus(header)] header: Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let owner = self.authorize(&header).await?;
+        let runtime = self.runtime.clone();
         secret_worker(move || {
             ensure_secret_owner(Some(&owner))?;
-            save_connection_secrets(&connection_path, &connection);
-            Ok(())
+            let result = save_connection_secrets(&connection_path, &connection);
+            let outcome = match &result {
+                Ok(()) => SecretPersistenceOutcome::Stored,
+                Err(error) => SecretPersistenceOutcome::Failed(format!("{error:#}")),
+            };
+            emit_secret_persistence(&runtime, connection_path.as_str(), outcome);
+            result.map_err(|error| zbus::fdo::Error::Failed(format!("{error:#}")))
         })
         .await
     }
@@ -330,7 +336,14 @@ fn wait_for_secret_response(
     })?;
 
     let response = registration.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
-        // A timeout is not an explicit user cancellation: allow NM to try another agent.
+        // Retire the frontend prompt as well as the native registration. A late
+        // submission must not look like a successful credential handoff.
+        emit_secret_event(
+            runtime,
+            &request.id,
+            "cancelled",
+            json!({"request_id": request.id, "reason": "expired"}),
+        );
         SecretAgentError::NoSecrets(format!("timed out waiting for secret {}", request.id))
     })?;
     ensure_request_owner(&request)?;
@@ -369,15 +382,15 @@ pub(crate) fn capabilities(_: SecretCapabilitiesParams) -> Result<Value> {
                 "available": keyring_available,
                 "persistence_supported": keyring_available,
                 "default_save": false,
-                "prompt_handling": "unsupported",
-                "prompt_policy": "dismiss_and_report",
+                "prompt_handling": "unlock",
+                "prompt_policy": "interactive_unlock_with_timeout",
             },
             "events": {
                 "stream": Stream::WifiSecret,
                 "implemented": true,
                 "persistence_outcomes": true,
             },
-            "message": "SecretAgent is registered when NetworkManager is available; save:true persists only when the user's Secret Service keyring can complete without a desktop prompt",
+            "message": "SecretAgent supports bounded desktop keyring unlock for interactive credential requests and saves; background lookups never prompt",
         }),
         "serialize secret-agent capabilities response JSON",
     )
@@ -612,7 +625,12 @@ fn lookup_stored_secrets(
     request: &PendingSecretRequest,
     connection: &ConnectionSettings,
 ) -> Vec<crate::keyring::KeyringSecret> {
-    let result = crate::keyring::Keyring::new().and_then(|keyring| {
+    let keyring = if request.flags & ALLOW_INTERACTION != 0 {
+        crate::keyring::Keyring::interactive()
+    } else {
+        crate::keyring::Keyring::new()
+    };
+    let result = keyring.and_then(|keyring| {
         keyring.lookup_secrets(
             &request.connection_path,
             connection,
@@ -698,7 +716,7 @@ fn persistence_outcome(
     connection: &ConnectionSettings,
     values: &HashMap<String, String>,
 ) -> SecretPersistenceOutcome {
-    let keyring = match crate::keyring::Keyring::new() {
+    let keyring = match crate::keyring::Keyring::interactive() {
         Ok(keyring) => keyring,
         Err(error) => return SecretPersistenceOutcome::Failed(format!("{error:#}")),
     };
@@ -772,58 +790,28 @@ fn store_secret_outcome(
     }
 }
 
-fn save_connection_secrets(connection_path: &OwnedObjectPath, connection: &ConnectionSettings) {
-    let Some(keyring) = best_effort(
-        format!("failed to open keyring while saving NetworkManager secrets for {connection_path}"),
-        crate::keyring::Keyring::new,
-    ) else {
-        return;
-    };
-    connection_secret_values(connection)
-        .into_iter()
-        .flat_map(|(setting, secrets)| {
-            secrets
-                .into_iter()
-                .map(move |(key, password)| (setting.clone(), key, password))
-        })
-        .for_each(|(setting, key, password)| {
-            save_connection_secret(
-                &keyring,
-                connection_path,
+fn save_connection_secrets(
+    connection_path: &OwnedObjectPath,
+    connection: &ConnectionSettings,
+) -> Result<()> {
+    let keyring = crate::keyring::Keyring::interactive()?;
+    for (setting, secrets) in connection_secret_values(connection) {
+        for (key, password) in secrets {
+            match keyring.store_secret(
+                connection_path.as_str(),
                 connection,
                 &setting,
                 &key,
                 &password,
-            )
-        });
-}
-
-fn save_connection_secret(
-    keyring: &crate::keyring::Keyring,
-    connection_path: &OwnedObjectPath,
-    connection: &ConnectionSettings,
-    setting_name: &str,
-    key: &str,
-    password: &str,
-) {
-    let outcome = best_effort(
-        format!("failed to save NetworkManager secret {setting_name}.{key} for {connection_path}"),
-        || {
-            keyring.store_secret(
-                connection_path.as_str(),
-                connection,
-                setting_name,
-                key,
-                password,
-            )
-        },
-    );
-    if let Some(crate::keyring::KeyringOutcome::PromptUnsupported {
-        operation, prompt, ..
-    }) = outcome
-    {
-        tracing::warn!(%connection_path, setting_name, key, %operation, %prompt, "NetworkManager secret was not saved because the keyring requires an unsupported desktop prompt");
+            )? {
+                crate::keyring::KeyringOutcome::Completed(()) => {}
+                crate::keyring::KeyringOutcome::PromptUnsupported { operation, .. } => {
+                    anyhow::bail!("password was not saved: unsupported keyring {operation} prompt");
+                }
+            }
+        }
     }
+    Ok(())
 }
 
 fn delete_connection_secrets(connection_path: &OwnedObjectPath, connection: &ConnectionSettings) {

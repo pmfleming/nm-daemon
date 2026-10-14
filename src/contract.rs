@@ -1465,15 +1465,15 @@ fn secret_capabilities_fixture() -> Value {
             "available": true,
             "persistence_supported": true,
             "default_save": false,
-            "prompt_handling": "unsupported",
-            "prompt_policy": "dismiss_and_report",
+            "prompt_handling": "unlock",
+            "prompt_policy": "interactive_unlock_with_timeout",
         },
         "events": {
             "stream": Stream::WifiSecret,
             "implemented": true,
             "persistence_outcomes": true,
         },
-        "message": "SecretAgent is registered when NetworkManager is available; save:true persists only when the user's Secret Service keyring can complete without a desktop prompt",
+        "message": "SecretAgent supports bounded desktop keyring unlock for interactive credential requests and saves; background lookups never prompt",
     })
 }
 
