@@ -7,7 +7,6 @@ use super::wifi_settings::{
     hidden_wifi_connection_settings, visible_connection_settings,
 };
 use super::{ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, Nm};
-use crate::error::DomainError;
 use crate::model::{WepKeyType, WifiConnectTarget};
 
 #[derive(Debug)]
@@ -75,15 +74,18 @@ impl Nm {
             tracing::info!(ssid = %target.ssid, connection = %connection_path, "updating compatible saved profile before activation");
             return self.update_connection_settings_for_activation(connection_path, settings);
         }
+        let settings = self.connection_settings(connection_path)?;
         super::profile_policy::validate_private_ca_paths(
-            &self.connection_settings(connection_path)?,
+            &settings,
             crate::error::ErrorOperation::Connect,
         )?;
-        if !self.saved_wifi_connection_needs_secret_agent(connection_path, None)? {
-            return Ok(());
+        // Agent ownership describes where NM obtains credentials, not whether
+        // activation can succeed. Never probe GetSecrets or rewrite a profile
+        // just to connect: let ActivateConnection consult NM's registered agents.
+        if super::settings::wifi_settings_need_secret_agent(&settings, None, None) {
+            tracing::debug!(connection = %connection_path, "saved profile delegates credentials to NetworkManager agents");
         }
-        tracing::info!(ssid = %target.ssid, connection = %connection_path, "saved Wi-Fi profile needs a secret agent before activation");
-        Err(missing_saved_profile_password(target))
+        Ok(())
     }
 
     pub(crate) fn add_and_activate_wifi_connection_for(
@@ -278,18 +280,6 @@ fn make_temporary(settings: &mut ConnectionSettings) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn missing_saved_profile_password(target: &WifiConnectTarget) -> anyhow::Error {
-    DomainError::connect(
-        crate::model::ConnectFailureReason::PasswordUnavailable,
-        format!(
-            "saved Wi-Fi profile for {} requires a secret agent or a newly supplied password",
-            target.ssid
-        ),
-    )
-    .with_detail("ssid", target.ssid.to_string())
-    .into()
 }
 
 fn root_object_path() -> Result<OwnedObjectPath> {

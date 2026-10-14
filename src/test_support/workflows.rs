@@ -21,6 +21,8 @@ pub(crate) const ACTIVE: &str = "/org/freedesktop/NetworkManager/ActiveConnectio
 const AP1: &str = "/org/freedesktop/NetworkManager/AccessPoint/1";
 const AP2: &str = "/org/freedesktop/NetworkManager/AccessPoint/2";
 
+mod saved_activation;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Connected,
@@ -41,6 +43,9 @@ pub(crate) struct State {
     pub(crate) activations: Vec<String>,
     pub(crate) deactivated: Vec<String>,
     pub(crate) deleted: usize,
+    added: usize,
+    updates: usize,
+    secret_probes: usize,
     pub(crate) connectivity_checks: usize,
     pub(crate) cancellation: Arc<AtomicBool>,
 }
@@ -105,6 +110,9 @@ impl FakeNm {
             activations: Vec::new(),
             deactivated: Vec::new(),
             deleted: 0,
+            added: 0,
+            updates: 0,
+            secret_probes: 0,
             connectivity_checks: 0,
             cancellation: Arc::new(AtomicBool::new(false)),
         }));
@@ -233,6 +241,7 @@ impl Manager {
         }
         let active = {
             let mut state = self.0.lock().unwrap();
+            state.added += 1;
             state.settings = settings;
             state.activate(specific.as_str())
         };
@@ -312,7 +321,13 @@ impl Profile {
         self.0.lock().unwrap().settings.clone()
     }
     fn update(&self, settings: ConnectionSettings) {
-        self.0.lock().unwrap().settings = settings;
+        let mut state = self.0.lock().unwrap();
+        state.updates += 1;
+        state.settings = settings;
+    }
+    fn get_secrets(&self, _setting: &str) -> zbus::fdo::Result<ConnectionSettings> {
+        self.0.lock().unwrap().secret_probes += 1;
+        Err(zbus::fdo::Error::Failed("Agent-owned secrets are not visible through profile GetSecrets".into()))
     }
     fn delete(&self) {
         let mut state = self.0.lock().unwrap();

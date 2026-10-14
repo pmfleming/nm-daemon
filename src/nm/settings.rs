@@ -313,22 +313,6 @@ impl Nm {
         Ok(connections)
     }
 
-    pub(super) fn saved_wifi_connection_needs_secret_agent(
-        &self,
-        path: &OwnedObjectPath,
-        ap: Option<&AccessPoint>,
-    ) -> Result<bool> {
-        let settings = self.connection_settings(path)?;
-        let secret_setting = profile_secret_spec(&settings).setting_name;
-        let secrets =
-            secret_setting.and_then(|setting| self.connection_secrets(path, setting).ok());
-        Ok(wifi_settings_need_secret_agent(
-            &settings,
-            secrets.as_ref(),
-            ap,
-        ))
-    }
-
     pub(crate) fn wifi_share_payload_by_path(&self, path: &str) -> Result<WifiSharePayload> {
         let path = OwnedObjectPath::try_from(path).context("parse connection path")?;
         let settings = self.connection_settings(&path)?;
@@ -796,7 +780,7 @@ fn secret_string(
     setting_secret_string(settings, secrets, "802-11-wireless-security", key)
 }
 
-fn wifi_settings_need_secret_agent(
+pub(super) fn wifi_settings_need_secret_agent(
     settings: &ConnectionSettings,
     secrets: Option<&ConnectionSettings>,
     ap: Option<&AccessPoint>,
