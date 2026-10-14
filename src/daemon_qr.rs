@@ -25,6 +25,8 @@ pub(crate) struct QrPayloadParams {
 pub(crate) struct QrConnectParams {
     payload: String,
     #[serde(default)]
+    remember: Option<bool>,
+    #[serde(default)]
     ifname: Option<InterfaceName>,
 }
 
@@ -70,7 +72,8 @@ pub(crate) fn start_connect(
         hidden = parsed.hidden,
         "connecting from a scanned Wi-Fi QR payload"
     );
-    let connect = connect_params(parsed, params.ifname)?;
+    let mut connect = connect_params(parsed, params.ifname)?;
+    connect.remember = params.remember;
     crate::daemon_connect::start_connect_target(runtime, connect, owner, emitter)
 }
 

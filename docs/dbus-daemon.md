@@ -454,6 +454,8 @@ Shelllist answers with named values, or explicitly cancels the request:
 Call("wifi.secret.provide", "{\"request_id\":\"...\",\"values\":{\"psk\":\"...\"},\"save\":false,\"cancel\":false}")
 ```
 
+Saving defaults on when `save` is omitted; explicit `save:false` remains an opt-out. Native NOT_SAVED flags take precedence over any save request. `wifi.connectTarget` and `wifi.qr.connect` accept `remember:false` to create a volatile, non-autoconnecting profile using `AddAndActivateConnection2`, without updating an existing saved profile. Omission preserves the normal persistent connection path. Forget remains the explicit way to remove an earlier saved network.
+
 When `save:true`, the provide response reports `persistence_status: "pending"`; a subsequent `wifi.secret persistence` event reports `stored`, `prompt_unsupported`, or `failed`. Interactive lookups and explicit saves support the desktop provider's unlock prompt, bounded to 45 seconds. Cancellation and timeout are failures; background lookups never present prompts. Saves unlock the collection before creating an item. Create/delete prompts remain unsupported. NetworkManager `SaveSecrets` emits a persistence result and returns failures instead of acknowledging a failed save; deletion retains its existing best-effort behavior.
 
 `wifi.secret.capabilities` reports `keyring.available`, `persistence_supported`, `default_save`, `prompt_handling: "unlock"`, and `prompt_policy: "interactive_unlock_with_timeout"`. Clients should use those fields instead of assuming that keyring availability means every operation can complete without user interaction.

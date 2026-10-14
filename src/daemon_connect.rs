@@ -24,6 +24,8 @@ const STREAM: Stream = Stream::WifiConnect;
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DbusConnectTargetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) remember: Option<bool>,
     #[serde(default)]
     key: Option<String>,
     #[serde(default)]
@@ -47,6 +49,7 @@ impl DbusConnectTargetParams {
         wep_key_type: Option<WepKeyType>,
     ) -> Self {
         Self {
+            remember: None,
             key: None,
             target: Some(target),
             password,
@@ -92,7 +95,10 @@ impl DbusConnectTargetParams {
     }
 
     fn into_request(self, nm: &Nm) -> Result<ConnectRequest> {
-        if let Some(target) = self.target {
+        if let Some(mut target) = self.target {
+            if self.remember.is_some() {
+                target.profile.remember = self.remember;
+            }
             return Ok(ConnectRequest::single(
                 target,
                 self.password,
@@ -110,6 +116,9 @@ impl DbusConnectTargetParams {
             self.wep_key_type,
             enterprise_identity,
         )?;
+        for candidate in std::iter::once(&mut request.candidate).chain(&mut request.alternatives) {
+            candidate.target.profile.remember = self.remember;
+        }
         if let Some(enterprise) = self.enterprise {
             for candidate in
                 std::iter::once(&mut request.candidate).chain(&mut request.alternatives)

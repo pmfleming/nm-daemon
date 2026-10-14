@@ -158,6 +158,10 @@ impl SecretAgentInterface {
         #[zbus(header)] header: Header<'_>,
     ) -> Result<ConnectionSettings, SecretAgentError> {
         let mut request = PendingSecretRequest::new(connection_path, setting_name, hints, flags);
+        request.save_supported = request
+            .secret_keys
+            .iter()
+            .all(|key| secret_may_be_saved(&connection, setting_name, key));
         request.nm_owner = Some(self.authorize(&header).await?);
         let runtime = self.runtime.clone();
         // Register before scheduling/performing keyring I/O, not only when a prompt is needed.
@@ -361,7 +365,7 @@ pub(crate) struct SecretCapabilitiesParams {}
 #[serde(deny_unknown_fields)]
 pub(crate) struct SecretProvideParams {
     request_id: String,
-    #[serde(default)]
+    #[serde(default = "default_save")]
     save: bool,
     #[serde(default)]
     password: Option<String>,
@@ -369,6 +373,10 @@ pub(crate) struct SecretProvideParams {
     values: HashMap<String, String>,
     #[serde(default)]
     cancel: bool,
+}
+
+fn default_save() -> bool {
+    true
 }
 
 pub(crate) fn capabilities(_: SecretCapabilitiesParams) -> Result<Value> {
@@ -381,7 +389,7 @@ pub(crate) fn capabilities(_: SecretCapabilitiesParams) -> Result<Value> {
             "keyring": {
                 "available": keyring_available,
                 "persistence_supported": keyring_available,
-                "default_save": false,
+                "default_save": true,
                 "prompt_handling": "unlock",
                 "prompt_policy": "interactive_unlock_with_timeout",
             },
@@ -554,7 +562,7 @@ fn emit_secret_requested(runtime: &Weak<DaemonRuntime>, request: &PendingSecretR
             "flags": request.flags,
             "flag_details": secret_flag_details(request.flags),
             "plugin_defined_secret_names": accepts_plugin_secret_names(&request.setting_name),
-            "save_supported": true,
+            "save_supported": request.save_supported,
             "timeout_ms": SECRET_TIMEOUT.as_millis(),
         }),
     );
@@ -674,9 +682,16 @@ fn apply_secret_response(
             "not all requested secrets were supplied".into(),
         ));
     }
-    Ok(response
-        .save
-        .then(|| persistence_outcome(request, connection, &values)))
+    Ok(response.save.then(|| {
+        if request.save_supported {
+            persistence_outcome(request, connection, &values)
+        } else {
+            SecretPersistenceOutcome::Failed(
+                "This connection requires temporary credentials; the password was not saved."
+                    .into(),
+            )
+        }
+    }))
 }
 
 fn reject_cancelled_response(cancelled: bool) -> SecretResult<()> {
@@ -872,6 +887,7 @@ fn connection_secret_values(
         .filter_map(|(setting_name, values)| {
             let secrets = known_secret_keys(setting_name)
                 .iter()
+                .filter(|key| secret_may_be_saved(connection, setting_name, key))
                 .filter_map(|key| {
                     values
                         .get(*key)
@@ -890,7 +906,21 @@ fn owned_value(value: String) -> zbus::fdo::Result<OwnedValue> {
         .map_err(|err| zbus::fdo::Error::Failed(format!("create D-Bus secret variant: {err:#}")))
 }
 
+fn secret_may_be_saved(connection: &ConnectionSettings, setting: &str, key: &str) -> bool {
+    let flags_key = if key.starts_with("wep-key") {
+        "wep-key-flags".to_string()
+    } else {
+        format!("{key}-flags")
+    };
+    let flags = connection
+        .get(setting)
+        .and_then(|values| crate::variant::setting::<u32>(values, &flags_key))
+        .unwrap_or(0);
+    flags & 2 == 0 // NetworkManager NOT_SAVED
+}
+
 struct PendingSecretRequest {
+    save_supported: bool,
     cancelled: Arc<AtomicBool>,
     nm_owner: Option<String>,
     id: String,
@@ -912,6 +942,7 @@ impl PendingSecretRequest {
         let connection_path = connection_path.to_string();
         let secret_keys = secret_keys_for(setting_name, &hints);
         Self {
+            save_supported: true,
             cancelled: Arc::new(AtomicBool::new(false)),
             nm_owner: None,
             id: crate::daemon_runtime::next_request_id("secret"),
@@ -981,7 +1012,7 @@ fn normalize_plugin_hint(setting_name: &str, hint: &str) -> String {
     hint.to_string()
 }
 
-fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
+pub(crate) fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
     match setting_name {
         "802-11-wireless-security" => &[
             "psk",
@@ -1361,8 +1392,33 @@ mod tests {
         drop(registration);
         assert!(remove_pending("timed-out").is_none());
     }
+    #[test]
+    fn remember_defaults_on_but_native_not_saved_wins() -> anyhow::Result<()> {
+        let params: super::SecretProvideParams =
+            serde_json::from_value(serde_json::json!({"request_id": "test"}))?;
+        assert!(params.save);
+        let params: super::SecretProvideParams =
+            serde_json::from_value(serde_json::json!({"request_id": "test", "save": false}))?;
+        assert!(!params.save);
+        let settings = ConnectionSettings::from([(
+            "802-11-wireless-security".into(),
+            crate::variant::value_map([
+                ("psk", "temporary-secret".into()),
+                ("psk-flags", 2_u32.into()),
+            ])?,
+        )]);
+        assert!(!super::secret_may_be_saved(
+            &settings,
+            "802-11-wireless-security",
+            "psk"
+        ));
+        assert!(super::connection_secret_values(&settings).is_empty());
+        Ok(())
+    }
+
     fn pending_request(id: &str, key: &str) -> PendingSecretRequest {
         PendingSecretRequest {
+            save_supported: true,
             cancelled: Default::default(),
             nm_owner: None,
             id: id.to_string(),

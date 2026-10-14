@@ -1464,7 +1464,7 @@ fn secret_capabilities_fixture() -> Value {
         "keyring": {
             "available": true,
             "persistence_supported": true,
-            "default_save": false,
+            "default_save": true,
             "prompt_handling": "unlock",
             "prompt_policy": "interactive_unlock_with_timeout",
         },

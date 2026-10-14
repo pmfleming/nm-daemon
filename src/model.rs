@@ -1055,6 +1055,9 @@ pub(crate) struct EnterpriseAuth {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub(crate) struct TargetProfileSettings {
+    /// False creates a volatile profile without changing any saved profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) remember: Option<bool>,
     pub(crate) autoconnect: Option<bool>,
     pub(crate) autoconnect_priority: Option<i32>,
     pub(crate) metered: Option<String>,

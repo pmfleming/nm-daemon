@@ -1135,7 +1135,7 @@
       },
       "keyring": {
         "available": true,
-        "default_save": false,
+        "default_save": true,
         "persistence_supported": true,
         "prompt_handling": "unlock",
         "prompt_policy": "interactive_unlock_with_timeout"

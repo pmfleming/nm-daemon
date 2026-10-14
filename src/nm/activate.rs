@@ -23,6 +23,9 @@ impl Nm {
         password: Option<&str>,
         wep_key_type: Option<WepKeyType>,
     ) -> Result<Option<OwnedObjectPath>> {
+        if target.profile.remember == Some(false) {
+            return Ok(None); // Never update a saved profile for a temporary join.
+        }
         let Some((connection_path, device_path, specific_object)) =
             self.saved_wifi_activation_target_for(target)?
         else {
@@ -113,7 +116,7 @@ impl Nm {
             return Ok(None);
         };
         apply_target_connection_metadata(&mut settings, target)?;
-        self.add_and_activate(target.ssid.as_str(), settings, device.path, ap_path)
+        self.add_and_activate(target, settings, device.path, ap_path)
             .map(Some)
     }
 
@@ -152,24 +155,38 @@ impl Nm {
         self.request_hidden_scan(&device, target.ssid_bytes().as_ref())?;
         let mut settings = hidden_wifi_connection_settings(target, password, wep_key_type)?;
         apply_target_connection_metadata(&mut settings, target)?;
-        self.add_and_activate(
-            target.ssid.as_str(),
-            settings,
-            device.path,
-            root_object_path()?,
-        )
-        .map(Some)
+        self.add_and_activate(target, settings, device.path, root_object_path()?)
+            .map(Some)
     }
 
     fn add_and_activate(
         &self,
-        ssid: &str,
-        settings: ConnectionSettings,
+        target: &WifiConnectTarget,
+        mut settings: ConnectionSettings,
         device_path: OwnedObjectPath,
         specific_object: OwnedObjectPath,
     ) -> Result<WifiActivation> {
+        let ssid = target.ssid.as_str();
         tracing::info!(ssid, device = %device_path, specific_object = %specific_object, "calling NetworkManager AddAndActivateConnection");
         let nm = self.root_proxy();
+        if target.profile.remember == Some(false) {
+            make_temporary(&mut settings)?;
+            let options = crate::variant::value_map([("persist", "volatile".into())])?;
+            let (profile_path, active_path, _result): (
+                OwnedObjectPath,
+                OwnedObjectPath,
+                std::collections::HashMap<String, zvariant::OwnedValue>,
+            ) = nm
+                .call(
+                    "AddAndActivateConnection2",
+                    &(settings, device_path, specific_object, options),
+                )
+                .with_context(|| format!("temporary activation for Wi-Fi network {ssid}"))?;
+            return Ok(WifiActivation {
+                profile_path,
+                active_path,
+            });
+        }
         let (profile_path, active_path): (OwnedObjectPath, OwnedObjectPath) = nm
             .call(
                 "AddAndActivateConnection",
@@ -239,6 +256,66 @@ impl Nm {
                     .context("read ActiveConnection State")
             })
             .ok()
+    }
+}
+
+fn make_temporary(settings: &mut ConnectionSettings) -> Result<()> {
+    let connection = settings.entry("connection".into()).or_default();
+    connection.remove("uuid"); // A temporary clone must never replace a saved identity.
+    connection.insert("autoconnect".into(), super::owned_value(false)?);
+    for setting in ["802-11-wireless-security", "802-1x"] {
+        if let Some(section) = settings.get_mut(setting) {
+            for key in crate::daemon_secret::known_secret_keys(setting) {
+                let flags = if key.starts_with("wep-key") {
+                    "wep-key-flags".to_string()
+                } else {
+                    format!("{key}-flags")
+                };
+                section.insert(flags, super::owned_value(2_u32)?); // NOT_SAVED
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod remember_tests {
+    #[test]
+    fn temporary_settings_do_not_reuse_identity_or_save_credentials() -> anyhow::Result<()> {
+        use crate::variant::{setting, value_map};
+        let mut settings = super::ConnectionSettings::from([
+            (
+                "connection".into(),
+                value_map([("uuid", "saved-uuid".into()), ("autoconnect", true.into())])?,
+            ),
+            (
+                "802-11-wireless-security".into(),
+                value_map([("psk", "test-secret".into()), ("psk-flags", 1_u32.into())])?,
+            ),
+            (
+                "802-1x".into(),
+                value_map([("password", "enterprise-secret".into())])?,
+            ),
+        ]);
+        super::make_temporary(&mut settings)?;
+        assert!(!settings["connection"].contains_key("uuid"));
+        assert_eq!(
+            setting::<bool>(&settings["connection"], "autoconnect"),
+            Some(false)
+        );
+        assert_eq!(
+            setting::<u32>(&settings["802-11-wireless-security"], "psk-flags"),
+            Some(2)
+        );
+        assert_eq!(
+            setting::<u32>(&settings["802-1x"], "password-flags"),
+            Some(2)
+        );
+        assert_eq!(
+            setting::<&str>(&settings["802-11-wireless-security"], "psk"),
+            Some("test-secret")
+        );
+        Ok(())
     }
 }
 
