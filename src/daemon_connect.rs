@@ -436,6 +436,46 @@ mod tests {
     }
 
     #[test]
+    fn remember_policy_reaches_native_activation_and_every_retry_candidate() -> anyhow::Result<()> {
+        use crate::test_support::workflows::{FakeNm, Outcome};
+        for remember in [None, Some(true), Some(false)] {
+            let fake = FakeNm::new([Outcome::Connected], false)?;
+            let networks = fake
+                .nm
+                .network_entries_for_access_points(fake.nm.list_all_access_points()?)?;
+            let mut value = json!({"key": networks[0].key, "password": "synthetic-password"});
+            if let Some(remember) = remember {
+                value["remember"] = json!(remember);
+            }
+            let params: super::DbusConnectTargetParams = serde_json::from_value(value)?;
+            let request = params.into_request(&fake.nm)?;
+            for candidate in std::iter::once(&request.candidate).chain(&request.alternatives) {
+                assert_eq!(candidate.target.profile.remember, remember);
+            }
+            fake.nm
+                .add_and_activate_wifi_connection_for(
+                    &request.candidate.target,
+                    Some("synthetic-password"),
+                    None,
+                )?
+                .expect("native activation was requested");
+            let state = fake.state.lock().unwrap();
+            assert_eq!(
+                state.persist.as_deref(),
+                (remember == Some(false)).then_some("volatile")
+            );
+            if remember == Some(false) {
+                assert_eq!(
+                    crate::variant::setting::<bool>(&state.settings["connection"], "autoconnect"),
+                    Some(false)
+                );
+                assert!(!state.settings["connection"].contains_key("uuid"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn connect_payloads_preserve_common_and_variant_specific_fields() {
         let target =
             ConnectTargetIdentity::from_target(&example_connect_target(false), Some("key"));

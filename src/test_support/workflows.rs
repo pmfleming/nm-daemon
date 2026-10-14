@@ -36,7 +36,8 @@ pub(crate) struct State {
     ap: String,
     hotspot: bool,
     vpn: bool,
-    settings: ConnectionSettings,
+    pub(crate) settings: ConnectionSettings,
+    pub(crate) persist: Option<String>,
     pub(crate) activations: Vec<String>,
     pub(crate) deactivated: Vec<String>,
     pub(crate) deleted: usize,
@@ -100,6 +101,7 @@ impl FakeNm {
             hotspot: false,
             vpn,
             settings,
+            persist: None,
             activations: Vec::new(),
             deactivated: Vec::new(),
             deleted: 0,
@@ -253,7 +255,14 @@ impl Manager {
             crate::variant::value_string(&options["persist"]).as_deref(),
             Some("volatile")
         );
-        self.0.lock().unwrap().hotspot = true;
+        {
+            let mut state = self.0.lock().unwrap();
+            state.persist = crate::variant::value_string(&options["persist"]);
+            state.hotspot = settings
+                .get("802-11-wireless")
+                .and_then(|values| crate::variant::setting::<&str>(values, "mode"))
+                == Some("ap");
+        }
         let (profile, active) = self
             .add_and_activate_connection(settings, device, specific, emitter)
             .await;

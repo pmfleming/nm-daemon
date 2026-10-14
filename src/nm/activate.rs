@@ -128,7 +128,9 @@ impl Nm {
         password: Option<&str>,
         wep_key_type: Option<WepKeyType>,
     ) -> Result<Option<ConnectionSettings>> {
-        if (password.is_some() || target.enterprise.is_some())
+        if (target.profile.remember == Some(false)
+            || password.is_some()
+            || target.enterprise.is_some())
             && let Some(saved) = self.saved_wifi_connection_settings_for_ap_on_device(ap, device)?
         {
             tracing::info!(ssid = %target.ssid, "cloning compatible saved profile settings for password/credential-supplied activation");
@@ -278,6 +280,22 @@ fn make_temporary(settings: &mut ConnectionSettings) -> Result<()> {
     Ok(())
 }
 
+fn missing_saved_profile_password(target: &WifiConnectTarget) -> anyhow::Error {
+    DomainError::connect(
+        crate::model::ConnectFailureReason::PasswordUnavailable,
+        format!(
+            "saved Wi-Fi profile for {} requires a secret agent or a newly supplied password",
+            target.ssid
+        ),
+    )
+    .with_detail("ssid", target.ssid.to_string())
+    .into()
+}
+
+fn root_object_path() -> Result<OwnedObjectPath> {
+    OwnedObjectPath::try_from("/").context("create root object path")
+}
+
 #[cfg(test)]
 mod remember_tests {
     #[test]
@@ -317,20 +335,4 @@ mod remember_tests {
         );
         Ok(())
     }
-}
-
-fn missing_saved_profile_password(target: &WifiConnectTarget) -> anyhow::Error {
-    DomainError::connect(
-        crate::model::ConnectFailureReason::PasswordUnavailable,
-        format!(
-            "saved Wi-Fi profile for {} requires a secret agent or a newly supplied password",
-            target.ssid
-        ),
-    )
-    .with_detail("ssid", target.ssid.to_string())
-    .into()
-}
-
-fn root_object_path() -> Result<OwnedObjectPath> {
-    OwnedObjectPath::try_from("/").context("create root object path")
 }

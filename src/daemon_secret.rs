@@ -207,7 +207,10 @@ impl SecretAgentInterface {
             let result = save_connection_secrets(&connection_path, &connection);
             let outcome = match &result {
                 Ok(()) => SecretPersistenceOutcome::Stored,
-                Err(error) => SecretPersistenceOutcome::Failed(format!("{error:#}")),
+                Err(error) => {
+                    tracing::warn!(%connection_path, error = %error, "NetworkManager password was not saved");
+                    SecretPersistenceOutcome::Failed(format!("{error:#}"))
+                },
             };
             emit_secret_persistence(&runtime, connection_path.as_str(), outcome);
             result.map_err(|error| zbus::fdo::Error::Failed(format!("{error:#}")))
@@ -340,8 +343,9 @@ fn wait_for_secret_response(
     })?;
 
     let response = registration.recv_timeout(SECRET_TIMEOUT).map_err(|_| {
-        // Retire the frontend prompt as well as the native registration. A late
-        // submission must not look like a successful credential handoff.
+        // Retire before publishing expiry, including a reply racing that event.
+        remove_pending(&request.id);
+        // A late submission must not look like a successful credential handoff.
         emit_secret_event(
             runtime,
             &request.id,

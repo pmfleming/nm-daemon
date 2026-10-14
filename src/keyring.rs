@@ -264,13 +264,15 @@ impl SecretServiceClient {
         password: &str,
     ) -> Result<KeyringOutcome<()>> {
         let collection = self.collection()?;
-        let collection_proxy = Proxy::new(
-            &self.connection,
-            self.destination.as_str(),
-            collection.as_str(),
-            SECRET_COLLECTION_IFACE,
-        )
-        .context("create Secret Service collection proxy")?;
+        // Re-read Locked after the unlock reply; a cached property can still
+        // contain the pre-prompt value until PropertiesChanged is dispatched.
+        let collection_proxy: Proxy<'_> = zbus::blocking::proxy::Builder::new(&self.connection)
+            .destination(self.destination.as_str())?
+            .path(collection.as_str())?
+            .interface(SECRET_COLLECTION_IFACE)?
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .context("create Secret Service collection proxy")?;
         if collection_proxy.get_property::<bool>("Locked")? {
             match self.unlock(vec![collection.clone()])? {
                 KeyringOutcome::Completed(_) => {
@@ -410,10 +412,13 @@ impl SecretServiceClient {
                 .await?;
                 // Subscribe before Prompt: a provider may complete synchronously.
                 let mut completed = proxy.receive_signal("Completed").await?;
-                proxy.call::<_, _, ()>("Prompt", &("",)).await?;
-                let result = tokio::time::timeout(timeout, completed.next()).await;
+                let result = tokio::time::timeout(timeout, async {
+                    proxy.call::<_, _, ()>("Prompt", &("",)).await?;
+                    Ok::<_, zbus::Error>(completed.next().await)
+                })
+                .await;
                 match result {
-                    Ok(Some(message)) => {
+                    Ok(Ok(Some(message))) => {
                         let (dismissed, value): (bool, OwnedValue) =
                             message.body().deserialize()?;
                         if dismissed {
@@ -421,8 +426,13 @@ impl SecretServiceClient {
                         }
                         Ok(value)
                     }
+                    Ok(Err(error)) => Err(error.into()),
                     _ => {
-                        let _ = proxy.call::<_, _, ()>("Dismiss", &()).await;
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            proxy.call::<_, _, ()>("Dismiss", &()),
+                        )
+                        .await;
                         bail!("desktop keyring unlock timed out; unlock it and retry")
                     }
                 }
@@ -521,7 +531,7 @@ fn secret_label(settings: &ConnectionSettings, setting_name: &str, key: &str) ->
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use zvariant::{OwnedObjectPath, OwnedValue};
 
@@ -853,6 +863,8 @@ mod tests {
     }
 
     struct UnlockPrompt {
+        lock: Option<Arc<AtomicBool>>,
+        targets: Option<Arc<std::sync::Mutex<Vec<OwnedObjectPath>>>>,
         dismissed: bool,
         complete: bool,
         dismissals: Arc<AtomicUsize>,
@@ -866,7 +878,17 @@ mod tests {
             #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
         ) -> zbus::fdo::Result<()> {
             if self.complete {
-                let value = zvariant::Value::new(vec![object_path(COLLECTION_PATH)]);
+                if !self.dismissed
+                    && let Some(lock) = &self.lock
+                {
+                    lock.store(false, Ordering::Relaxed);
+                }
+                let unlocked = self
+                    .targets
+                    .as_ref()
+                    .map(|targets| targets.lock().unwrap().clone())
+                    .unwrap_or_else(|| vec![object_path(COLLECTION_PATH)]);
+                let value = zvariant::Value::new(unlocked);
                 Self::completed(&emitter, self.dismissed, value).await?;
             }
             Ok(())
@@ -890,6 +912,8 @@ mod tests {
             peer.server.object_server().at(
                 PROMPT_PATH,
                 UnlockPrompt {
+                    lock: None,
+                    targets: None,
                     dismissed,
                     complete,
                     dismissals: dismissals.clone(),
@@ -915,6 +939,172 @@ mod tests {
             }
             assert_eq!(dismissals.load(Ordering::Relaxed), usize::from(!complete));
         }
+        Ok(())
+    }
+
+    type StoredItem = (HashMap<String, String>, Vec<u8>);
+
+    #[derive(Default)]
+    struct StoredCollection {
+        locked: Arc<AtomicBool>,
+        unlock_targets: Arc<std::sync::Mutex<Vec<OwnedObjectPath>>>,
+        item: std::sync::Mutex<Option<StoredItem>>,
+    }
+    struct PersistenceService(Arc<StoredCollection>);
+    #[zbus::interface(name = "org.freedesktop.Secret.Service")]
+    impl PersistenceService {
+        fn read_alias(&self, _alias: &str) -> OwnedObjectPath {
+            object_path(COLLECTION_PATH)
+        }
+        fn search_items(
+            &self,
+            attrs: HashMap<String, String>,
+        ) -> (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) {
+            let found = self
+                .0
+                .item
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(stored, _)| {
+                    attrs
+                        .iter()
+                        .all(|(key, value)| stored.get(key) == Some(value))
+                });
+            let items = if found {
+                vec![object_path(ITEM_ONE_PATH)]
+            } else {
+                vec![]
+            };
+            if self.0.locked.load(Ordering::Relaxed) {
+                (vec![], items)
+            } else {
+                (items, vec![])
+            }
+        }
+        fn unlock(&self, objects: Vec<OwnedObjectPath>) -> (Vec<OwnedObjectPath>, OwnedObjectPath) {
+            *self.0.unlock_targets.lock().unwrap() = objects.clone();
+            if self.0.locked.load(Ordering::Relaxed) {
+                (vec![], object_path(PROMPT_PATH))
+            } else {
+                (objects, object_path("/"))
+            }
+        }
+        fn get_secrets(
+            &self,
+            items: Vec<OwnedObjectPath>,
+            session: OwnedObjectPath,
+        ) -> HashMap<OwnedObjectPath, Secret> {
+            assert!(!self.0.locked.load(Ordering::Relaxed));
+            assert!(items.iter().all(|item| item.as_str() == ITEM_ONE_PATH));
+            let item = self.0.item.lock().unwrap();
+            items
+                .into_iter()
+                .map(|path| {
+                    (
+                        path,
+                        (
+                            session.clone(),
+                            vec![],
+                            item.as_ref().unwrap().1.clone(),
+                            "text/plain".into(),
+                        ),
+                    )
+                })
+                .collect()
+        }
+    }
+    struct PersistenceCollection(Arc<StoredCollection>);
+    #[zbus::interface(name = "org.freedesktop.Secret.Collection")]
+    impl PersistenceCollection {
+        #[zbus(property)]
+        fn locked(&self) -> bool {
+            self.0.locked.load(Ordering::Relaxed)
+        }
+        fn create_item(
+            &self,
+            mut props: HashMap<String, OwnedValue>,
+            secret: Secret,
+            _replace: bool,
+        ) -> (OwnedObjectPath, OwnedObjectPath) {
+            assert!(!self.locked(), "must unlock before CreateItem");
+            let attrs = HashMap::<String, String>::try_from(
+                props.remove(super::ITEM_ATTRIBUTES_KEY).unwrap(),
+            )
+            .unwrap();
+            *self.0.item.lock().unwrap() = Some((attrs, secret.2));
+            (object_path(ITEM_ONE_PATH), object_path("/"))
+        }
+    }
+    #[test]
+    fn locked_save_survives_new_agent_session_and_relocked_lookup() -> anyhow::Result<()> {
+        let peer = TestPeer::new(":1.0", ":1.1");
+        let state = Arc::new(StoredCollection::default());
+        state.locked.store(true, Ordering::Relaxed);
+        peer.server
+            .object_server()
+            .at(SECRET_SERVICE_PATH, PersistenceService(state.clone()))?;
+        peer.server
+            .object_server()
+            .at(COLLECTION_PATH, PersistenceCollection(state.clone()))?;
+        peer.server.object_server().at(
+            PROMPT_PATH,
+            UnlockPrompt {
+                lock: Some(state.locked.clone()),
+                targets: Some(state.unlock_targets.clone()),
+                dismissed: false,
+                complete: true,
+                dismissals: Arc::new(AtomicUsize::new(0)),
+            },
+        )?;
+        let settings = crate::nm::ConnectionSettings::from([(
+            "connection".into(),
+            crate::variant::value_map([("uuid", "stable-profile".into())])?,
+        )]);
+        let make_client = |interactive, session| super::Keyring {
+            client: SecretServiceClient {
+                interactive,
+                connection: peer.client.clone(),
+                destination: ":1.0".into(),
+                session: object_path(session),
+            },
+        };
+        let first = make_client(true, "/session/one");
+        assert!(matches!(
+            first.store_secret(
+                "/old/path",
+                &settings,
+                "802-11-wireless-security",
+                "psk",
+                "synthetic-secret"
+            )?,
+            KeyringOutcome::Completed(())
+        ));
+        drop(first);
+        let second = make_client(false, "/session/two");
+        let keys = vec!["psk".into()];
+        let KeyringOutcome::Completed(secrets) =
+            second.lookup_secrets("/new/path", &settings, "802-11-wireless-security", &keys)?
+        else {
+            panic!("saved UUID must survive a new agent session")
+        };
+        assert_eq!(secrets[0].password, "synthetic-secret");
+        state.locked.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            second.lookup_secrets("/new/path", &settings, "802-11-wireless-security", &keys)?,
+            KeyringOutcome::PromptUnsupported { .. }
+        ));
+        assert!(
+            state.locked.load(Ordering::Relaxed),
+            "background lookup cannot unlock"
+        );
+        let third = make_client(true, "/session/three");
+        let KeyringOutcome::Completed(secrets) =
+            third.lookup_secrets("/new/path", &settings, "802-11-wireless-security", &keys)?
+        else {
+            panic!("interactive unlock must recover the saved password")
+        };
+        assert_eq!(secrets[0].password, "synthetic-secret");
         Ok(())
     }
 
