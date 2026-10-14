@@ -1,5 +1,17 @@
 # Wi-Fi credential regression acceptance
 
+## Manual Connect follow-up
+
+See [manual-wifi-activation.md](manual-wifi-activation.md) for the saved-profile
+activation policy, coordinated credential deadlines, retirement/outcome handling,
+private-bus callback regressions and remaining deployment gates. Automatic
+connection working is not sufficient evidence for the actual Connect-button path.
+Follow-up validation: **133 Rust tests passed, four ignored**; the real GNOME
+keyring provider test passed separately. Clippy with warnings denied, Rust format,
+API contract and generated-binding checks pass. Shelllist reports **651 Qt checks
+passed, one existing skip**, with strict QML lint passing.
+The earlier counts below describe the prior correction, not this follow-up.
+
 ## Post-deployment correction — 2026-10-14
 
 The initial fixes (fb2475e, 2a60b2d, 1f4f60e) passed isolated tests but the

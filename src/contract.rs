@@ -1149,7 +1149,10 @@ fn operation_stream_events(stream: Stream) -> Vec<Value> {
                 ),
                 ("cancelled", json!({})),
                 ("delivered", json!({})),
-                ("persistence", json!({ "status": "stored", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" })),
+                (
+                    "persistence",
+                    json!({ "status": "stored", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" }),
+                ),
                 (
                     "persistence",
                     json!({ "status": "prompt_unsupported", "operation": "create", "prompt": "/org/freedesktop/secrets/prompt/1", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" }),
