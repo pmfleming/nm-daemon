@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+mod prompts;
+#[cfg(test)]
+mod real_provider;
+
 use anyhow::{Context, Result, bail};
 use zbus::blocking::{Connection, Proxy};
 use zvariant::{OwnedObjectPath, OwnedValue, Value};
@@ -74,8 +78,8 @@ impl Keyring {
         })
     }
 
-    /// Only credential requests allowing interaction and explicit saves may
-    /// open the desktop's unlock dialog. Background reads remain noninteractive.
+    /// Explicit saves may open the desktop's unlock dialog. Credential delivery
+    /// and background reads remain noninteractive.
     pub(crate) fn interactive() -> Result<Self> {
         let mut keyring = Self::new()?;
         keyring.client.interactive = true;
@@ -182,11 +186,17 @@ type Secret = (OwnedObjectPath, Vec<u8>, Vec<u8>, String);
 impl SecretServiceClient {
     fn new() -> Result<Self> {
         let connection = Connection::session().context("connect to session D-Bus for keyring")?;
-        let destination = SECRET_DEST.to_string();
-        let service = service_proxy(&connection, &destination)?;
-        let (_output, session): (OwnedValue, OwnedObjectPath) = service
-            .call("OpenSession", &("plain", Value::new("")))
+        // Activate through OpenSession, then pin calls to this provider.
+        let service = service_proxy(&connection, SECRET_DEST)?;
+        let reply = service
+            .call_method("OpenSession", &("plain", Value::new("")))
             .context("open Secret Service session")?;
+        let (_output, session): (OwnedValue, OwnedObjectPath) = reply.body().deserialize()?;
+        let destination = reply
+            .header()
+            .sender()
+            .context("Secret Service reply has no owner")?
+            .to_string();
         drop(service);
         Ok(Self {
             interactive: false,
@@ -309,7 +319,7 @@ impl SecretServiceClient {
         if prompt.as_str() == NULL_PROMPT {
             Ok(KeyringOutcome::Completed(()))
         } else {
-            self.dismiss_prompt(prompt, KeyringPromptOperation::Create, ())
+            self.unsupported_prompt(prompt, KeyringPromptOperation::Create, ())
         }
     }
 
@@ -340,7 +350,7 @@ impl SecretServiceClient {
             if prompt.as_str() == NULL_PROMPT {
                 deleted += 1;
             } else {
-                return self.dismiss_prompt(prompt, KeyringPromptOperation::Delete, deleted);
+                return self.unsupported_prompt(prompt, KeyringPromptOperation::Delete, deleted);
             }
         }
         Ok(KeyringOutcome::Completed(deleted))
@@ -373,89 +383,31 @@ impl SecretServiceClient {
     }
 
     fn unlock(&self, locked: Vec<OwnedObjectPath>) -> Result<KeyringOutcome<Vec<OwnedObjectPath>>> {
-        let service = self.service_proxy()?;
-        let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = service
-            .call("Unlock", &(locked,))
-            .context("unlock Secret Service items")?;
-        if prompt.as_str() == NULL_PROMPT {
-            Ok(KeyringOutcome::Completed(unlocked))
-        } else if self.interactive {
-            let result = self.complete_prompt(&prompt, std::time::Duration::from_secs(45))?;
-            let mut items = unlocked;
-            items.extend(
-                Vec::<OwnedObjectPath>::try_from(result)
-                    .context("decode Secret Service unlock result")?,
-            );
-            Ok(KeyringOutcome::Completed(items))
-        } else {
-            self.dismiss_prompt(prompt, KeyringPromptOperation::Unlock, unlocked)
+        if !self.interactive {
+            // Do not even allocate a provider prompt on the delivery path.
+            return Ok(KeyringOutcome::PromptUnsupported {
+                operation: KeyringPromptOperation::Unlock,
+                prompt: OwnedObjectPath::try_from(NULL_PROMPT)?,
+                completed: Vec::new(),
+            });
         }
+        prompts::unlock(
+            &self.connection,
+            &self.destination,
+            locked,
+            std::time::Duration::from_secs(45),
+        )
+        .map(KeyringOutcome::Completed)
     }
 
-    fn complete_prompt(
-        &self,
-        path: &OwnedObjectPath,
-        timeout: std::time::Duration,
-    ) -> Result<OwnedValue> {
-        use futures::StreamExt;
-        // This code runs on a blocking worker, never on the daemon executor.
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(async {
-                let proxy = zbus::Proxy::new(
-                    self.connection.inner(),
-                    self.destination.as_str(),
-                    path.as_str(),
-                    SECRET_PROMPT_IFACE,
-                )
-                .await?;
-                // Subscribe before Prompt: a provider may complete synchronously.
-                let mut completed = proxy.receive_signal("Completed").await?;
-                let result = tokio::time::timeout(timeout, async {
-                    proxy.call::<_, _, ()>("Prompt", &("",)).await?;
-                    Ok::<_, zbus::Error>(completed.next().await)
-                })
-                .await;
-                match result {
-                    Ok(Ok(Some(message))) => {
-                        let (dismissed, value): (bool, OwnedValue) =
-                            message.body().deserialize()?;
-                        if dismissed {
-                            bail!("desktop keyring unlock cancelled; unlock it and retry");
-                        }
-                        Ok(value)
-                    }
-                    Ok(Err(error)) => Err(error.into()),
-                    _ => {
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(2),
-                            proxy.call::<_, _, ()>("Dismiss", &()),
-                        )
-                        .await;
-                        bail!("desktop keyring unlock timed out; unlock it and retry")
-                    }
-                }
-            })
-    }
-
-    fn dismiss_prompt<T>(
+    fn unsupported_prompt<T>(
         &self,
         prompt: OwnedObjectPath,
         operation: KeyringPromptOperation,
         completed: T,
     ) -> Result<KeyringOutcome<T>> {
-        let prompt_proxy = Proxy::new(
-            &self.connection,
-            self.destination.as_str(),
-            prompt.as_str(),
-            SECRET_PROMPT_IFACE,
-        )
-        .with_context(|| format!("create Secret Service {operation} prompt proxy"))?;
-        prompt_proxy
-            .call::<_, _, ()>("Dismiss", &())
-            .with_context(|| format!("dismiss unsupported Secret Service {operation} prompt"))?;
-        drop(prompt_proxy);
+        // Never presented: let the provider release these with the connection.
+        // Do not Dismiss while another unlock may be active in the provider.
         Ok(KeyringOutcome::PromptUnsupported {
             operation,
             prompt,
@@ -773,12 +725,11 @@ mod tests {
     }
 
     #[test]
-    fn fake_secret_service_prompts_are_dismissed_and_never_counted_as_success() -> anyhow::Result<()>
-    {
+    fn fake_secret_service_prompts_are_never_counted_as_success() -> anyhow::Result<()> {
         crate::test_support::workflows::isolated(
             concat!(
                 module_path!(),
-                "::fake_secret_service_prompts_are_dismissed_and_never_counted_as_success"
+                "::fake_secret_service_prompts_are_never_counted_as_success"
             ),
             || {
                 run_prompt_test();
@@ -859,7 +810,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(dismissals.load(Ordering::Relaxed), 3);
+        assert_eq!(dismissals.load(Ordering::Relaxed), 0);
     }
 
     struct UnlockPrompt {
@@ -925,19 +876,34 @@ mod tests {
                 destination: ":1.0".into(),
                 session: object_path("/session/test"),
             };
-            let result = client.complete_prompt(
-                &object_path(PROMPT_PATH),
+            peer.server
+                .object_server()
+                .at(SECRET_SERVICE_PATH, FakeSecretService)?;
+            let result = super::prompts::unlock(
+                &client.connection,
+                &client.destination,
+                vec![object_path(COLLECTION_PATH)],
                 std::time::Duration::from_millis(100),
             );
             if complete && !dismissed {
-                assert_eq!(
-                    Vec::<OwnedObjectPath>::try_from(result?)?,
-                    vec![object_path(COLLECTION_PATH)]
-                );
+                assert_eq!(result?, vec![object_path(COLLECTION_PATH)]);
             } else {
                 assert!(result.is_err());
             }
-            assert_eq!(dismissals.load(Ordering::Relaxed), usize::from(!complete));
+            assert_eq!(dismissals.load(Ordering::Relaxed), 0);
+            if !complete {
+                let retry = std::time::Instant::now();
+                assert!(
+                    super::prompts::unlock(
+                        &client.connection,
+                        &client.destination,
+                        vec![object_path(COLLECTION_PATH)],
+                        std::time::Duration::from_secs(1)
+                    )
+                    .is_err()
+                );
+                assert!(retry.elapsed() < std::time::Duration::from_millis(100));
+            }
         }
         Ok(())
     }

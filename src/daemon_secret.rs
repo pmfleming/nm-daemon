@@ -11,6 +11,10 @@ use zbus::blocking::Connection;
 use zbus::message::Header;
 
 mod lifecycle;
+mod persistence;
+#[cfg(test)]
+mod regressions;
+mod session;
 pub(crate) use lifecycle::watch_network_manager;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
@@ -117,6 +121,7 @@ fn change_network_manager_owner(runtime: &Arc<DaemonRuntime>, owner: Option<Stri
             .map(|(id, entry)| (id, entry.sender))
             .collect::<Vec<_>>()
     });
+    session::clear(None);
     runtime.network_manager_owner_changed(owner.as_deref());
     let weak = Arc::downgrade(runtime);
     for (id, sender) in cancelled {
@@ -156,7 +161,8 @@ impl SecretAgentInterface {
         hints: Vec<String>,
         flags: u32,
         #[zbus(header)] header: Header<'_>,
-    ) -> Result<ConnectionSettings, SecretAgentError> {
+    ) -> Result<zbus::object_server::ResponseDispatchNotifier<ConnectionSettings>, SecretAgentError>
+    {
         let mut request = PendingSecretRequest::new(connection_path, setting_name, hints, flags);
         request.save_supported = request
             .secret_keys
@@ -166,16 +172,32 @@ impl SecretAgentInterface {
         let runtime = self.runtime.clone();
         // Register before scheduling/performing keyring I/O, not only when a prompt is needed.
         let inflight = InflightRegistration::new(&request, &runtime)?;
-        secret_worker(move || {
+        let request_id = request.id.clone();
+        let profile_path = request.connection_path.clone();
+        let owner = request.nm_owner.clone();
+        let (connection, save) = secret_worker(move || {
             let _inflight = inflight;
-            resolve_secret_request(
+            let mut save = None;
+            let connection = resolve_secret_request(
                 request,
                 connection,
                 apply_stored_secret,
-                |request, connection| wait_for_secret_response(&runtime, request, connection),
-            )
+                |request, connection| {
+                    wait_for_secret_response(&runtime, request, connection, &mut save)
+                },
+            )?;
+            Ok::<_, SecretAgentError>((connection, save))
         })
-        .await
+        .await?;
+        Ok(persistence::after_reply(
+            connection,
+            self.runtime.clone(),
+            request_id,
+            profile_path,
+            owner,
+            true,
+            save,
+        ))
     }
 
     async fn cancel_get_secrets(
@@ -185,6 +207,7 @@ impl SecretAgentInterface {
         #[zbus(header)] header: Header<'_>,
     ) -> zbus::fdo::Result<()> {
         self.authorize(&header).await?;
+        session::clear(Some(connection_path.as_str()));
         tracing::info!(%connection_path, setting_name, "NetworkManager cancelled SecretAgent request");
         let key = PendingSecretRequest::key_for(connection_path.as_str(), setting_name);
         if let Some((request_id, sender)) = cancel_pending_by_key(&key) {
@@ -199,23 +222,29 @@ impl SecretAgentInterface {
         connection: ConnectionSettings,
         connection_path: OwnedObjectPath,
         #[zbus(header)] header: Header<'_>,
-    ) -> zbus::fdo::Result<()> {
+    ) -> zbus::fdo::Result<zbus::object_server::ResponseDispatchNotifier<()>> {
         let owner = self.authorize(&header).await?;
-        let runtime = self.runtime.clone();
-        secret_worker(move || {
-            ensure_secret_owner(Some(&owner))?;
-            let result = save_connection_secrets(&connection_path, &connection);
-            let outcome = match &result {
+        ensure_secret_owner(Some(&owner))?;
+        // NM may strip agent-owned passwords before GetSecrets. Retain a
+        // bounded, owner/UUID-scoped handoff before keyring I/O can block.
+        session::stage(&owner, connection_path.as_str(), &connection);
+        let request_id = connection_path.to_string();
+        let profile_path = request_id.clone();
+        let save = Box::new(
+            move || match save_connection_secrets(&connection_path, &connection) {
                 Ok(()) => SecretPersistenceOutcome::Stored,
-                Err(error) => {
-                    tracing::warn!(%connection_path, error = %error, "NetworkManager password was not saved");
-                    SecretPersistenceOutcome::Failed(format!("{error:#}"))
-                },
-            };
-            emit_secret_persistence(&runtime, connection_path.as_str(), outcome);
-            result.map_err(|error| zbus::fdo::Error::Failed(format!("{error:#}")))
-        })
-        .await
+                Err(error) => SecretPersistenceOutcome::Failed(format!("{error:#}")),
+            },
+        );
+        Ok(persistence::after_reply(
+            (),
+            self.runtime.clone(),
+            request_id,
+            profile_path,
+            Some(owner),
+            false,
+            Some(save),
+        ))
     }
 
     async fn delete_secrets(
@@ -225,6 +254,11 @@ impl SecretAgentInterface {
         #[zbus(header)] header: Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let owner = self.authorize(&header).await?;
+        session::clear(Some(connection_path.as_str()));
+        persistence::invalidate(connection_path.as_str());
+        // Finish any already-running write, then delete; queued saves cannot
+        // resurrect a forgotten profile's password after this reply.
+        let _writer = persistence::deletion_guard().await;
         secret_worker(move || {
             ensure_secret_owner(Some(&owner))?;
             delete_connection_secrets(&connection_path, &connection);
@@ -250,6 +284,9 @@ fn resolve_secret_request(
 ) -> SecretResult<ConnectionSettings> {
     ensure_request_owner(&request)?;
     // A fresh request must not reuse a password NetworkManager already rejected.
+    if request.flags & REQUEST_NEW != 0 {
+        session::clear(Some(&request.connection_path));
+    }
     let complete = request.flags & REQUEST_NEW == 0 && stored(&request, &mut connection)?;
     ensure_request_owner(&request)?;
     if complete {
@@ -268,6 +305,10 @@ fn apply_stored_secret(
     request: &PendingSecretRequest,
     connection: &mut ConnectionSettings,
 ) -> zbus::fdo::Result<bool> {
+    let supplied = session::take(request, connection);
+    if apply_stored_values(request, connection, supplied)? {
+        return Ok(true);
+    }
     let stored = lookup_stored_secrets(request, connection);
     apply_stored_values(request, connection, stored)
 }
@@ -278,12 +319,16 @@ fn apply_stored_values(
     stored: Vec<crate::keyring::KeyringSecret>,
 ) -> zbus::fdo::Result<bool> {
     for secret in stored {
-        apply_password(
-            connection,
-            &request.setting_name,
-            &secret.key,
-            secret.password,
-        )?;
+        // A partial native handoff may contain a freshly supplied password;
+        // filling other keys from storage must never replace it with an old one.
+        if !secret_value_present(request, connection, &secret.key) {
+            apply_password(
+                connection,
+                &request.setting_name,
+                &secret.key,
+                secret.password,
+            )?;
+        }
     }
     Ok(request_values_complete(request, connection))
 }
@@ -292,29 +337,35 @@ fn request_values_complete(
     request: &PendingSecretRequest,
     connection: &ConnectionSettings,
 ) -> bool {
+    request
+        .secret_keys
+        .iter()
+        .all(|key| secret_value_present(request, connection, key))
+}
+
+fn secret_value_present(
+    request: &PendingSecretRequest,
+    connection: &ConnectionSettings,
+    key: &str,
+) -> bool {
     let Some(section) = connection.get(&request.setting_name) else {
         return false;
     };
     if request.setting_name == "vpn" {
-        let secrets = section
+        return section
             .get("secrets")
             .and_then(value_string_map)
-            .unwrap_or_default();
-        return request.secret_keys.iter().all(|key| {
-            secrets
-                .get(key.as_str())
-                .is_some_and(|value| !value.is_empty())
-        });
+            .and_then(|values| values.get(key).copied())
+            .is_some_and(|value| !value.is_empty());
     }
-    request.secret_keys.iter().all(|key| {
-        crate::variant::setting::<&str>(section, key).is_some_and(|value| !value.is_empty())
-    })
+    crate::variant::setting::<&str>(section, key).is_some_and(|value| !value.is_empty())
 }
 
 fn wait_for_secret_response(
     runtime: &Weak<DaemonRuntime>,
     request: PendingSecretRequest,
     mut connection: ConnectionSettings,
+    save: &mut Option<persistence::Save>,
 ) -> SecretResult<ConnectionSettings> {
     let owners = runtime
         .upgrade()
@@ -355,9 +406,7 @@ fn wait_for_secret_response(
         SecretAgentError::NoSecrets(format!("timed out waiting for secret {}", request.id))
     })?;
     ensure_request_owner(&request)?;
-    if let Some(persistence) = apply_secret_response(&mut connection, &request, response)? {
-        emit_secret_persistence(runtime, &request.id, persistence);
-    }
+    *save = apply_secret_response(&mut connection, &request, response)?;
     Ok(connection)
 }
 
@@ -402,7 +451,7 @@ pub(crate) fn capabilities(_: SecretCapabilitiesParams) -> Result<Value> {
                 "implemented": true,
                 "persistence_outcomes": true,
             },
-            "message": "SecretAgent supports bounded desktop keyring unlock for interactive credential requests and saves; background lookups never prompt",
+            "message": "SecretAgent delivers credentials before deferred keyring saving; only saves may open a bounded desktop unlock dialog",
         }),
         "serialize secret-agent capabilities response JSON",
     )
@@ -436,8 +485,8 @@ pub(crate) fn provide(owner: Option<&str>, params: SecretProvideParams) -> Resul
             },
             "message": match (accepted, params.cancel, params.save) {
                 (true, true, _) => "Pending NetworkManager secret request cancelled",
-                (true, false, true) => "Secret provided to pending NetworkManager request; the wifi.secret stream reports the persistence outcome",
-                (true, false, false) => "Secret provided to pending NetworkManager request",
+                (true, false, true) => "Secret received; the wifi.secret stream reports NetworkManager delivery and persistence separately",
+                (true, false, false) => "Secret received; waiting for NetworkManager delivery",
                 (false, _, _) => "No pending SecretAgent request matched request_id",
             },
         }),
@@ -598,9 +647,10 @@ fn emit_secret_cancelled(runtime: &Weak<DaemonRuntime>, request_id: &str) {
 fn emit_secret_persistence(
     runtime: &Weak<DaemonRuntime>,
     request_id: &str,
+    connection_path: &str,
     outcome: SecretPersistenceOutcome,
 ) {
-    let data = match outcome {
+    let mut data = match outcome {
         SecretPersistenceOutcome::Stored => json!({
             "request_id": request_id,
             "status": "stored",
@@ -617,6 +667,7 @@ fn emit_secret_persistence(
             "error": error,
         }),
     };
+    data["connection_path"] = json!(connection_path);
     emit_secret_event(runtime, request_id, "persistence", data);
 }
 
@@ -637,11 +688,8 @@ fn lookup_stored_secrets(
     request: &PendingSecretRequest,
     connection: &ConnectionSettings,
 ) -> Vec<crate::keyring::KeyringSecret> {
-    let keyring = if request.flags & ALLOW_INTERACTION != 0 {
-        crate::keyring::Keyring::interactive()
-    } else {
-        crate::keyring::Keyring::new()
-    };
+    // Never put a desktop unlock dialog on NetworkManager's delivery deadline.
+    let keyring = crate::keyring::Keyring::new();
     let result = keyring.and_then(|keyring| {
         keyring.lookup_secrets(
             &request.connection_path,
@@ -671,7 +719,7 @@ fn apply_secret_response(
     connection: &mut ConnectionSettings,
     request: &PendingSecretRequest,
     response: SecretResponse,
-) -> SecretResult<Option<SecretPersistenceOutcome>> {
+) -> SecretResult<Option<persistence::Save>> {
     reject_cancelled_response(response.cancelled)?;
     let mut values = response_values(request, response.password, response.values);
     values.retain(|key, value| request.secret_keys.contains(key) && !value.is_empty());
@@ -686,16 +734,35 @@ fn apply_secret_response(
             "not all requested secrets were supplied".into(),
         ));
     }
-    Ok(response.save.then(|| {
-        if request.save_supported {
-            persistence_outcome(request, connection, &values)
-        } else {
-            SecretPersistenceOutcome::Failed(
+    if !response.save {
+        return Ok(None);
+    }
+    // Only public identity metadata is needed by the deferred save; do not
+    // duplicate the whole connection or unrelated credentials.
+    let mut identity = HashMap::new();
+    if let Some(section) = connection.get("connection") {
+        for key in ["uuid", "id"] {
+            if let Some(value) = section.get(key).and_then(value_string) {
+                identity.insert(key.to_string(), owned_value(value)?);
+            }
+        }
+    }
+    let settings = ConnectionSettings::from([("connection".into(), identity)]);
+    let request = request.clone();
+    Ok(Some(Box::new(move || {
+        if !request.save_supported {
+            return SecretPersistenceOutcome::Failed(
                 "This connection requires temporary credentials; the password was not saved."
                     .into(),
-            )
+            );
         }
-    }))
+        if ensure_request_owner(&request).is_err() {
+            return SecretPersistenceOutcome::Failed(
+                "Credential request cancelled before saving".into(),
+            );
+        }
+        persistence_outcome(&request, &settings, &values)
+    })))
 }
 
 fn reject_cancelled_response(cancelled: bool) -> SecretResult<()> {
@@ -923,6 +990,7 @@ fn secret_may_be_saved(connection: &ConnectionSettings, setting: &str, key: &str
     flags & 2 == 0 // NetworkManager NOT_SAVED
 }
 
+#[derive(Clone)]
 struct PendingSecretRequest {
     save_supported: bool,
     cancelled: Arc<AtomicBool>,
@@ -1359,6 +1427,7 @@ mod tests {
             &std::sync::Weak::new(),
             request,
             ConnectionSettings::new(),
+            &mut None,
         )
         .unwrap_err();
         assert_eq!(

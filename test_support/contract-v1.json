@@ -1140,14 +1140,14 @@
         "prompt_handling": "unlock",
         "prompt_policy": "interactive_unlock_with_timeout"
       },
-      "message": "SecretAgent supports bounded desktop keyring unlock for interactive credential requests and saves; background lookups never prompt",
+      "message": "SecretAgent delivers credentials before deferred keyring saving; only saves may open a bounded desktop unlock dialog",
       "registered": true
     }
   },
   "secret_provide": {
     "result": {
       "accepted": true,
-      "message": "Secret provided to pending NetworkManager request; the wifi.secret stream reports the persistence outcome",
+      "message": "Secret received; the wifi.secret stream reports NetworkManager delivery and persistence separately",
       "persistence_status": "pending",
       "request_id": "secret-contract",
       "save_requested": true,
@@ -1181,7 +1181,7 @@
             "private-key-password"
           ],
           "setting_name": "802-1x",
-          "timeout_ms": 120000
+          "timeout_ms": 90000
         },
         "event": "requested",
         "protocol": "nm-api",
@@ -1198,7 +1198,16 @@
         "version": 2
       },
       {
+        "data": {},
+        "event": "delivered",
+        "protocol": "nm-api",
+        "request_id": "secret-contract",
+        "stream": "wifi.secret",
+        "version": 2
+      },
+      {
         "data": {
+          "connection_path": "/org/freedesktop/NetworkManager/Settings/1",
           "status": "stored"
         },
         "event": "persistence",
@@ -1209,6 +1218,7 @@
       },
       {
         "data": {
+          "connection_path": "/org/freedesktop/NetworkManager/Settings/1",
           "operation": "create",
           "prompt": "/org/freedesktop/secrets/prompt/1",
           "status": "prompt_unsupported"
@@ -1221,6 +1231,7 @@
       },
       {
         "data": {
+          "connection_path": "/org/freedesktop/NetworkManager/Settings/1",
           "error": "keyring unavailable",
           "status": "failed"
         },

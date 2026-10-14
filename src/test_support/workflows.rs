@@ -656,6 +656,8 @@ pub(crate) fn isolated(name: &str, run: impl FnOnce() -> Result<()>) -> Result<(
         .env("TOKIO_WORKER_THREADS", "1")
         .env("XDG_RUNTIME_DIR", &directory)
         .env("XDG_STATE_HOME", &directory)
+        // A regression must fail, not fall through to the live desktop keyring.
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/nm-workflow-bus")
         .spawn()?;
     let deadline = Instant::now() + Duration::from_secs(45);
     let result = loop {

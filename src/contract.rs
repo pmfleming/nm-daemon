@@ -173,7 +173,7 @@ fn wifi_method_fixtures() -> Value {
             "accepted": true,
             "save_requested": true,
             "persistence_status": "pending",
-            "message": "Secret provided to pending NetworkManager request; the wifi.secret stream reports the persistence outcome",
+            "message": "Secret received; the wifi.secret stream reports NetworkManager delivery and persistence separately",
         })),
         "wifi-qr.parse": response_fixture(Method::WifiQrParse, json!(contract_parsed_qr("WIFI:T:WPA;S:Example;P:correct horse battery staple;;"))),
         "wifi-qr.render": response_fixture(Method::WifiQrRender, serde_json::json!({"shareable": true, "qr_svg": crate::qr::render_share("WIFI:T:nopass;S:Guest;;").unwrap(), "qr_payload": "WIFI:T:nopass;S:Guest;;", "password": null, "ssid": "Guest"})),
@@ -1144,18 +1144,19 @@ fn operation_stream_events(stream: Stream) -> Vec<Value> {
                         "primary_secret_key": "password",
                         "flags": 0,
                         "save_supported": true,
-                        "timeout_ms": 120000,
+                        "timeout_ms": crate::generated::SECRET_TIMEOUT.as_millis(),
                     }),
                 ),
                 ("cancelled", json!({})),
-                ("persistence", json!({ "status": "stored" })),
+                ("delivered", json!({})),
+                ("persistence", json!({ "status": "stored", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" })),
                 (
                     "persistence",
-                    json!({ "status": "prompt_unsupported", "operation": "create", "prompt": "/org/freedesktop/secrets/prompt/1" }),
+                    json!({ "status": "prompt_unsupported", "operation": "create", "prompt": "/org/freedesktop/secrets/prompt/1", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" }),
                 ),
                 (
                     "persistence",
-                    json!({ "status": "failed", "error": "keyring unavailable" }),
+                    json!({ "status": "failed", "error": "keyring unavailable", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" }),
                 ),
             ],
         ),
@@ -1473,7 +1474,7 @@ fn secret_capabilities_fixture() -> Value {
             "implemented": true,
             "persistence_outcomes": true,
         },
-        "message": "SecretAgent supports bounded desktop keyring unlock for interactive credential requests and saves; background lookups never prompt",
+        "message": "SecretAgent delivers credentials before deferred keyring saving; only saves may open a bounded desktop unlock dialog",
     })
 }
 

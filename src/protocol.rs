@@ -686,7 +686,7 @@ pub(crate) static STREAM_REGISTRY: &[StreamSpec; 14] = &[
         subscribable: true,
         default: false,
         delivery: StreamDelivery::External,
-        events: &["subscribed", "requested", "cancelled", "persistence"],
+        events: &["subscribed", "requested", "cancelled", "delivered", "persistence"],
         description: "SecretAgent prompt, cancellation, and keyring persistence events.",
     },
     StreamSpec {

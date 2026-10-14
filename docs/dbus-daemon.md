@@ -91,7 +91,7 @@ signal Event(s stream, s event_json)
 | `wifi.scan` | true | true | `Operation` | `subscribed, status, warning, snapshot, complete, cancelled, failed` | Events associated with a wifi.scan request id. |
 | `wifi.connect` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a wifi.connectTarget request id. |
 | `wifi.band` | true | false | `Operation` | `subscribed, started, progress, succeeded, failed, cancelled` | Events associated with a transactional wifi.band.set request id. |
-| `wifi.secret` | true | false | `External` | `subscribed, requested, cancelled, persistence` | SecretAgent prompt, cancellation, and keyring persistence events. |
+| `wifi.secret` | true | false | `External` | `subscribed, requested, cancelled, delivered, persistence` | SecretAgent prompt, cancellation, and keyring persistence events. |
 | `daemon.request` | false | false | `Internal` | `cancelled` | Internal request-cancellation acknowledgements. |
 | `daemon.subscription` | false | false | `Internal` | `cancelled` | Internal subscription-cancellation acknowledgements. |
 
@@ -446,7 +446,8 @@ Events:
 
 - `requested`: NetworkManager needs one or more secrets.
 - `cancelled`: NetworkManager cancelled a pending secret request, or it expired (`data.reason: "expired"`).
-- `persistence`: a `save:true`, NetworkManager `SaveSecrets`, or `DeleteSecrets` keyring action completed, required an unsupported prompt, or failed.
+- `delivered`: the GetSecrets reply was dispatched to NetworkManager. This does not assert authentication or connection success.
+- `persistence`: a `save:true` or NetworkManager `SaveSecrets` action completed, required an unsupported prompt, or failed. `connection_path` correlates a later retry for the same profile; deletion remains best-effort.
 
 Shelllist answers with named values, or explicitly cancels the request:
 
@@ -456,7 +457,11 @@ Call("wifi.secret.provide", "{\"request_id\":\"...\",\"values\":{\"psk\":\"...\"
 
 Saving defaults on when `save` is omitted; explicit `save:false` remains an opt-out. Native NOT_SAVED flags take precedence over any save request. `wifi.connectTarget` and `wifi.qr.connect` accept `remember:false` to create a volatile, non-autoconnecting profile using `AddAndActivateConnection2`, without updating an existing saved profile. Omission preserves the normal persistent connection path. Forget remains the explicit way to remove an earlier saved network.
 
-When `save:true`, the provide response reports `persistence_status: "pending"`; a subsequent `wifi.secret persistence` event reports `stored`, `prompt_unsupported`, or `failed`. Interactive lookups and explicit saves support the desktop provider's unlock prompt, bounded to 45 seconds. Cancellation and timeout are failures; background lookups never present prompts. Saves unlock the collection before creating an item. Create/delete prompts remain unsupported. NetworkManager `SaveSecrets` emits a persistence result and returns failures instead of acknowledging a failed save; deletion retains its existing best-effort behavior.
+The provide response acknowledges **daemon receipt**, not delivery, activation or storage. When `save:true`, it reports `persistence_status: "pending"`; `delivered` follows dispatch of the GetSecrets reply, and a separate `persistence` event reports `stored`, `prompt_unsupported`, or `failed`. Only the normal connection operation/status establishes successful activation. Delivery never waits for keyring saving.
+
+NetworkManager `SaveSecrets` acknowledges acceptance into a short-lived in-memory handoff, not durable storage. Its deferred persistence result is authoritative. The one-shot handoff is scoped to the NM owner, profile path and UUID, expires after the credential timeout, holds at most 32 profiles, and is discarded on rejection (`REQUEST_NEW`), cancellation, deletion or owner change. Durable writes are serialized, with at most eight pending saves; queue expiry/overflow is reported as failure. DeleteSecrets invalidates queued saves and follows any active write so a forgotten password cannot be recreated by an older queued save.
+
+All delivery-path lookups are noninteractive. Only saves may open a desktop unlock dialog. Their wait is bounded to 45 seconds; cancellation/timeout is failure, never successful storage. Unlocks are coalesced per provider. On timeout the provider dialog is **not dismissed**: GNOME keyring 50 can crash when Dismiss interrupts an active unlock. A monitor retains only the bus connection/public object paths until the user completes/cancels that dialog or the pinned provider exits. Further saves fail promptly while the timed-out dialog remains unresolved. Finish the existing dialog and explicitly retry saving; expired saves are not replayed. Create/delete prompts remain unsupported and are never presented or dismissed.
 
 `wifi.secret.capabilities` reports `keyring.available`, `persistence_supported`, `default_save`, `prompt_handling: "unlock"`, and `prompt_policy: "interactive_unlock_with_timeout"`. Clients should use those fields instead of assuming that keyring availability means every operation can complete without user interaction.
 
@@ -544,7 +549,7 @@ Implemented here:
 
 Still open:
 
-- Optional desktop integration for completing Secret Service prompts; the daemon currently dismisses and reports them as unsupported.
+- Secret Service create/delete prompt completion remains unsupported; unlock prompts are supported only by deferred saves.
 
 Advanced profile `reveal-secret` responses expose the NetworkManager `setting_name`, all editable `secret_keys`, the `primary_secret_key`, and a named `values` object. Profile `update` accepts matching named values under `settings.secrets`; the legacy `settings.password` field updates the primary key. This covers WPA Personal, all WEP key slots, LEAP, and 802.1X password/private-key-password/PIN fields, allowing frontends to build multi-field forms without flattening credentials into one password.
 
