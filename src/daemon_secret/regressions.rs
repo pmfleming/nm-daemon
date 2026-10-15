@@ -1,6 +1,18 @@
-use super::*;
+use super::{
+    ALLOW_INTERACTION, ConnectionSettings, HashMap, PendingSecretRequest, REQUEST_NEW,
+    SecretPersistenceOutcome, SecretResponse, apply_password, apply_secret_response,
+    apply_stored_values, persistence, request_values_complete, resolve_secret_request, session,
+    value_string,
+};
 use crate::test_support::{TestPeer, workflows::isolated};
+use anyhow::Result;
+use std::sync::{
+    Arc, Mutex, Weak,
+    mpsc::{self, Receiver, Sender},
+};
+use std::time::Duration;
 use std::time::Instant;
+use zvariant::OwnedObjectPath;
 
 fn request() -> PendingSecretRequest {
     PendingSecretRequest::new(
@@ -38,6 +50,7 @@ fn credentials_are_prepared_without_attempting_keyring_io() -> Result<()> {
             for (save, supported) in [(true, true), (true, false), (false, true)] {
                 let mut request = request();
                 request.save_supported = supported;
+                let request = Arc::new(request);
                 let mut connection = settings("prepared", false);
                 let started = Instant::now();
                 let deferred = apply_secret_response(
@@ -182,9 +195,10 @@ fn native_password_handoff_is_one_shot_owner_uuid_scoped_and_never_reuses_reject
             assert!(session::take(&request, &full).is_empty());
             session::stage("", &request.connection_path, &full);
             request.flags = REQUEST_NEW;
+            let request = Arc::new(request);
             assert!(
                 resolve_secret_request(
-                    request.clone(),
+                    &request,
                     settings("handoff", false),
                     |_, _| panic!("rejected password was looked up"),
                     |_, _| panic!("noninteractive request prompted")

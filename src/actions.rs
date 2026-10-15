@@ -330,12 +330,6 @@ pub(crate) fn print_networks(nm: &Nm, options: ListOptions) -> Result<()> {
             options.refresh_cache,
             Duration::from_secs(options.refresh_timeout),
         ))?;
-    if let Some(warning) = result.warning.as_ref() {
-        eprintln!(
-            "warning: scan failed: {}; showing cached NetworkManager results",
-            warning.message
-        );
-    }
     crate::output::print_network_entries_with_snapshot(&result.networks, &result.snapshot)
 }
 

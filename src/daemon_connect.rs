@@ -486,14 +486,14 @@ mod tests {
         let target =
             ConnectTargetIdentity::from_target(&example_connect_target(false), Some("key"));
         let phase = ConnectPhase::Starting;
-        let message = "message".to_string();
+        let message = "message";
         for (name, event, extra) in [
             (
                 "started",
                 ConnectEvent::Started {
                     phase,
                     target: &target,
-                    message: message.clone(),
+                    message,
                 },
                 json!({"message":message}),
             ),
@@ -502,7 +502,7 @@ mod tests {
                 ConnectEvent::Progress {
                     phase,
                     target: &target,
-                    message: message.clone(),
+                    message,
                     candidate: None,
                     previous_reason: None,
                 },
@@ -513,7 +513,7 @@ mod tests {
                 ConnectEvent::Cancelled {
                     phase,
                     target: &target,
-                    message: message.clone(),
+                    message: message.to_string(),
                 },
                 json!({"message":message}),
             ),
@@ -523,7 +523,7 @@ mod tests {
                     phase,
                     target: &target,
                     outcome: &ConnectOutcome::Cancelled {
-                        message: message.clone(),
+                        message: message.to_string(),
                     },
                 },
                 json!({"message":message}),

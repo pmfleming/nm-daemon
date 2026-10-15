@@ -23,6 +23,7 @@ use zvariant::{OwnedObjectPath, OwnedValue};
 use crate::daemon_runtime::DaemonRuntime;
 use crate::error::best_effort;
 use crate::generated::SECRET_TIMEOUT;
+use crate::nm::settings::profile_secrets::{known_secret_keys, secret_flags_key};
 use crate::nm::{ConnectionSettings, NM_DEST};
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
@@ -179,6 +180,7 @@ impl SecretAgentInterface {
         if let Some(activation) = &request.activation {
             request.deadline = request.deadline.min(activation.credential_deadline());
         }
+        let request = Arc::new(request);
         let _credential_guard = request
             .activation
             .as_ref()
@@ -186,15 +188,12 @@ impl SecretAgentInterface {
         let runtime = self.runtime.clone();
         // Register before scheduling/performing keyring I/O, not only when a prompt is needed.
         let inflight = InflightRegistration::new(&request, &runtime)?;
-        let request_id = request.id.clone();
-        let profile_path = request.connection_path.clone();
-        let owner = request.nm_owner.clone();
-        let delivery_request = request.clone();
+        let delivery_request = Arc::clone(&request);
         let (connection, save) = secret_worker(move || {
             let _inflight = inflight;
             let mut save = None;
             let connection = resolve_secret_request(
-                request,
+                &request,
                 connection,
                 apply_stored_secret,
                 |request, connection| {
@@ -211,9 +210,9 @@ impl SecretAgentInterface {
         Ok(persistence::after_reply(
             connection,
             self.runtime.clone(),
-            request_id,
-            profile_path,
-            owner,
+            delivery_request.id.clone(),
+            delivery_request.connection_path.clone(),
+            delivery_request.nm_owner.clone(),
             true,
             save,
         ))
@@ -296,18 +295,21 @@ async fn secret_worker<T: Send + 'static, E: From<zbus::fdo::Error> + Send + 'st
 }
 
 fn resolve_secret_request(
-    request: PendingSecretRequest,
+    request: &Arc<PendingSecretRequest>,
     mut connection: ConnectionSettings,
     stored: impl FnOnce(&PendingSecretRequest, &mut ConnectionSettings) -> zbus::fdo::Result<bool>,
-    interact: impl FnOnce(PendingSecretRequest, ConnectionSettings) -> SecretResult<ConnectionSettings>,
+    interact: impl FnOnce(
+        &Arc<PendingSecretRequest>,
+        ConnectionSettings,
+    ) -> SecretResult<ConnectionSettings>,
 ) -> SecretResult<ConnectionSettings> {
-    ensure_delivery_live(&request)?;
+    ensure_delivery_live(request)?;
     // A fresh request must not reuse a password NetworkManager already rejected.
     if request.flags & REQUEST_NEW != 0 {
         session::clear(Some(&request.connection_path));
     }
-    let complete = request.flags & REQUEST_NEW == 0 && stored(&request, &mut connection)?;
-    ensure_delivery_live(&request)?;
+    let complete = request.flags & REQUEST_NEW == 0 && stored(request, &mut connection)?;
+    ensure_delivery_live(request)?;
     if complete {
         return Ok(connection);
     }
@@ -382,7 +384,7 @@ fn secret_value_present(
 
 fn wait_for_secret_response(
     runtime: &Weak<DaemonRuntime>,
-    request: PendingSecretRequest,
+    request: &Arc<PendingSecretRequest>,
     mut connection: ConnectionSettings,
     save: &mut Option<persistence::Save>,
 ) -> SecretResult<ConnectionSettings> {
@@ -390,7 +392,7 @@ fn wait_for_secret_response(
         .upgrade()
         .map(|runtime| runtime.subscriber_owners(Stream::WifiSecret))
         .unwrap_or_default();
-    ensure_delivery_live(&request)?;
+    ensure_delivery_live(request)?;
     if let Some(activation) = &request.activation {
         activation.note_frontend_availability(!owners.is_empty());
     }
@@ -400,8 +402,8 @@ fn wait_for_secret_response(
         ));
     }
     let (registration, displaced_request_id) =
-        register_pending(&request, owners).or_else(|error| {
-            ensure_delivery_live(&request)?;
+        register_pending(request, owners).or_else(|error| {
+            ensure_delivery_live(request)?;
             Err(error)
         })?;
     if let Some(displaced_request_id) = displaced_request_id {
@@ -415,22 +417,22 @@ fn wait_for_secret_response(
                 "secret request cancelled before prompting".into(),
             ));
         }
-        emit_secret_requested(runtime, &request);
+        emit_secret_requested(runtime, request);
         Ok(())
     })
     .or_else(|error| {
-        ensure_delivery_live(&request)?;
+        ensure_delivery_live(request)?;
         Err(error)
     })?;
 
-    let response = receive_live_response(&registration, &request).inspect_err(|_| {
+    let response = receive_live_response(&registration, request).inspect_err(|_| {
         remove_pending(&request.id);
-        emit_secret_retired(runtime, &request);
+        emit_secret_retired(runtime, request);
     })?;
     if response.cancelled {
         request.stop(crate::activation::CredentialStop::Cancelled);
     }
-    *save = apply_secret_response(&mut connection, &request, response)?;
+    *save = apply_secret_response(&mut connection, request, response)?;
     Ok(connection)
 }
 
@@ -473,7 +475,10 @@ fn receive_live_response(
     loop {
         ensure_delivery_live(request)?;
         let remaining = request.deadline.saturating_duration_since(Instant::now());
-        match registration.recv_timeout(remaining.min(Duration::from_millis(100))) {
+        match registration
+            .receiver
+            .recv_timeout(remaining.min(Duration::from_millis(100)))
+        {
             Ok(response) => {
                 ensure_delivery_live(request)?;
                 return Ok(response);
@@ -574,7 +579,7 @@ pub(crate) fn provide(owner: Option<&str>, params: SecretProvideParams) -> Resul
 }
 
 fn register_pending(
-    request: &PendingSecretRequest,
+    request: &Arc<PendingSecretRequest>,
     owners: Vec<String>,
 ) -> SecretResult<(PendingRegistration, Option<String>)> {
     let (tx, rx) = mpsc::channel();
@@ -594,9 +599,7 @@ fn register_pending(
                 "Credential request no longer belongs to a live activation".into(),
             ));
         }
-        let displaced = registry.insert(request.id.clone(), request.key.clone(), owners, tx);
-        registry.requests.get_mut(&request.id).unwrap().request = Some(request.clone());
-        Ok(displaced)
+        Ok(registry.insert(Arc::clone(request), owners, tx))
     })?;
     let displaced_request_id = displaced.map(|(request_id, sender)| {
         let _ = sender.send(SecretResponse::cancelled());
@@ -803,7 +806,7 @@ fn lookup_stored_secrets(
 
 fn apply_secret_response(
     connection: &mut ConnectionSettings,
-    request: &PendingSecretRequest,
+    request: &Arc<PendingSecretRequest>,
     response: SecretResponse,
 ) -> SecretResult<Option<persistence::Save>> {
     reject_cancelled_response(response.cancelled)?;
@@ -825,16 +828,18 @@ fn apply_secret_response(
     }
     // Only public identity metadata is needed by the deferred save; do not
     // duplicate the whole connection or unrelated credentials.
-    let mut identity = HashMap::new();
-    if let Some(section) = connection.get("connection") {
-        for key in ["uuid", "id"] {
-            if let Some(value) = section.get(key).and_then(value_string) {
-                identity.insert(key.to_string(), owned_value(value)?);
-            }
-        }
-    }
+    let identity = ["uuid", "id"]
+        .into_iter()
+        .filter_map(|key| {
+            let value = connection
+                .get("connection")?
+                .get(key)
+                .and_then(value_string)?;
+            Some(owned_value(value).map(|value| (key.to_string(), value)))
+        })
+        .collect::<zbus::fdo::Result<HashMap<_, _>>>()?;
     let settings = ConnectionSettings::from([("connection".into(), identity)]);
-    let request = request.clone();
+    let request = Arc::clone(request);
     Ok(Some(Box::new(move || {
         if !request.save_supported {
             return SecretPersistenceOutcome::Failed(
@@ -967,19 +972,11 @@ fn save_connection_secrets(
     connection: &ConnectionSettings,
 ) -> Result<()> {
     let keyring = crate::keyring::Keyring::interactive()?;
-    for (setting, secrets) in connection_secret_values(connection) {
-        for (key, password) in secrets {
-            match keyring.store_secret(
-                connection_path.as_str(),
-                connection,
-                &setting,
-                &key,
-                &password,
-            )? {
-                crate::keyring::KeyringOutcome::Completed(()) => {}
-                crate::keyring::KeyringOutcome::PromptUnsupported { operation, .. } => {
-                    anyhow::bail!("password was not saved: unsupported keyring {operation} prompt");
-                }
+    for (setting, key, password) in connection_secret_values(connection) {
+        match keyring.store_secret(connection_path.as_str(), connection, setting, key, password)? {
+            crate::keyring::KeyringOutcome::Completed(()) => {}
+            crate::keyring::KeyringOutcome::PromptUnsupported { operation, .. } => {
+                anyhow::bail!("password was not saved: unsupported keyring {operation} prompt");
             }
         }
     }
@@ -1038,24 +1035,17 @@ fn delete_connection_secret(
 
 fn connection_secret_values(
     connection: &ConnectionSettings,
-) -> Vec<(String, Vec<(String, String)>)> {
-    connection
-        .iter()
-        .filter_map(|(setting_name, values)| {
-            let secrets = known_secret_keys(setting_name)
-                .iter()
-                .filter(|key| secret_may_be_saved(connection, setting_name, key))
-                .filter_map(|key| {
-                    values
-                        .get(*key)
-                        .and_then(value_string)
-                        .filter(|value| !value.is_empty())
-                        .map(|value| ((*key).to_string(), value))
-                })
-                .collect::<Vec<_>>();
-            (!secrets.is_empty()).then(|| (setting_name.clone(), secrets))
-        })
-        .collect()
+) -> impl Iterator<Item = (&str, &str, &str)> {
+    connection.iter().flat_map(move |(setting_name, values)| {
+        known_secret_keys(setting_name)
+            .iter()
+            .filter(move |key| secret_may_be_saved(connection, setting_name, key))
+            .filter_map(move |key| {
+                crate::variant::setting::<&str>(values, key)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| (setting_name.as_str(), *key, value))
+            })
+    })
 }
 
 fn owned_value(value: String) -> zbus::fdo::Result<OwnedValue> {
@@ -1064,11 +1054,7 @@ fn owned_value(value: String) -> zbus::fdo::Result<OwnedValue> {
 }
 
 fn secret_may_be_saved(connection: &ConnectionSettings, setting: &str, key: &str) -> bool {
-    let flags_key = if key.starts_with("wep-key") {
-        "wep-key-flags".to_string()
-    } else {
-        format!("{key}-flags")
-    };
+    let flags_key = secret_flags_key(key);
     let flags = connection
         .get(setting)
         .and_then(|values| crate::variant::setting::<u32>(values, &flags_key))
@@ -1076,7 +1062,6 @@ fn secret_may_be_saved(connection: &ConnectionSettings, setting: &str, key: &str
     flags & 2 == 0 // NetworkManager NOT_SAVED
 }
 
-#[derive(Clone)]
 struct PendingSecretRequest {
     deadline: Instant,
     activation: Option<Arc<crate::activation::State>>,
@@ -1188,23 +1173,6 @@ fn normalize_plugin_hint(setting_name: &str, hint: &str) -> String {
     hint.to_string()
 }
 
-pub(crate) fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
-    match setting_name {
-        "802-11-wireless-security" => &[
-            "psk",
-            "wep-key0",
-            "wep-key1",
-            "wep-key2",
-            "wep-key3",
-            "leap-password",
-        ],
-        "802-1x" => &["password", "private-key-password", "pin"],
-        "wifi-p2p" => &["wps-pin"],
-        "gsm" | "cdma" => &["password", "pin"],
-        _ => &["password"],
-    }
-}
-
 fn default_secret_key_for_setting(setting_name: &str) -> &'static str {
     match setting_name {
         "802-11-wireless-security" => "psk",
@@ -1242,8 +1210,7 @@ enum SecretPersistenceOutcome {
 }
 
 struct PendingEntry {
-    request: Option<PendingSecretRequest>,
-    key: String,
+    request: Arc<PendingSecretRequest>,
     owners: HashSet<String>,
     sender: Sender<SecretResponse>,
 }
@@ -1262,22 +1229,16 @@ impl PendingRegistry {
 
     fn insert(
         &mut self,
-        request_id: String,
-        key: String,
+        request: Arc<PendingSecretRequest>,
         owners: Vec<String>,
         sender: Sender<SecretResponse>,
     ) -> Option<(String, Sender<SecretResponse>)> {
-        let duplicate = self
-            .requests
-            .iter()
-            .find_map(|(id, entry)| (entry.key == key).then(|| id.clone()));
-        let displaced =
-            duplicate.and_then(|id| self.requests.remove(&id).map(|entry| (id, entry.sender)));
+        let displaced = self.remove_by_key(&request.key);
+        let request_id = request.id.clone();
         if let Some(replaced) = self.requests.insert(
             request_id.clone(),
             PendingEntry {
-                request: None,
-                key,
+                request,
                 owners: owners.into_iter().collect(),
                 sender,
             },
@@ -1305,11 +1266,7 @@ impl PendingRegistry {
             return None;
         }
         let entry = self.requests.remove(request_id)?;
-        entry
-            .request
-            .as_ref()
-            .is_none_or(PendingSecretRequest::live)
-            .then_some(entry.sender)
+        entry.request.live().then_some(entry.sender)
     }
 
     fn cancel_by_key(&mut self, key: &str) -> Option<(String, Sender<SecretResponse>)> {
@@ -1323,7 +1280,7 @@ impl PendingRegistry {
         let request_id = self
             .requests
             .iter()
-            .find_map(|(id, entry)| (entry.key == key).then(|| id.clone()))?;
+            .find_map(|(id, entry)| (entry.request.key == key).then(|| id.clone()))?;
         self.remove(&request_id).map(|sender| (request_id, sender))
     }
 }
@@ -1331,12 +1288,6 @@ impl PendingRegistry {
 struct PendingRegistration {
     request_id: String,
     receiver: Receiver<SecretResponse>,
-}
-
-impl PendingRegistration {
-    fn recv_timeout(&self, timeout: Duration) -> Result<SecretResponse, mpsc::RecvTimeoutError> {
-        self.receiver.recv_timeout(timeout)
-    }
 }
 
 impl Drop for PendingRegistration {
@@ -1348,7 +1299,7 @@ impl Drop for PendingRegistration {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::mpsc;
+    use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
 
     use super::{
@@ -1366,7 +1317,7 @@ mod tests {
                 let mut looked_up = false;
                 let mut prompted = false;
                 let result = super::resolve_secret_request(
-                    request,
+                    &Arc::new(request),
                     ConnectionSettings::new(),
                     |request, connection| {
                         looked_up = true;
@@ -1422,7 +1373,7 @@ mod tests {
             let worker = std::thread::spawn(move || {
                 let _guard = guard;
                 super::resolve_secret_request(
-                    request,
+                    &Arc::new(request),
                     ConnectionSettings::new(),
                     |_, _| {
                         entered.send(()).unwrap();
@@ -1452,8 +1403,8 @@ mod tests {
 
     #[test]
     fn cancelled_lookup_cannot_register_and_old_guard_cannot_remove_replacement() {
-        let old = pending_request("old-lookup", "replaced-lookup-key");
-        let current = pending_request("new-lookup", "replaced-lookup-key");
+        let old = Arc::new(pending_request("old-lookup", "replaced-lookup-key"));
+        let current = Arc::new(pending_request("new-lookup", "replaced-lookup-key"));
         let runtime = std::sync::Weak::new();
         let old_guard = super::InflightRegistration::new(&old, &runtime).unwrap();
         let current_guard = super::InflightRegistration::new(&current, &runtime).unwrap();
@@ -1481,7 +1432,7 @@ mod tests {
                 request.flags = super::ALLOW_INTERACTION;
                 let mut prompted = false;
                 let connection = super::resolve_secret_request(
-                    request,
+                    &Arc::new(request),
                     ConnectionSettings::new(),
                     |request, connection| {
                         let mut stored = vec![crate::keyring::KeyringSecret {
@@ -1501,7 +1452,7 @@ mod tests {
                         // Supplying only the missing key preserves the stored password.
                         apply_secret_response(
                             &mut connection,
-                            &request,
+                            request,
                             SecretResponse {
                                 password: None,
                                 values: HashMap::from([
@@ -1539,7 +1490,7 @@ mod tests {
         let started = Instant::now();
         let error = super::wait_for_secret_response(
             &std::sync::Weak::new(),
-            request,
+            &Arc::new(request),
             ConnectionSettings::new(),
             &mut None,
         )
@@ -1556,12 +1507,9 @@ mod tests {
     fn pending_secrets_are_owner_scoped_and_timed_out_registrations_are_removed() {
         let mut registry = PendingRegistry::default();
         let (sender, _receiver) = mpsc::channel();
-        registry.insert(
-            "owned".into(),
-            "connection\nsetting".into(),
-            vec![":1.7".into()],
-            sender,
-        );
+        let request = Arc::new(pending_request("owned", "connection\nsetting"));
+        registry.insert(Arc::clone(&request), vec![":1.7".into()], sender);
+        assert!(Arc::ptr_eq(&registry.requests["owned"].request, &request));
 
         assert!(registry.remove_for_owner("owned", Some(":1.8")).is_none());
         assert!(registry.requests.contains_key("owned"));
@@ -1569,16 +1517,31 @@ mod tests {
         assert!(registry.remove_for_owner("owned", Some(":1.7")).is_some());
         assert!(!registry.requests.contains_key("owned"));
 
-        let timed_out = pending_request("timed-out", "timed-out-key");
+        let timed_out = Arc::new(pending_request("timed-out", "timed-out-key"));
         let (registration, displaced) = register_pending(&timed_out, vec![":1.1".into()]).unwrap();
         assert!(displaced.is_none());
         assert!(matches!(
-            registration.recv_timeout(Duration::from_millis(10)),
+            registration
+                .receiver
+                .recv_timeout(Duration::from_millis(10)),
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
         drop(registration);
         assert!(remove_pending("timed-out").is_none());
     }
+    #[test]
+    fn expired_requests_reject_their_owner_but_other_owners_cannot_remove_them() {
+        let mut registry = PendingRegistry::default();
+        let mut expired = pending_request("expired", "expired-key");
+        expired.deadline = Instant::now();
+        let (sender, _receiver) = mpsc::channel();
+        registry.insert(Arc::new(expired), vec![":1.7".into()], sender);
+        assert!(registry.remove_for_owner("expired", Some(":1.8")).is_none());
+        assert!(registry.requests.contains_key("expired"));
+        assert!(registry.remove_for_owner("expired", Some(":1.7")).is_none());
+        assert!(!registry.requests.contains_key("expired"));
+    }
+
     #[test]
     fn remember_defaults_on_but_native_not_saved_wins() -> anyhow::Result<()> {
         let params: super::SecretProvideParams =
@@ -1599,7 +1562,7 @@ mod tests {
             "802-11-wireless-security",
             "psk"
         ));
-        assert!(super::connection_secret_values(&settings).is_empty());
+        assert!(super::connection_secret_values(&settings).next().is_none());
         Ok(())
     }
 

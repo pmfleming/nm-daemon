@@ -1,12 +1,24 @@
 //! Actual ActivateConnection -> exported SecretAgent callbacks on a private bus.
 //! Synthetic credentials only; the workflow runner disables the desktop keyring.
-use super::*;
+use super::{
+    SECRET_AGENT_OBJECT_PATH, SecretProvideParams, change_network_manager_owner,
+    export_secret_agent, provide, with_pending_registry,
+};
 use crate::activation::{AUTHENTICATION_RESERVE, Guard};
 use crate::application::{Application, ConnectOutcome};
+use crate::daemon_runtime::DaemonRuntime;
 use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
+use crate::nm::{ConnectionSettings, NM_DEST};
+use crate::protocol::Stream;
 use crate::test_support::bus::TestBus;
 use crate::test_support::workflows::{ACTIVE, FakeNm, Outcome, PROFILE, isolated};
+use anyhow::Result;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 use zbus::blocking::Proxy;
+use zvariant::OwnedObjectPath;
 
 const SECURITY: &str = "802-11-wireless-security";
 
@@ -175,6 +187,57 @@ fn submit(owner: &str, id: &str, cancel: bool) -> Result<Value> {
     )
 }
 
+/// Keep case-specific credential assertions separate from the shared activation lifecycle.
+fn assert_activation_outcome(
+    case: &str,
+    result: ConnectOutcome,
+    secrets: zbus::Result<ConnectionSettings>,
+    harness: &Harness,
+) -> Result<()> {
+    match case {
+        "available" | "provided" => {
+            assert!(matches!(result, ConnectOutcome::Succeeded(_)), "{case}");
+            let secrets = secrets?;
+            assert_eq!(
+                crate::variant::setting::<&str>(&secrets[SECURITY], "psk"),
+                Some(if case == "available" {
+                    "synthetic-old"
+                } else {
+                    "synthetic-fresh"
+                })
+            );
+        }
+        "other-agent" => {
+            assert!(
+                matches!(result, ConnectOutcome::Succeeded(_)),
+                "our agent declining must not preempt another agent"
+            );
+            assert!(secrets.is_err());
+            assert!(harness.fake.state.lock().unwrap().deactivated.is_empty());
+        }
+        "cancelled" => {
+            assert!(matches!(result, ConnectOutcome::Cancelled { .. }));
+            assert!(secrets.is_err());
+        }
+        "no-frontend" => {
+            let ConnectOutcome::Failed { error, .. } = result else {
+                panic!("expected missing frontend failure")
+            };
+            assert_eq!(error.details["credential_outcome"], "agent-unavailable");
+            assert!(secrets.is_err());
+        }
+        "rejected" => {
+            assert!(matches!(result, ConnectOutcome::Failed { .. }));
+            assert_eq!(
+                crate::variant::setting::<&str>(&secrets?[SECURITY], "psk"),
+                Some("synthetic-fresh")
+            );
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
 #[test]
 fn manual_saved_activation_uses_real_agent_callbacks_without_speculative_forms_or_retries()
 -> Result<()> {
@@ -225,47 +288,7 @@ fn manual_saved_activation_uses_real_agent_callbacks_without_speculative_forms_o
                 let request = app.connect_request_for_key(&entries[0].key, None, None, None)?;
                 let result = app.connect(&request, None, |_| Ok(()))?;
                 let secrets = returned.recv_timeout(Duration::from_secs(5))?;
-                match case {
-                    "available" | "provided" => {
-                        assert!(matches!(result, ConnectOutcome::Succeeded(_)), "{case}");
-                        let secrets = secrets?;
-                        assert_eq!(
-                            crate::variant::setting::<&str>(&secrets[SECURITY], "psk"),
-                            Some(if case == "available" {
-                                "synthetic-old"
-                            } else {
-                                "synthetic-fresh"
-                            })
-                        );
-                    }
-                    "other-agent" => {
-                        assert!(
-                            matches!(result, ConnectOutcome::Succeeded(_)),
-                            "our agent declining must not preempt another agent"
-                        );
-                        assert!(secrets.is_err());
-                        assert!(harness.fake.state.lock().unwrap().deactivated.is_empty());
-                    }
-                    "cancelled" => {
-                        assert!(matches!(result, ConnectOutcome::Cancelled { .. }));
-                        assert!(secrets.is_err());
-                    }
-                    "no-frontend" => {
-                        let ConnectOutcome::Failed { error, .. } = result else {
-                            panic!("expected missing frontend failure")
-                        };
-                        assert_eq!(error.details["credential_outcome"], "agent-unavailable");
-                        assert!(secrets.is_err());
-                    }
-                    "rejected" => {
-                        assert!(matches!(result, ConnectOutcome::Failed { .. }));
-                        assert_eq!(
-                            crate::variant::setting::<&str>(&secrets?[SECURITY], "psk"),
-                            Some("synthetic-fresh")
-                        );
-                    }
-                    _ => unreachable!(),
-                }
+                assert_activation_outcome(case, result, secrets, &harness)?;
                 if let Some(reply) = reply {
                     reply.join().unwrap();
                 }

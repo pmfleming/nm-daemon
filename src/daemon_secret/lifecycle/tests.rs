@@ -245,6 +245,7 @@ fn restart_recovers_registration_and_fences_pending_work_and_secrets() -> Result
                 3,
             );
             stale.nm_owner = Some(old.unique_name().unwrap().to_string());
+            let stale = Arc::new(stale);
             assert!(super::super::register_pending(&stale, vec!["frontend".into()]).is_err());
             assert!(super::super::ensure_request_owner(&stale).is_err());
 

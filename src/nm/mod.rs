@@ -23,7 +23,7 @@ mod ip_status;
 mod profile_policy;
 mod scan;
 mod scan_schedule;
-mod settings;
+pub(crate) mod settings;
 mod statistics;
 mod status;
 mod vpn;

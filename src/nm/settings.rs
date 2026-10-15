@@ -9,7 +9,7 @@ mod casting;
 mod profile_advanced;
 #[cfg(test)]
 mod profile_listing_tests;
-mod profile_secrets;
+pub(crate) mod profile_secrets;
 
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
 use crate::model::{

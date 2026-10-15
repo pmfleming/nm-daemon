@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use zvariant::Value;
 
 use super::scan_schedule::{
-    ScanTurn, ScanWait, SharedScanOutcome, boottime_ms, is_transient_scan_rejection,
-    rate_limit_wait, scan_deadline_expired, sleep_within_deadline,
+    ScanTurn, SharedScanOutcome, boottime_ms, is_transient_scan_rejection, rate_limit_wait,
+    scan_deadline_expired, sleep_within_deadline,
 };
 use super::{Nm, WIFI_IFACE};
 use crate::deadline::Deadline;
@@ -113,12 +113,9 @@ impl Nm {
                 ScanTurn::Wait { generation } => {
                     // Incompatible wildcard and targeted scans must run in turn.
                     tracing::debug!(iface = %device.iface, "waiting behind an incompatible in-flight scan");
-                    self.wait_for_incompatible_scan(
-                        device_path,
-                        generation,
-                        deadline,
-                        cancellation,
-                    )?;
+                    self.scan_schedule
+                        .wait_for_completion(device_path, generation, deadline, cancellation)
+                        .into_result("timed out waiting to schedule a targeted scan")?;
                 }
             }
         }
@@ -131,45 +128,19 @@ impl Nm {
         deadline: Deadline,
         cancellation: Option<&AtomicBool>,
     ) -> Result<bool> {
-        match self.scan_schedule.wait_for_completion(
-            device_path,
-            generation,
-            deadline,
-            cancellation,
-        ) {
-            ScanWait::Completed(SharedScanOutcome::Failed(report))
+        let outcome = self
+            .scan_schedule
+            .wait_for_completion(device_path, generation, deadline, cancellation)
+            .into_result("timed out waiting for an in-flight scan on this device")?;
+        match outcome {
+            SharedScanOutcome::Failed(report)
                 if shared_owner_failure_is_retryable(&report) && !deadline.expired() =>
             {
                 // Cancellation and timeout belong to the owner; this caller
                 // still has its own cancellation and deadline.
                 Ok(false)
             }
-            ScanWait::Completed(outcome) => joined_scan_result(outcome).map(|()| true),
-            ScanWait::Cancelled => Err(scan_cancelled_error()),
-            ScanWait::DeadlineExpired => Err(scan_deadline_expired(
-                "timed out waiting for an in-flight scan on this device",
-            )),
-        }
-    }
-
-    fn wait_for_incompatible_scan(
-        &self,
-        device_path: &str,
-        generation: u64,
-        deadline: Deadline,
-        cancellation: Option<&AtomicBool>,
-    ) -> Result<()> {
-        match self.scan_schedule.wait_for_completion(
-            device_path,
-            generation,
-            deadline,
-            cancellation,
-        ) {
-            ScanWait::Completed(_) => Ok(()),
-            ScanWait::Cancelled => Err(scan_cancelled_error()),
-            ScanWait::DeadlineExpired => Err(scan_deadline_expired(
-                "timed out waiting to schedule a targeted scan",
-            )),
+            outcome => joined_scan_result(outcome).map(|()| true),
         }
     }
 
@@ -414,10 +385,6 @@ fn ensure_scan_deadline(deadline: Deadline, message: &str) -> Result<()> {
 
 fn check_scan_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
     check_cancellation(cancellation, ErrorOperation::Scan, "Wi-Fi scan cancelled")
-}
-
-fn scan_cancelled_error() -> anyhow::Error {
-    DomainError::cancelled_operation(ErrorOperation::Scan, "Wi-Fi scan cancelled").into()
 }
 
 #[cfg(test)]

@@ -1,8 +1,13 @@
 //! Run only via test_support/keyring-provider.py (private bus, display and HOME).
-use super::*;
+use super::{Keyring, KeyringOutcome, SECRET_SERVICE_PATH, prompts};
+use crate::nm::ConnectionSettings;
+use crate::variant::owned_value;
 use anyhow::{Context, Result, ensure};
+use std::collections::HashMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
+use zbus::blocking::Proxy;
+use zvariant::OwnedObjectPath;
 
 #[test]
 #[ignore = "requires isolated GNOME keyring + Gcr + Xvfb; use test_support/keyring-provider.py"]

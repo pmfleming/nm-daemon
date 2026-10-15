@@ -75,15 +75,12 @@ pub(crate) fn wait_for_active_target_path(
                 requested_active_state,
             )
             .map_err(|error| {
-                if let Some(scope) = scope {
-                    let error = scope.activation_error(error);
-                    if scope.error().is_some() {
-                        abort_requested(nm, requested_active_path);
-                    }
-                    error
-                } else {
-                    error
+                let Some(scope) = scope else { return error };
+                let error = scope.activation_error(error);
+                if scope.error().is_some() {
+                    abort_requested(nm, requested_active_path);
                 }
+                error
             })?
         {
             return Ok(());
@@ -165,10 +162,7 @@ impl ActivationWait {
             self.pending_failure = None;
             return Ok(());
         }
-        latch_pending_failure(&mut self.pending_failure, status);
-        let Some(pending) = self.pending_failure.as_ref() else {
-            anyhow::bail!("failed to retain terminal NetworkManager activation status");
-        };
+        let pending = latch_pending_failure(&mut self.pending_failure, status);
         if pending.since.elapsed() < ACTIVATION_FAILURE_GRACE {
             return Ok(());
         }
@@ -207,26 +201,20 @@ impl ActivationWait {
     }
 }
 
-fn latch_pending_failure(
-    pending: &mut Option<PendingFailure>,
+fn latch_pending_failure<'a>(
+    pending: &'a mut Option<PendingFailure>,
     status: &crate::nm::WifiActivationStatus,
-) {
-    match pending {
-        Some(pending)
-            if pending.status.device_state_reason.1 == 0 && status.device_state_reason.1 != 0 =>
-        {
-            // Keep the original grace deadline, but do not let a later
-            // generic disconnected/none snapshot erase the useful reason.
-            pending.status = status.clone();
-        }
-        Some(_) => {}
-        None => {
-            *pending = Some(PendingFailure {
-                since: Instant::now(),
-                status: status.clone(),
-            });
-        }
+) -> &'a PendingFailure {
+    let pending = pending.get_or_insert_with(|| PendingFailure {
+        since: Instant::now(),
+        status: status.clone(),
+    });
+    // Keep the original grace deadline; a generic snapshot must not erase
+    // an informative reason, but may be upgraded when one first arrives.
+    if pending.status.device_state_reason.1 == 0 && status.device_state_reason.1 != 0 {
+        pending.status = status.clone();
     }
+    pending
 }
 
 fn log_activation_status(target: &WifiConnectTarget, status: &crate::nm::WifiActivationStatus) {
@@ -391,7 +379,6 @@ fn target_radio_details(target: &WifiConnectTarget) -> String {
         .bssid
         .as_ref()
         .map(crate::model::Bssid::as_str)
-        .filter(|value| !value.is_empty())
         .map(|bssid| format!(" (BSSID {bssid})"))
         .unwrap_or_default()
 }
@@ -418,7 +405,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ActivationWait, PendingFailure, latch_pending_failure, requested_activation_stopped,
+        ActivationWait, NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE, PendingFailure,
+        latch_pending_failure, requested_activation_stopped,
     };
     use crate::deadline::Deadline;
     use crate::generated::ACTIVATION_FAILURE_GRACE;
@@ -433,6 +421,26 @@ mod tests {
         assert!(requested_activation_stopped(Some(&path), Some(3)));
         assert!(requested_activation_stopped(Some(&path), Some(4)));
         assert!(!requested_activation_stopped(None, None));
+    }
+
+    #[test]
+    fn generic_failure_is_latched_then_upgraded_without_extending_grace() {
+        let mut pending = None;
+        let mut status = crate::nm::WifiActivationStatus {
+            iface: "wlan0".into(),
+            device_state: 30,
+            device_state_reason: (30, 0),
+            active_connection_path: None,
+            active_connection_state: None,
+        };
+        let since = latch_pending_failure(&mut pending, &status).since;
+        status.device_state_reason.1 = NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE;
+        let upgraded = latch_pending_failure(&mut pending, &status);
+        assert_eq!(upgraded.since, since);
+        assert_eq!(
+            upgraded.status.device_state_reason,
+            status.device_state_reason
+        );
     }
 
     #[test]

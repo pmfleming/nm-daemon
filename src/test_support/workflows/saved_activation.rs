@@ -1,5 +1,8 @@
-use super::*;
+use super::{FakeNm, Outcome, isolated};
 use crate::application::{Application, ConnectOutcome};
+use crate::nm::ConnectionSettings;
+use crate::variant::value_map;
+use anyhow::Result;
 
 mod lifecycle;
 

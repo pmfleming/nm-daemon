@@ -41,6 +41,20 @@ pub(super) enum ScanWait {
     DeadlineExpired,
 }
 
+impl ScanWait {
+    pub(super) fn into_result(self, timeout_message: &str) -> Result<SharedScanOutcome> {
+        match self {
+            Self::Completed(outcome) => Ok(outcome),
+            Self::Cancelled => Err(DomainError::cancelled_operation(
+                ErrorOperation::Scan,
+                "Wi-Fi scan cancelled",
+            )
+            .into()),
+            Self::DeadlineExpired => Err(scan_deadline_expired(timeout_message)),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct ScanScheduler {
     devices: Mutex<HashMap<String, DeviceScanState>>,
@@ -351,6 +365,10 @@ mod tests {
                 Some(&AtomicBool::new(cancelled)),
             );
             assert_eq!(discriminant(&outcome), discriminant(&expected));
+            assert_eq!(
+                outcome.into_result("scan wait expired").is_ok(),
+                matches!(expected, ScanWait::Completed(_))
+            );
             // A late completion must not recreate a consumed outcome slot.
             scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
             let state = scheduler.lock();
@@ -389,7 +407,8 @@ mod tests {
             Deadline::from_now(Duration::from_secs(1)).unwrap(),
             None,
         );
-        let ScanWait::Completed(SharedScanOutcome::Failed(report)) = outcome else {
+        let SharedScanOutcome::Failed(report) = outcome.into_result("scan wait expired").unwrap()
+        else {
             panic!("joined scan unexpectedly succeeded");
         };
         assert_eq!(report.code, ErrorCode::AuthorizationRequired);

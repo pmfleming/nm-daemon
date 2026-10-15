@@ -135,7 +135,7 @@ pub(crate) fn refresh_payloads(
                         json!({
                             "networks": result.networks,
                             "snapshot": result.snapshot,
-                            "warning": result.warning,
+                            "warning": null,
                         })
                     })
             })

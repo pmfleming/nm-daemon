@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use crate::cache;
 use crate::connect;
 use crate::error::{
-    DomainError, ErrorOperation, ErrorReport, best_effort, cancellation_requested, ensure_domain,
-    operation_result,
+    DomainError, ErrorOperation, ErrorReport, best_effort, cancellation_requested,
+    check_cancellation, ensure_domain, operation_result,
 };
 use crate::generated::REQUEST_TIMEOUT_MAX;
 use crate::model::{
@@ -213,7 +213,6 @@ impl<'a> Application<'a> {
                 let networks = self.enrich_access_points(loaded.access_points)?;
                 Ok(NetworksResult {
                     networks,
-                    warning: loaded.warning,
                     snapshot: loaded.snapshot,
                 })
             })(),
@@ -229,7 +228,6 @@ impl<'a> Application<'a> {
             (|| {
                 Ok(NetworksResult {
                     networks: self.enrich_access_points(access_points)?,
-                    warning: None,
                     snapshot: NetworkSnapshotMetadata::live(NetworkSnapshotSource::Scan),
                 })
             })(),
@@ -264,7 +262,9 @@ impl<'a> Application<'a> {
         mut emit: impl FnMut(&ScanEvent) -> Result<()>,
     ) -> Result<ScanResult> {
         check_scan_cancelled(cancellation)?;
-        emit_scan_started(&mut emit)?;
+        emit(&ScanEvent::Status {
+            message: "starting Wi-Fi scan",
+        })?;
         let options = ScanRequestOptions {
             timeout: request.timeout,
             ifname: request.ifname,
@@ -309,12 +309,16 @@ impl<'a> Application<'a> {
     ) -> Result<Vec<AccessPoint>> {
         let access_points = self.nm.list_all_access_points()?;
         let networks_found = access_points.len();
-        cache_scan_snapshot(cache_result, &access_points)?;
+        if cache_result {
+            cache::write_live_scan_snapshot(false, &access_points)?;
+        }
         emit(&ScanEvent::Snapshot {
             networks_found,
             access_points: &access_points,
         })?;
-        cache_scan_complete(cache_result, networks_found)?;
+        if cache_result {
+            cache::write_complete(networks_found)?;
+        }
         emit(&ScanEvent::Complete { networks_found })?;
         Ok(access_points)
     }
@@ -402,8 +406,6 @@ impl<'a> Application<'a> {
                     break self.successful_connect_outcome(
                         result,
                         candidate_info,
-                        attempt,
-                        total,
                         started_at,
                         attempts,
                     );
@@ -414,8 +416,9 @@ impl<'a> Application<'a> {
             if report.code == crate::error::ErrorCode::Cancelled {
                 return cancelled_connect(request, &mut emit, &report.message);
             }
-            let reason = record_failed_attempt(&mut attempts, &candidate_info, started_at, &error);
-            if !report.details.contains_key("credential_outcome")
+            let credential_failure = report.details.contains_key("credential_outcome");
+            let reason = record_failed_attempt(&mut attempts, &candidate_info, started_at, report);
+            if !credential_failure
                 && retryable_candidate_failure(reason)
                 && let Some(next) = alternative.take()
             {
@@ -450,7 +453,7 @@ impl<'a> Application<'a> {
             emit(&ConnectEvent::Progress {
                 phase,
                 target,
-                message: connect_phase_message(phase).to_string(),
+                message: connect_phase_message(phase),
                 candidate: Some(candidate_info),
                 previous_reason: None,
             })
@@ -470,12 +473,11 @@ impl<'a> Application<'a> {
         &self,
         mut result: ConnectResult,
         candidate: ConnectCandidateInfo,
-        attempt: usize,
-        total: usize,
         started_at: Instant,
         mut attempts: Vec<ConnectAttemptSummary>,
     ) -> ConnectOutcome {
-        let actual = active_candidate_info(self.nm, attempt, total).unwrap_or(candidate);
+        let actual =
+            active_candidate_info(self.nm, candidate.attempt, candidate.total).unwrap_or(candidate);
         attempts.push(connect_attempt_summary(
             &actual,
             "connected",
@@ -483,7 +485,7 @@ impl<'a> Application<'a> {
             started_at,
             result.message.clone(),
         ));
-        result.fallback_used = attempt > 1;
+        result.fallback_used = actual.attempt > 1;
         result.attempts = attempts;
         if result.fallback_used {
             result.message = recovery_message(&result.ssid, &result.attempts);
@@ -610,7 +612,6 @@ impl<'a> Application<'a> {
         snapshot.refresh_requested = refresh_requested;
         Ok(LoadedNetworks {
             access_points: networks,
-            warning: None,
             snapshot,
         })
     }
@@ -630,7 +631,6 @@ impl<'a> Application<'a> {
                     self.schedule_requested_refresh(request, metadata.stale);
                 Ok(Some(LoadedNetworks {
                     access_points: snapshot.into_networks(),
-                    warning: None,
                     snapshot: metadata,
                 }))
             }
@@ -715,14 +715,12 @@ impl NetworksRequest {
 #[derive(Debug)]
 struct LoadedNetworks {
     access_points: Vec<AccessPoint>,
-    warning: Option<ErrorReport>,
     snapshot: NetworkSnapshotMetadata,
 }
 
 #[derive(Debug)]
 pub(crate) struct NetworksResult {
     pub(crate) networks: Vec<NetworkEntry>,
-    pub(crate) warning: Option<ErrorReport>,
     pub(crate) snapshot: NetworkSnapshotMetadata,
 }
 
@@ -868,12 +866,12 @@ pub(crate) enum ConnectEvent<'a> {
     Started {
         phase: ConnectPhase,
         target: &'a ConnectTargetIdentity,
-        message: String,
+        message: &'a str,
     },
     Progress {
         phase: ConnectPhase,
         target: &'a ConnectTargetIdentity,
-        message: String,
+        message: &'a str,
         candidate: Option<&'a ConnectCandidateInfo>,
         previous_reason: Option<ConnectFailureReason>,
     },
@@ -988,30 +986,7 @@ fn connect_error(target: &WifiConnectTarget, error: &ErrorReport) -> ConnectResu
 }
 
 fn check_scan_cancelled(cancellation: Option<&AtomicBool>) -> Result<()> {
-    if cancellation_requested(cancellation) {
-        return Err(scan_cancelled_error());
-    }
-    Ok(())
-}
-
-fn emit_scan_started(emit: &mut impl FnMut(&ScanEvent) -> Result<()>) -> Result<()> {
-    emit(&ScanEvent::Status {
-        message: "starting Wi-Fi scan",
-    })
-}
-
-fn cache_scan_snapshot(cache_result: bool, access_points: &[AccessPoint]) -> Result<()> {
-    if cache_result {
-        cache::write_live_scan_snapshot(false, access_points)?;
-    }
-    Ok(())
-}
-
-fn cache_scan_complete(cache_result: bool, networks_found: usize) -> Result<()> {
-    if cache_result {
-        cache::write_complete(networks_found)?;
-    }
-    Ok(())
+    check_cancellation(cancellation, ErrorOperation::Scan, "Wi-Fi scan cancelled")
 }
 
 fn start_connect(
@@ -1023,7 +998,7 @@ fn start_connect(
     emit(&ConnectEvent::Started {
         phase: ConnectPhase::Starting,
         target: &target,
-        message: "starting Wi-Fi connection".to_string(),
+        message: "starting Wi-Fi connection",
     })?;
     if cancellation_requested(cancellation) {
         return cancelled_connect(request, emit, "cancelled before connection attempt started")
@@ -1056,7 +1031,7 @@ fn emit_trying_candidate(
     emit(&ConnectEvent::Progress {
         phase: ConnectPhase::TryingAccessPoint,
         target,
-        message: candidate_message("trying", candidate),
+        message: &candidate_message("trying", candidate),
         candidate: Some(candidate),
         previous_reason: None,
     })
@@ -1105,7 +1080,7 @@ fn emit_retry(
     emit(&ConnectEvent::Progress {
         phase: ConnectPhase::RetryingAlternative,
         target,
-        message: retry_message(previous, &next, reason),
+        message: &retry_message(previous, &next, reason),
         candidate: Some(&next),
         previous_reason: Some(reason),
     })
@@ -1144,9 +1119,8 @@ fn record_failed_attempt(
     attempts: &mut Vec<ConnectAttemptSummary>,
     candidate: &ConnectCandidateInfo,
     started_at: Instant,
-    error: &anyhow::Error,
+    report: ErrorReport,
 ) -> ConnectFailureReason {
-    let report = ErrorReport::from_error(error, ErrorOperation::Connect);
     let reason = report
         .code
         .connect_reason()
@@ -1170,12 +1144,11 @@ fn final_failed_connect_outcome(
     if publish_failure {
         connect::publish_final_connect_failure(&request.candidate.target, &error);
     }
-    let mut outcome = failed_connect_outcome(&request.candidate.target, &error);
-    if let ConnectOutcome::Failed { result, .. } = &mut outcome {
-        result.fallback_used = attempts.len() > 1;
-        result.attempts = attempts;
-    }
-    outcome
+    let error = ErrorReport::from_error(&error, ErrorOperation::Connect);
+    let mut result = connect_error(&request.candidate.target, &error);
+    result.fallback_used = attempts.len() > 1;
+    result.attempts = attempts;
+    ConnectOutcome::Failed { result, error }
 }
 
 fn active_candidate_info(nm: &Nm, attempt: usize, total: usize) -> Option<ConnectCandidateInfo> {
@@ -1229,14 +1202,6 @@ fn finish_connect_cancellation(
         return cancelled_connect(request, emit, "connection attempt was cancelled").map(Some);
     }
     Ok(None)
-}
-
-fn failed_connect_outcome(target: &WifiConnectTarget, err: &anyhow::Error) -> ConnectOutcome {
-    let error = ErrorReport::from_error(err, ErrorOperation::Connect);
-    ConnectOutcome::Failed {
-        result: connect_error(target, &error),
-        error,
-    }
 }
 
 fn log_unavailable_cache<T>(state: &cache::CacheRead<T>) {
@@ -1349,10 +1314,6 @@ fn candidate_matches_profile_restrictions(
         && profile
             .channel
             .is_none_or(|channel| candidate.channel == Some(channel))
-}
-
-fn scan_cancelled_error() -> anyhow::Error {
-    DomainError::cancelled_operation(ErrorOperation::Scan, "Wi-Fi scan cancelled").into()
 }
 
 fn cancelled_connect(

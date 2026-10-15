@@ -32,9 +32,13 @@ fn uuid(connection: &ConnectionSettings) -> Option<String> {
 
 pub(super) fn stage(owner: &str, path: &str, connection: &ConnectionSettings) {
     let Some(uuid) = uuid(connection) else { return };
-    let values = connection_secret_values(connection)
-        .into_iter()
-        .collect::<HashMap<_, _>>();
+    let mut values = HashMap::<String, Vec<_>>::new();
+    for (setting, key, password) in connection_secret_values(connection) {
+        values
+            .entry(setting.into())
+            .or_default()
+            .push((key.into(), password.into()));
+    }
     access(|cache| {
         cache.entries.retain(|(_, p, _), _| p != path);
         if values.is_empty() {

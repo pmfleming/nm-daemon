@@ -11,6 +11,32 @@ use super::{
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::WifiProfileUpdate;
 
+/// NetworkManager's built-in secret names; plugin-defined hints are handled by the agent.
+pub(crate) fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
+    match setting_name {
+        "802-11-wireless-security" => &[
+            "psk",
+            "wep-key0",
+            "wep-key1",
+            "wep-key2",
+            "wep-key3",
+            "leap-password",
+        ],
+        "802-1x" => &["password", "private-key-password", "pin"],
+        "wifi-p2p" => &["wps-pin"],
+        "gsm" | "cdma" => &["password", "pin"],
+        _ => &["password"],
+    }
+}
+
+pub(crate) fn secret_flags_key(key: &str) -> String {
+    if key.starts_with("wep-key") {
+        "wep-key-flags".into()
+    } else {
+        format!("{key}-flags")
+    }
+}
+
 pub(super) struct ProfileSecretSpec {
     pub(super) kind: &'static str,
     pub(super) setting_name: Option<&'static str>,

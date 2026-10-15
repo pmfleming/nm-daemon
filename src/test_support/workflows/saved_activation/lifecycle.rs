@@ -1,6 +1,10 @@
-use super::*;
+use super::saved_profile;
 use crate::activation::{CredentialStop, Guard};
+use crate::application::{Application, ConnectOutcome};
 use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
+use crate::test_support::workflows::{ACTIVE, FakeNm, Outcome, isolated, path};
+use anyhow::Result;
+use std::time::Instant;
 
 #[test]
 fn temporary_join_uses_new_identity_without_updating_or_deleting_saved_profile() -> Result<()> {

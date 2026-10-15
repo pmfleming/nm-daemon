@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use zvariant::OwnedObjectPath;
 
+use super::settings::profile_secrets::{known_secret_keys, secret_flags_key};
 use super::wifi_settings::{
     apply_saved_activation_settings, apply_target_connection_metadata,
     apply_target_profile_settings, cloned_wifi_connection_settings,
@@ -310,16 +311,12 @@ fn make_temporary(settings: &mut ConnectionSettings) -> Result<()> {
     let connection = settings.entry("connection".into()).or_default();
     connection.remove("uuid"); // A temporary clone must never replace a saved identity.
     connection.insert("autoconnect".into(), super::owned_value(false)?);
-    for setting in ["802-11-wireless-security", "802-1x"] {
-        if let Some(section) = settings.get_mut(setting) {
-            for key in crate::daemon_secret::known_secret_keys(setting) {
-                let flags = if key.starts_with("wep-key") {
-                    "wep-key-flags".to_string()
-                } else {
-                    format!("{key}-flags")
-                };
-                section.insert(flags, super::owned_value(2_u32)?); // NOT_SAVED
-            }
+    for (setting, section) in settings
+        .iter_mut()
+        .filter(|(name, _)| matches!(name.as_str(), "802-11-wireless-security" | "802-1x"))
+    {
+        for key in known_secret_keys(setting) {
+            section.insert(secret_flags_key(key), super::owned_value(2_u32)?); // NOT_SAVED
         }
     }
     Ok(())

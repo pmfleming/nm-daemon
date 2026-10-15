@@ -1,5 +1,8 @@
-use super::*;
+use super::{AUTHENTICATION_RESERVE, CredentialStop, Guard, find, identity};
 use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
+use crate::nm::ConnectionSettings;
+use std::sync::{Arc, atomic::Ordering};
+use std::time::{Duration, Instant};
 
 #[test]
 fn credentials_have_a_reserved_authentication_budget() {
