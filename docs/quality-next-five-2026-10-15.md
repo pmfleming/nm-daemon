@@ -31,6 +31,19 @@ Clone-related sites **384 → 382** versus step 1. With the additional assertion
 function cyclomatic total rises **5,605 → 5,606** and physical lines **38,542 → 38,545**;
 this step prioritizes one authoritative transition over aggregate metric reductions.
 
+## 3. Couple deferred saves to cancellation tickets
+
+`src/daemon_secret/persistence.rs`: pending saves are represented as one optional
+`(ticket, save)` pair, not two synchronized options. Removed the production `expect`.
+Tickets are still registered before reply dispatch, preserving deletion fencing.
+The bounded-save regression now invalidates a save while its response is held,
+then releases the dispatch notification and verifies that the save is dropped,
+not executed. Queue-capacity and writer-serialization assertions remain intact.
+
+Validation: **135 passed, 4 ignored**; strict Clippy, formatting and diff checks passed.
+Production reliability findings **8 → 7**. The added scheduling regression increases
+aggregate test effort and lines; no allocation or latency improvement is claimed.
+
 ## Evidence protocol
 
 Uses the local `../rust-quality-lens` executable, copied to

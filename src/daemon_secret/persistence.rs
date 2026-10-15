@@ -56,7 +56,9 @@ pub(super) fn after_reply<T>(
     delivered: bool,
     save: Option<Save>,
 ) -> ResponseDispatchNotifier<T> {
-    let cancelled = save.as_ref().map(|_| ticket(&profile_path));
+    // Register before reply dispatch so deletion can invalidate even a save
+    // whose response has not been sent yet. A save always carries its ticket.
+    let save = save.map(|save| (ticket(&profile_path), save));
     let (response, dispatched) = ResponseDispatchNotifier::new(response);
     tokio::spawn(async move {
         dispatched.await;
@@ -71,13 +73,10 @@ pub(super) fn after_reply<T>(
                 serde_json::json!({"request_id": request_id}),
             );
         }
-        let Some(save) = save else { return };
-        let outcome = persist(
-            owner,
-            cancelled.expect("save has cancellation ticket"),
-            save,
-        )
-        .await;
+        let Some((cancelled, save)) = save else {
+            return;
+        };
+        let outcome = persist(owner, cancelled, save).await;
         super::emit_secret_persistence(&runtime, &request_id, &profile_path, outcome);
     });
     response
@@ -93,6 +92,29 @@ fn queued_saves_cannot_resurrect_deleted_secrets_and_capacity_is_bounded() -> an
         ),
         || {
             tokio::runtime::Handle::current().block_on(async {
+                let (ran, finished) = tokio::sync::oneshot::channel();
+                let response = after_reply(
+                    (),
+                    Weak::new(),
+                    "undispatched".into(),
+                    "/undispatched".into(),
+                    None,
+                    false,
+                    Some(Box::new(move || {
+                        let _ = ran.send(());
+                        SecretPersistenceOutcome::Stored
+                    })),
+                );
+                invalidate("/undispatched");
+                drop(response); // Release the dispatch notification only after invalidation.
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_secs(1), finished)
+                        .await
+                        .unwrap()
+                        .is_err(),
+                    "invalidated save must be dropped without running"
+                );
+
                 let writer = WRITER.lock().await;
                 let flag = ticket("/forgotten");
                 let pending = tokio::spawn(persist(
