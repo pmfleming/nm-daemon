@@ -114,6 +114,7 @@
       );
 
       nixosModules.default = import ./nix/nixos.nix { inherit self; };
+      nixosModules.discovery = import ./nix/discovery.nix;
       nixosModules.networkManager = import ./nix/nixos-networkmanager.nix { inherit self; };
 
       checks = forAllSystems (
@@ -154,6 +155,25 @@
         compatibility
         // {
           package = self.packages.${system}.default;
+          discoveryModule = let
+            evaluate = settings: (nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [ self.nixosModules.discovery settings ];
+            }).config;
+            enabled = evaluate { services.nm-daemon.discovery.enable = true; };
+            disabled = evaluate { };
+            custom = evaluate { services.nm-daemon.discovery = {
+              enable = true; openFirewall = false; multicastDNS = "true"; defaultMdns = -1;
+            }; };
+          in assert enabled.networking.networkmanager.dns == "systemd-resolved";
+          assert enabled.networking.networkmanager.connectionConfig."connection.mdns" == 0;
+          assert enabled.services.resolved.settings.Resolve.MulticastDNS == "resolve";
+          assert builtins.elem 5353 enabled.networking.firewall.allowedUDPPorts;
+          assert !disabled.services.resolved.enable;
+          assert !(builtins.elem 5353 custom.networking.firewall.allowedUDPPorts);
+          assert custom.services.resolved.settings.Resolve.MulticastDNS == "true";
+          assert custom.networking.networkmanager.connectionConfig."connection.mdns" == -1;
+          pkgs.runCommand "nm-discovery-module-contract" { } "touch $out";
           connectParityProbe = self.packages.${system}.connectParityProbe;
           castPolicy = import ./nix/tests/cast-policy.nix { inherit self pkgs; };
           enterprise = import ./nix/tests/enterprise.nix { inherit self pkgs; };
