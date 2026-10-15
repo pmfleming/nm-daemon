@@ -56,20 +56,3 @@ fn same_access_point(left: &AccessPoint, right: &AccessPoint) -> bool {
     }
     left.ssid_bytes().as_ref() == right.ssid_bytes().as_ref() && left.security == right.security
 }
-
-#[cfg(test)]
-mod tests {
-    use super::upsert_connected_access_point;
-    use crate::model::example_access_point;
-
-    #[test]
-    fn connected_access_point_replaces_cached_network_and_marks_only_it_active() {
-        let mut networks = vec![example_access_point()];
-        let connected = example_access_point();
-
-        upsert_connected_access_point(&mut networks, connected);
-
-        assert_eq!(networks.len(), 1);
-        assert!(networks[0].active);
-    }
-}

@@ -1,8 +1,7 @@
 use super::{
-    ALLOW_INTERACTION, ConnectionSettings, HashMap, PendingSecretRequest, REQUEST_NEW,
-    SecretPersistenceOutcome, SecretResponse, apply_password, apply_secret_response,
-    apply_stored_values, persistence, request_values_complete, resolve_secret_request, session,
-    value_string,
+    ALLOW_INTERACTION, ConnectionSettings, PendingSecretRequest, REQUEST_NEW,
+    SecretPersistenceOutcome, apply_password, apply_stored_values, persistence,
+    resolve_secret_request, session,
 };
 use crate::test_support::{TestPeer, workflows::isolated};
 use anyhow::Result;
@@ -37,77 +36,6 @@ fn settings(uuid: &str, password: bool) -> ConnectionSettings {
         .unwrap();
     }
     settings
-}
-
-#[test]
-fn credentials_are_prepared_without_attempting_keyring_io() -> Result<()> {
-    isolated(
-        concat!(
-            module_path!(),
-            "::credentials_are_prepared_without_attempting_keyring_io"
-        ),
-        || {
-            for (save, supported) in [(true, true), (true, false), (false, true)] {
-                let mut request = request();
-                request.save_supported = supported;
-                let request = Arc::new(request);
-                let mut connection = settings("prepared", false);
-                let started = Instant::now();
-                let deferred = apply_secret_response(
-                    &mut connection,
-                    &request,
-                    SecretResponse {
-                        password: Some("synthetic-password".into()),
-                        values: HashMap::new(),
-                        save,
-                        cancelled: false,
-                    },
-                )
-                .map_err(|_| anyhow::anyhow!("response preparation failed"))?;
-                assert!(started.elapsed() < Duration::from_millis(100));
-                assert!(request_values_complete(&request, &connection));
-                assert_eq!(deferred.is_some(), save);
-                // Storage failures happen only when the separate save is actually run.
-                if save && !supported {
-                    assert!(matches!(
-                        deferred.unwrap()(),
-                        SecretPersistenceOutcome::Failed(_)
-                    ));
-                }
-            }
-            Ok(())
-        },
-    )
-}
-
-#[test]
-fn partial_native_credentials_are_not_overwritten_by_old_stored_values() -> Result<()> {
-    let mut request = request();
-    request.setting_name = "802-1x".into();
-    request.secret_keys = vec!["password".into(), "pin".into()];
-    let mut connection = settings("partial", false);
-    apply_password(
-        &mut connection,
-        "802-1x",
-        "password",
-        "fresh-synthetic-password".into(),
-    )?;
-    let stored = vec![
-        crate::keyring::KeyringSecret {
-            key: "password".into(),
-            password: "old-synthetic-password".into(),
-        },
-        crate::keyring::KeyringSecret {
-            key: "pin".into(),
-            password: "1234".into(),
-        },
-    ];
-    assert!(apply_stored_values(&request, &mut connection, stored)?);
-    assert_eq!(
-        value_string(&connection["802-1x"]["password"]).as_deref(),
-        Some("fresh-synthetic-password")
-    );
-    Ok(())
 }
 
 struct DeferredReply {
@@ -209,6 +137,16 @@ fn native_password_handoff_is_one_shot_owner_uuid_scoped_and_never_reuses_reject
             session::stage("", &request.connection_path, &full);
             session::clear(Some(&request.connection_path));
             assert!(session::take(&request, &full).is_empty());
+            let mut temporary = settings("handoff", true);
+            temporary
+                .get_mut("802-11-wireless-security")
+                .unwrap()
+                .insert("psk-flags".into(), crate::variant::owned_value(2_u32)?);
+            session::stage("", &request.connection_path, &temporary);
+            assert!(
+                session::take(&request, &temporary).is_empty(),
+                "NOT_SAVED must not stage credentials"
+            );
             Ok(())
         },
     )

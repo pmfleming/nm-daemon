@@ -977,13 +977,8 @@ fn runtime_stopped(operation: ErrorOperation) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
-    use shelllist_daemon_core::RecentResults;
-    use std::time::Instant;
-
-    use serde_json::json;
-
-    use super::{TERMINAL_RESULT_TTL, TerminalRequestResult, terminal_request_status};
     use crate::protocol::Stream;
+    use serde_json::json;
 
     #[test]
     fn long_work_does_not_block_fast_mutations() -> anyhow::Result<()> {
@@ -1169,26 +1164,5 @@ mod tests {
             .is_err()
         );
         assert_eq!(runtime.request_status("reused", None)["status"], "unknown");
-    }
-
-    #[test]
-    fn terminal_request_results_are_owner_scoped_and_expire() {
-        let mut results = RecentResults::new(256, Some(TERMINAL_RESULT_TTL));
-        results.record(
-            "connect-1".to_string(),
-            Some(":1.42".to_string()),
-            TerminalRequestResult {
-                stream: Stream::WifiConnect,
-                event: json!({ "event": "succeeded" }),
-            },
-        );
-
-        let status = terminal_request_status(&mut results, "connect-1", Some(":1.42")).unwrap();
-        assert_eq!(status["status"], "finished");
-        assert_eq!(status["event"]["event"], "succeeded");
-        assert!(terminal_request_status(&mut results, "connect-1", Some(":1.99")).is_none());
-
-        results.prune(Instant::now() + TERMINAL_RESULT_TTL);
-        assert!(results.is_empty());
     }
 }

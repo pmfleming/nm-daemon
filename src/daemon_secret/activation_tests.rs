@@ -215,6 +215,10 @@ fn assert_activation_outcome(
             assert!(secrets.is_err());
             assert!(harness.fake.state.lock().unwrap().deactivated.is_empty());
         }
+        "noninteractive" => {
+            assert!(matches!(result, ConnectOutcome::Failed { .. }));
+            assert!(secrets.is_err());
+        }
         "cancelled" => {
             assert!(matches!(result, ConnectOutcome::Cancelled { .. }));
             assert!(secrets.is_err());
@@ -252,6 +256,7 @@ fn manual_saved_activation_uses_real_agent_callbacks_without_speculative_forms_o
                 "provided",
                 "cancelled",
                 "no-frontend",
+                "noninteractive",
                 "other-agent",
                 "rejected",
             ] {
@@ -261,7 +266,11 @@ fn manual_saved_activation_uses_real_agent_callbacks_without_speculative_forms_o
                 }
                 // REQUEST_NEW must bypass the available native credential on rejection.
                 let returned = harness.callback(
-                    if case == "rejected" { 3 } else { 1 },
+                    match case {
+                        "rejected" => 3,
+                        "noninteractive" => 0,
+                        _ => 1,
+                    },
                     case == "rejected",
                     case == "other-agent",
                 )?;
@@ -289,6 +298,12 @@ fn manual_saved_activation_uses_real_agent_callbacks_without_speculative_forms_o
                 let result = app.connect(&request, None, |_| Ok(()))?;
                 let secrets = returned.recv_timeout(Duration::from_secs(5))?;
                 assert_activation_outcome(case, result, secrets, &harness)?;
+                if case == "available" {
+                    assert!(matches!(
+                        app.connect(&request, None, |_| Ok(()))?,
+                        ConnectOutcome::Succeeded(_)
+                    ));
+                }
                 if let Some(reply) = reply {
                     reply.join().unwrap();
                 }
@@ -298,7 +313,15 @@ fn manual_saved_activation_uses_real_agent_callbacks_without_speculative_forms_o
                     1,
                     "{case}: no authentication retry on another AP"
                 );
-                assert_eq!(state.deleted, 0);
+                assert_eq!(
+                    (
+                        state.secret_probes,
+                        state.updates,
+                        state.added,
+                        state.deleted
+                    ),
+                    (0, 0, 0, 0)
+                );
                 assert_eq!(
                     crate::variant::setting::<&str>(&state.settings["connection"], "uuid"),
                     Some("activation-test")

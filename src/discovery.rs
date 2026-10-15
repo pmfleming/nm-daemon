@@ -536,7 +536,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddressFamily, ServiceQuery, ptr_instance, snapshot_from_reply};
+    use super::{AddressFamily, ServiceQuery, snapshot_from_reply};
 
     mod dbus;
 
@@ -571,92 +571,6 @@ mod tests {
                 Ok(())
             },
         )
-    }
-
-    #[test]
-    fn query_accepts_dns_sd_types_and_rejects_non_service_names() {
-        assert!(
-            ServiceQuery::new(
-                "_googlecast._tcp".to_string(),
-                None,
-                None,
-                AddressFamily::Any,
-            )
-            .is_ok()
-        );
-        assert!(
-            ServiceQuery::new(
-                "googlecast.local".to_string(),
-                None,
-                None,
-                AddressFamily::Any,
-            )
-            .is_err()
-        );
-        assert!(
-            ServiceQuery::new(
-                "_googlecast._tcp".to_string(),
-                None,
-                Some(-1),
-                AddressFamily::Any,
-            )
-            .is_err()
-        );
-        for name in [
-            "_bad_name._tcp",
-            "_-edge._tcp",
-            "_123._udp",
-            "_longerthan15chars._tcp",
-            "_two--hyphens._tcp",
-        ] {
-            assert!(
-                ServiceQuery::new(name.into(), None, None, AddressFamily::Any).is_err(),
-                "{name}"
-            );
-        }
-        assert!(
-            ServiceQuery::new(
-                "_googlecast._tcp".into(),
-                Some("é".repeat(32)),
-                None,
-                AddressFamily::Any
-            )
-            .is_err()
-        );
-        let query = ServiceQuery::new(
-            "_googlecast._tcp".into(),
-            Some(" Living Room ".into()),
-            None,
-            AddressFamily::Any,
-        )
-        .unwrap();
-        assert_eq!(query.name.as_deref(), Some(" Living Room "));
-    }
-
-    #[test]
-    fn ptr_records_provide_instances_and_reject_other_service_types() {
-        let owner = dns_name(&["_googlecast", "_tcp", "local"]);
-        let target = dns_name(&["Living Room", "_googlecast", "_tcp", "local"]);
-        let mut record = owner;
-        record.extend_from_slice(&12_u16.to_be_bytes());
-        record.extend_from_slice(&1_u16.to_be_bytes());
-        record.extend_from_slice(&120_u32.to_be_bytes());
-        record.extend_from_slice(&(target.len() as u16).to_be_bytes());
-        record.extend_from_slice(&target);
-
-        assert_eq!(
-            ptr_instance(&record, "_googlecast._tcp", "local").as_deref(),
-            Some("Living Room")
-        );
-        assert!(ptr_instance(&record, "_spotify-connect._tcp", "local").is_none());
-        record[1] = b'x';
-        assert!(
-            ptr_instance(&record, "_googlecast._tcp", "local").is_none(),
-            "reject a PTR owned by a different service"
-        );
-        record[1] = b'_';
-        record.pop();
-        assert!(ptr_instance(&record, "_googlecast._tcp", "local").is_none());
     }
 
     fn dns_name(labels: &[&str]) -> Vec<u8> {

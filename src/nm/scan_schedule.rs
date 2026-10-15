@@ -377,7 +377,17 @@ mod tests {
                 ScanTurn::Join { generation: 1 }
             );
             if completed {
-                scheduler.complete("/devices/1", 1, SharedScanOutcome::Succeeded);
+                scheduler.complete(
+                    "/devices/1",
+                    1,
+                    SharedScanOutcome::Failed(ErrorReport {
+                        code: ErrorCode::AuthorizationRequired,
+                        operation: ErrorOperation::Scan,
+                        source: ErrorSource::NetworkManager,
+                        message: "scan permission denied".into(),
+                        details: Default::default(),
+                    }),
+                );
             }
             let outcome = scheduler.wait_for_completion(
                 "/devices/1",
@@ -386,6 +396,10 @@ mod tests {
                 Some(&AtomicBool::new(cancelled)),
             );
             assert_eq!(discriminant(&outcome), discriminant(&expected));
+            if let ScanWait::Completed(SharedScanOutcome::Failed(report)) = &outcome {
+                assert_eq!(report.code, ErrorCode::AuthorizationRequired);
+                assert_eq!(report.message, "scan permission denied");
+            }
             assert_eq!(
                 outcome.into_result("scan wait expired").is_ok(),
                 matches!(expected, ScanWait::Completed(_))
@@ -397,43 +411,6 @@ mod tests {
             assert!(!state.waiters.contains_key(&1));
             assert!(!state.completions.contains_key(&1));
         }
-    }
-
-    #[test]
-    fn joining_caller_receives_the_owned_scan_failure() {
-        let scheduler = ScanScheduler::default();
-        assert_eq!(
-            scheduler.claim("/devices/1", &[]),
-            ScanTurn::Request { generation: 1 }
-        );
-        assert_eq!(
-            scheduler.claim("/devices/1", &[]),
-            ScanTurn::Join { generation: 1 }
-        );
-        scheduler.complete(
-            "/devices/1",
-            1,
-            SharedScanOutcome::Failed(ErrorReport {
-                code: ErrorCode::AuthorizationRequired,
-                operation: ErrorOperation::Scan,
-                source: ErrorSource::NetworkManager,
-                message: "scan permission denied".to_string(),
-                details: Default::default(),
-            }),
-        );
-
-        let outcome = scheduler.wait_for_completion(
-            "/devices/1",
-            1,
-            Deadline::from_now(Duration::from_secs(1)).unwrap(),
-            None,
-        );
-        let SharedScanOutcome::Failed(report) = outcome.into_result("scan wait expired").unwrap()
-        else {
-            panic!("joined scan unexpectedly succeeded");
-        };
-        assert_eq!(report.code, ErrorCode::AuthorizationRequired);
-        assert_eq!(report.message, "scan permission denied");
     }
 
     #[test]

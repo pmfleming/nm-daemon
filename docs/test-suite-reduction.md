@@ -1,5 +1,8 @@
 # Test-suite reduction
 
+Latest follow-up: [2026-10-15 reduction](test-suite-reduction-2026-10-15.md),
+using a new 157-case baseline. The figures below describe the earlier pass.
+
 ## Result and counting
 
 | Distinct cases | Before | After |

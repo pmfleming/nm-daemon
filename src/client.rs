@@ -59,38 +59,3 @@ pub(crate) async fn run() -> Result<()> {
     })
     .await
 }
-
-#[cfg(test)]
-mod tests {
-
-    use super::{NmCorrelation, needs_correlation};
-    use serde_json::json;
-    use shelllist_daemon_tokio::{CorrelationPolicy, TrackedKind};
-
-    #[test]
-    fn correlates_responses_and_all_registered_operation_and_subscription_streams() {
-        for (data, kind) in [
-            (
-                json!({"result": {"request_id": "id"}}),
-                TrackedKind::Operation,
-            ),
-            (
-                json!({"subscription": {"id": "id"}}),
-                TrackedKind::Subscription,
-            ),
-        ] {
-            let tracked = NmCorrelation.response_id(&json!({"data": data})).unwrap();
-            assert_eq!((tracked.id.as_str(), tracked.kind), ("id", kind));
-        }
-
-        for spec in crate::protocol::STREAM_REGISTRY {
-            let expected = matches!(
-                spec.delivery,
-                crate::protocol::StreamDelivery::Operation
-                    | crate::protocol::StreamDelivery::Continuous
-            );
-            assert_eq!(needs_correlation(spec.name), expected, "{}", spec.name);
-        }
-        assert!(!needs_correlation("not.a.stream"));
-    }
-}

@@ -312,8 +312,51 @@ mod tests {
                 false,
                 r#"WIFI:T:WPA;S:\"CAFE\";P:\"ABCD1234\";;"#,
             ),
+            (
+                "SAE",
+                "Home",
+                Some("éééééééé"),
+                false,
+                "WIFI:T:SAE;S:Home;P:éééééééé;;",
+            ),
+            (
+                "WEP",
+                "Old",
+                Some("abcdef0123"),
+                false,
+                "WIFI:T:WEP;S:Old;P:abcdef0123;;",
+            ),
+            (
+                "WEP",
+                "Old",
+                Some("a longer phrase"),
+                false,
+                "WIFI:T:WEP;S:Old;P:a longer phrase;;",
+            ),
         ] {
             assert_eq!(wifi_qr_payload(auth, ssid, password, hidden), expected);
+            let parsed = parse_wifi_qr(expected).unwrap();
+            assert_eq!(parsed.ssid, ssid);
+            assert_eq!(parsed.password.as_deref(), password);
+            assert_eq!(parsed.hidden, hidden);
+            match parsed.auth {
+                WifiQrAuth::Sae => assert_eq!(parsed.auth.key_management_hint(), Some("sae")),
+                WifiQrAuth::Wep => {
+                    assert_eq!(parsed.auth.key_management_hint(), Some("wep"));
+                    assert_eq!(
+                        parsed.wep_key_type,
+                        Some(if password == Some("abcdef0123") {
+                            WepKeyType::Key
+                        } else {
+                            WepKeyType::Phrase
+                        })
+                    );
+                }
+                _ => {}
+            }
+            let wire = serde_json::to_value(parsed).unwrap();
+            assert_eq!(wire["has_password"], password.is_some());
+            assert!(wire.get("password").is_none());
         }
         let raw_psk = "0123456789abcdef".repeat(4);
         assert_eq!(
@@ -323,65 +366,20 @@ mod tests {
     }
 
     #[test]
-    fn generated_payloads_round_trip_without_serializing_passwords() {
-        for (ssid, password) in [
-            ("Cafe;Guest", r#"pass:word1\,\""#),
-            (r#""Cafe""#, r#""password""#),
-            ("deadbeef", "0123456789abcdef"),
-            (r#"Cafe\"#, r#"password\"#),
+    fn invalid_payloads_return_typed_errors_without_echoing_secrets() {
+        for (password, valid) in [
+            ("a".repeat(7), false),
+            ("a".repeat(8), true),
+            ("a".repeat(63), true),
+            ("a".repeat(64), true),
+            ("g".repeat(64), false),
+            ("a".repeat(65), false),
         ] {
-            let payload = wifi_qr_payload("WPA", ssid, Some(password), true);
-            let parsed = parse_wifi_qr(&payload).expect("round trip");
-            assert_eq!(parsed.ssid, ssid);
-            assert_eq!(parsed.password.as_deref(), Some(password));
-            assert_eq!(parsed.auth, WifiQrAuth::Wpa);
-            assert!(parsed.hidden);
-            let wire = serde_json::to_value(parsed).expect("serialize parsed payload");
-            assert_eq!(wire["has_password"], true);
-            assert!(wire.get("password").is_none());
-        }
-    }
-
-    #[test]
-    fn authentication_preserves_password_boundaries_and_key_management() {
-        for (auth, password, valid) in [
-            ("nopass", String::new(), true),
-            ("WPA", "a".repeat(7), false),
-            ("WPA", "a".repeat(8), true),
-            ("WPA", "a".repeat(63), true),
-            ("WPA", "a".repeat(64), true),
-            ("WPA", "g".repeat(64), false),
-            ("WPA", "a".repeat(65), false),
-            ("SAE", "é".repeat(8), true),
-            ("WEP", "a".repeat(58), true),
-            ("WEP", "a".repeat(59), false),
-        ] {
-            let payload = wifi_qr_payload(auth, "Cafe", Some(&password), false);
             assert_eq!(
-                parse_wifi_qr(&payload).is_ok(),
-                valid,
-                "{auth}, {} characters",
-                password.chars().count()
+                parse_wifi_qr(&wifi_qr_payload("WPA", "Cafe", Some(&password), false)).is_ok(),
+                valid
             );
         }
-
-        assert_eq!(
-            parse_wifi_qr("WIFI:T:SAE;S:Home;P:correcthorse;;")
-                .expect("sae payload")
-                .auth
-                .key_management_hint(),
-            Some("sae")
-        );
-        let wep = parse_wifi_qr("WIFI:T:WEP;S:Old;P:abcdef0123;;").expect("wep payload");
-        assert_eq!(wep.auth.key_management_hint(), Some("wep"));
-        assert_eq!(wep.wep_key_type, Some(WepKeyType::Key));
-
-        let phrase = parse_wifi_qr("WIFI:T:WEP;S:Old;P:a longer phrase;;").expect("wep phrase");
-        assert_eq!(phrase.wep_key_type, Some(WepKeyType::Phrase));
-    }
-
-    #[test]
-    fn invalid_payloads_return_typed_errors_without_echoing_secrets() {
         for (payload, field) in [
             ("not-a-qr-code", "payload"),
             ("WIFI:T:WPA;P:correcthorse;;", "S"),

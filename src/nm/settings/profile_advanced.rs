@@ -477,70 +477,6 @@ mod tests {
         )])
     }
     #[test]
-    fn peap_label_edits_preserve_zero_omission_and_explicit_clearing() -> anyhow::Result<()> {
-        for (json, expected) in [
-            (r#"{}"#, Some("0")),
-            (r#"{"phase1_peaplabel":null}"#, Some("0")),
-            (r#"{"phase1_peaplabel":""}"#, None),
-            (r#"{"phase1_peaplabel":"0"}"#, Some("0")),
-            (r#"{"phase1_peaplabel":"1"}"#, Some("1")),
-        ] {
-            let mut profile = settings();
-            let seed = WifiProfileAdvancedUpdate {
-                permissions: Some(vec!["user:alice:".into()]),
-                enterprise: Some(ProfileEnterpriseUpdate {
-                    phase1_peaplabel: Some("0".into()),
-                    ca_cert: Some("file:///test/ca.pem".into()),
-                    phase2_ca_cert: Some("pkcs11:object=phase2-ca".into()),
-                    domain_suffix_match: Some("radius.example".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            apply_advanced(&mut profile, &seed)?;
-            let before = profile.clone();
-            apply_advanced(
-                &mut profile,
-                &WifiProfileAdvancedUpdate {
-                    enterprise: Some(serde_json::from_str(json)?),
-                    ..Default::default()
-                },
-            )?;
-            let read = super::read_enterprise(&profile).unwrap();
-            assert_eq!(read.phase1_peaplabel.as_deref(), expected);
-            assert_eq!(
-                profile["connection"]["permissions"],
-                before["connection"]["permissions"]
-            );
-            for field in ["ca-cert", "phase2-ca-cert", "domain-suffix-match"] {
-                assert_eq!(profile["802-1x"][field], before["802-1x"][field]);
-            }
-            assert_eq!(
-                Vec::<u8>::try_from(profile["802-1x"]["ca-cert"].try_clone()?)?,
-                b"file:///test/ca.pem\0"
-            );
-        }
-        for rejected in ["false", "true", "2", " 0", "0\0"] {
-            let error = apply_advanced(
-                &mut settings(),
-                &WifiProfileAdvancedUpdate {
-                    enterprise: Some(ProfileEnterpriseUpdate {
-                        phase1_peaplabel: Some(rejected.into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
-            .unwrap_err();
-            let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
-            assert_eq!(report.code, ErrorCode::ValidationError);
-            assert_eq!(report.operation, ErrorOperation::ProfileOperation);
-            assert_eq!(report.details["field"], "802-1x.phase1-peaplabel");
-        }
-        Ok(())
-    }
-
-    #[test]
     fn security_policy_rejects_unsafe_modes_eap_and_ca_settings_and_allows_explicit_repair() {
         assert!(validate_mode("infrastructure").is_ok());
         assert!(validate_mode("ap").is_ok());
@@ -552,6 +488,10 @@ mod tests {
             },
             ProfileEnterpriseUpdate {
                 ca_cert: Some("/etc/ssl/ca.pem".into()),
+                ..Default::default()
+            },
+            ProfileEnterpriseUpdate {
+                phase1_peaplabel: Some("2".into()),
                 ..Default::default()
             },
         ] {
@@ -566,6 +506,27 @@ mod tests {
             assert_eq!(
                 ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
                 ErrorCode::ValidationError
+            );
+        }
+        let mut peap = settings();
+        for (label, expected) in [(Some("0"), Some("0")), (None, Some("0")), (Some(""), None)] {
+            apply_advanced(
+                &mut peap,
+                &WifiProfileAdvancedUpdate {
+                    enterprise: Some(ProfileEnterpriseUpdate {
+                        phase1_peaplabel: label.map(str::to_owned),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                super::read_enterprise(&peap)
+                    .unwrap()
+                    .phase1_peaplabel
+                    .as_deref(),
+                expected
             );
         }
         for (nm_key, api_key) in [("ca-path", "ca_path"), ("phase2-ca-path", "phase2_ca_path")] {
@@ -618,58 +579,10 @@ mod tests {
     }
 
     #[test]
-    fn version_ignores_order_and_volatile_fields_but_rejects_stale_edits_as_conflicts()
-    -> anyhow::Result<()> {
-        let mut original = settings();
-        original.insert(
-            "ipv4".into(),
-            HashMap::from([
-                ("method".into(), owned_value("auto".to_string())?),
-                ("may-fail".into(), owned_value(false)?),
-            ]),
-        );
-        let token = profile_version(&original);
-        assert!(check_expected_version(&original, None).is_ok());
-        assert!(check_expected_version(&original, Some(&token)).is_ok());
-        let mut reordered = ConnectionSettings::new();
-        for (key, values) in &original {
-            reordered.insert(
-                key.clone(),
-                values.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            );
-        }
-        assert_eq!(profile_version(&reordered), token);
-        reordered
-            .entry("connection".into())
-            .or_default()
-            .insert("timestamp".into(), owned_value(99_u64)?);
-        assert_eq!(profile_version(&reordered), token);
-        reordered
-            .entry("ipv4".into())
-            .or_default()
-            .insert("timestamp".into(), owned_value(99_u64)?);
-        assert_ne!(profile_version(&reordered), token);
-        reordered
-            .entry("ipv4".into())
-            .or_default()
-            .remove("timestamp");
-        reordered
-            .entry("connection".into())
-            .or_default()
-            .insert("id".into(), owned_value("Changed".to_string())?);
-        let error = check_expected_version(&reordered, Some(&token)).unwrap_err();
-        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
-        assert_eq!(report.code, ErrorCode::Conflict);
-        assert_eq!(
-            report.details["current_version"],
-            profile_version(&reordered)
-        );
-        Ok(())
-    }
-
-    #[test]
     fn advanced_updates_preserve_unsent_fields_and_can_clear_restrictions() {
         let mut settings = settings();
+        let version = profile_version(&settings);
+        assert!(check_expected_version(&settings, Some(&version)).is_ok());
         let update = WifiProfileAdvancedUpdate {
             autoconnect_priority: Some(30),
             casting_enabled: Some(true),
@@ -682,6 +595,13 @@ mod tests {
             ..WifiProfileAdvancedUpdate::default()
         };
         apply_advanced(&mut settings, &update).expect("advanced update");
+        let conflict = check_expected_version(&settings, Some(&version)).unwrap_err();
+        let report = ErrorReport::from_error(&conflict, ErrorOperation::Unknown);
+        assert_eq!(report.code, ErrorCode::Conflict);
+        assert_eq!(
+            report.details["current_version"],
+            profile_version(&settings)
+        );
 
         let connection = &settings["connection"];
         assert_eq!(

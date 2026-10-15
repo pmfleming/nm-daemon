@@ -594,6 +594,25 @@ mod tests {
     }
     #[test]
     fn profile_selection_reports_typed_validation_and_not_found_errors() {
+        for (path, uuid, exists) in [
+            (Some("/active/1"), "absent", true),
+            (None, "uuid-1", true),
+            (Some("/active/missing"), "uuid-1", false),
+        ] {
+            let selector = ActiveConnectionSelector {
+                path: path.map(str::to_owned),
+                uuid: Some(uuid.into()),
+            };
+            let result = select_active_connection(vec![active("/active/1", "uuid-1")], &selector);
+            if exists {
+                assert_eq!(result.unwrap().uuid, "uuid-1");
+            } else {
+                assert_eq!(
+                    ErrorReport::from_error(&result.unwrap_err(), ErrorOperation::Unknown).code,
+                    ErrorCode::NotFound
+                );
+            }
+        }
         let connections = || vec![profile("/settings/1", "uuid-1")];
         for (uuid, path) in [
             (Some("uuid-1"), Some("absent")),
@@ -626,38 +645,6 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             ErrorReport::from_error(&missing, ErrorOperation::Unknown).code,
-            ErrorCode::NotFound
-        );
-    }
-
-    #[test]
-    fn active_connection_selection_matches_path_or_uuid() {
-        let actives = || vec![active("/active/1", "uuid-1")];
-        let by_path = ActiveConnectionSelector {
-            path: Some("/active/1".to_string()),
-            uuid: Some("absent".to_string()),
-        };
-        assert_eq!(
-            select_active_connection(actives(), &by_path).unwrap().uuid,
-            "uuid-1"
-        );
-
-        let by_uuid = ActiveConnectionSelector {
-            path: None,
-            uuid: Some("uuid-1".to_string()),
-        };
-        assert_eq!(
-            select_active_connection(actives(), &by_uuid).unwrap().path,
-            "/active/1"
-        );
-
-        let missing = ActiveConnectionSelector {
-            path: Some("/active/missing".to_string()),
-            uuid: Some("uuid-1".to_string()),
-        };
-        let error = select_active_connection(actives(), &missing).unwrap_err();
-        assert_eq!(
-            ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
             ErrorCode::NotFound
         );
     }

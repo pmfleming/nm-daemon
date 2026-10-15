@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use zvariant::OwnedObjectPath;
 
-use super::{casting_enabled_from_settings, mdns_policy};
+use super::mdns_policy;
 use crate::command::SystemCommandRunner;
 use crate::error::{ErrorOperation, ErrorReport};
 use crate::nl80211::UnavailableWirelessTelemetry;
@@ -252,12 +252,4 @@ fn run_policy_test() {
             "enforce before and after resolver reapply, even on failure"
         );
     }
-}
-
-#[test]
-fn only_explicit_supported_policies_report_discovery_enabled() {
-    for (policy, enabled) in [(-1, false), (0, false), (1, true), (2, true), (3, false)] {
-        assert_eq!(casting_enabled_from_settings(&settings(policy)), enabled);
-    }
-    assert!(!casting_enabled_from_settings(&ConnectionSettings::new()));
 }

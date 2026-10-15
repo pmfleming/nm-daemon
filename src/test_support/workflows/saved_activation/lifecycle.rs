@@ -77,6 +77,7 @@ fn credential_stop_survives_elapsed_activation_deadline_and_aborts_exact_path() 
         )?;
         let guard = Guard::new(":1.0".into(), "wait-test".into(), Instant::now(), || {});
         guard.state.stop(stop);
+        guard.state.stop(CredentialStop::Expired); // A later stop must not overwrite the first outcome.
         fake.state.lock().unwrap().current = Some(Outcome::AwaitingSecrets);
         let error = crate::connect_wait::wait_for_active_target_path(
             &fake.nm,

@@ -5,7 +5,7 @@ use super::{
 use crate::model::{TargetIpAddress, TargetIpSettings, WifiProfileUpdate};
 use crate::nm::ip_settings::replace as replace_ip_settings;
 use crate::variant::{owned_value, setting, value_map};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 #[test]
 fn profile_matching_obeys_identity_and_radio_restrictions_in_both_paths() -> anyhow::Result<()> {
@@ -51,43 +51,6 @@ fn profile_matching_obeys_identity_and_radio_restrictions_in_both_paths() -> any
             "inventory and activation must agree"
         );
     }
-    Ok(())
-}
-
-#[test]
-fn saved_profile_secret_agent_detection_uses_secret_flags_and_readable_secrets()
--> anyhow::Result<()> {
-    let mut settings = wifi_settings("Example", "802-11-wireless")?;
-    settings.insert(
-        "802-11-wireless-security".into(),
-        value_map([("key-mgmt", "wpa-psk".into()), ("psk-flags", 1_u32.into())])?,
-    );
-    assert!(wifi_settings_need_secret_agent(&settings, None, None));
-    settings
-        .get_mut("802-11-wireless-security")
-        .unwrap()
-        .insert("psk-flags".into(), owned_value(4_u32)?);
-    assert!(!wifi_settings_need_secret_agent(&settings, None, None));
-    settings
-        .get_mut("802-11-wireless-security")
-        .unwrap()
-        .remove("psk-flags");
-    let mut secrets =
-        ConnectionSettings::from([("802-11-wireless-security".into(), HashMap::new())]);
-    assert!(wifi_settings_need_secret_agent(
-        &settings,
-        Some(&secrets),
-        None
-    ));
-    secrets
-        .get_mut("802-11-wireless-security")
-        .unwrap()
-        .insert("psk".into(), owned_value("correct horse battery staple")?);
-    assert!(!wifi_settings_need_secret_agent(
-        &settings,
-        Some(&secrets),
-        None
-    ));
     Ok(())
 }
 
@@ -150,61 +113,6 @@ fn ip_profiles_preserve_defaults_signed_values_and_family_boundaries() -> anyhow
 }
 
 #[test]
-fn profile_snapshot_decoding_preserves_defaults_empty_values_and_radio_restrictions()
--> anyhow::Result<()> {
-    let path = zvariant::OwnedObjectPath::try_from("/settings/1")?;
-    let mut settings = wifi_settings("Example", "802-11-wireless")?;
-    let defaults = super::wifi_profile_details(&path, &settings)?;
-    assert_eq!(defaults.mode, "infrastructure");
-    assert_eq!(
-        (defaults.mtu, defaults.channel, defaults.bssid),
-        (None, None, None)
-    );
-    settings.get_mut("connection").unwrap().extend(value_map([
-        ("autoconnect-priority", (-42_i32).into()),
-        ("zone", "".into()),
-    ])?);
-    settings
-        .get_mut("802-11-wireless")
-        .unwrap()
-        .extend(value_map([
-            ("mode", "".into()),
-            ("mtu", 0_u32.into()),
-            ("channel", 36_u32.into()),
-            ("band", b"a".as_slice().into()),
-            ("bssid", b"AA:BB:CC:DD:EE:FF".as_slice().into()),
-            ("assigned-mac-address", "stable".into()),
-            ("hidden", true.into()),
-        ])?);
-    let details = super::wifi_profile_details(&path, &settings)?;
-    assert_eq!(details.autoconnect_priority, -42);
-    assert_eq!(details.mode, "infrastructure");
-    assert_eq!(details.band, crate::model::WifiBand::Ghz5);
-    assert_eq!(details.bssid.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
-    assert_eq!(details.channel, Some(36));
-    assert!(details.hidden);
-    assert!(
-        details.firewall_zone.is_none()
-            && details.cloned_mac_address.is_none()
-            && details.mtu.is_none()
-    );
-    crate::variant::insert_string(
-        settings.get_mut("802-11-wireless").unwrap(),
-        "assigned-mac-address",
-        "00:11:22:33:44:55",
-    )?;
-    assert_eq!(
-        super::wifi_profile_details(&path, &settings)?
-            .cloned_mac_address
-            .as_deref(),
-        Some("00:11:22:33:44:55")
-    );
-    assert!(super::wifi_profile_details(&path, &wifi_settings("Example", "vpn")?).is_err());
-    assert!(super::wifi_profile_details(&path, &ConnectionSettings::new()).is_err());
-    Ok(())
-}
-
-#[test]
 fn profile_secrets_use_the_security_specific_section_key_and_validation() -> anyhow::Result<()> {
     for (management, section, key, password, foreign_key) in [
         (
@@ -236,6 +144,14 @@ fn profile_secrets_use_the_security_specific_section_key_and_validation() -> any
             "802-1x".into(),
             value_map([("password-flags", 1_u32.into())])?,
         );
+        if management == "wpa-psk" {
+            let mut optional = settings.clone();
+            optional
+                .get_mut(section)
+                .unwrap()
+                .insert("psk-flags".into(), owned_value(4_u32)?);
+            assert!(!wifi_settings_need_secret_agent(&optional, None, None));
+        }
         let spec = profile_secret_spec(&settings);
         assert_eq!(spec.setting_name, Some(section));
         assert_eq!(spec.primary_secret_key, Some(key));

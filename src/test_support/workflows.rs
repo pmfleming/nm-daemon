@@ -45,9 +45,9 @@ pub(crate) struct State {
     pub(crate) activations: Vec<String>,
     pub(crate) deactivated: Vec<String>,
     pub(crate) deleted: usize,
-    added: usize,
-    updates: usize,
-    secret_probes: usize,
+    pub(crate) added: usize,
+    pub(crate) updates: usize,
+    pub(crate) secret_probes: usize,
     pub(crate) connectivity_checks: usize,
     pub(crate) cancellation: Arc<AtomicBool>,
 }

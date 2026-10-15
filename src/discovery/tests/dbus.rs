@@ -117,6 +117,33 @@ fn ptr(instance: &str) -> Vec<u8> {
 
 #[test]
 fn browse_limits_unique_targets_and_rejects_truncated_records() -> anyhow::Result<()> {
+    for kind in [
+        "googlecast.local",
+        "_bad_name._tcp",
+        "_123._udp",
+        "_-edge._tcp",
+        "_longerthan15chars._tcp",
+    ] {
+        assert!(ServiceQuery::new(kind.into(), None, None, AddressFamily::Any).is_err());
+    }
+    assert!(
+        ServiceQuery::new(
+            "_googlecast._tcp".into(),
+            None,
+            Some(-1),
+            AddressFamily::Any
+        )
+        .is_err()
+    );
+    assert!(
+        ServiceQuery::new(
+            "_googlecast._tcp".into(),
+            Some("é".repeat(32)),
+            None,
+            AddressFamily::Any
+        )
+        .is_err()
+    );
     let query = ServiceQuery::new("_googlecast._tcp".into(), None, None, AddressFamily::Any)?;
     let mut records: Vec<_> = (0..=MAX_DISCOVERY_INSTANCES)
         .map(|index| {
@@ -133,7 +160,15 @@ fn browse_limits_unique_targets_and_rejects_truncated_records() -> anyhow::Resul
     assert_eq!(instances.len(), MAX_DISCOVERY_INSTANCES);
     assert_eq!(instances[0], (3, "Device 0".into()));
     assert_eq!(warnings.len(), 1);
-    let record = ptr("Living Room");
+    let mut record = ptr("Living Room");
+    assert_eq!(
+        ptr_instance(&record, "_googlecast._tcp", "local").as_deref(),
+        Some("Living Room")
+    );
+    assert!(ptr_instance(&record, "_spotify-connect._tcp", "local").is_none());
+    record[1] = b'x';
+    assert!(ptr_instance(&record, "_googlecast._tcp", "local").is_none());
+    record[1] = b'_';
     for end in 0..record.len() {
         assert!(ptr_instance(&record[..end], "_googlecast._tcp", "local").is_none());
     }

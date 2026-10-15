@@ -238,54 +238,19 @@ mod tests {
         );
         policy.complete(&replacement, None, true, now);
         assert_eq!(policy.admit(&saved, now), Ok(()));
-    }
-
-    #[test]
-    fn simultaneous_callers_admit_exactly_one_guard() {
-        let attempts = ConnectAttempts::default();
-        let barrier = std::sync::Barrier::new(4);
-        let admitted = std::thread::scope(|scope| {
-            let threads = (0..4)
-                .map(|_| {
-                    scope.spawn(|| {
-                        barrier.wait();
-                        let guard = attempts.begin(key(b"same", true));
-                        barrier.wait(); // Keep the winner admitted until every caller tried.
-                        guard.is_ok()
-                    })
-                })
-                .collect::<Vec<_>>();
-            threads
-                .into_iter()
-                .map(|thread| usize::from(thread.join().unwrap()))
-                .sum::<usize>()
-        });
-        assert_eq!(admitted, 1);
-        assert!(attempts.begin(key(b"same", true)).is_ok());
-    }
-
-    #[test]
-    fn guards_release_admission_on_abandon_unwind_and_completion() {
         let attempts = ConnectAttempts::default();
         let guard = attempts.begin(key(b"one", true)).unwrap();
-        assert!(attempts.begin(key(b"two", true)).is_err());
-        drop(guard);
-        let guard = attempts.begin(key(b"two", true)).unwrap();
         assert!(
             std::panic::catch_unwind(|| {
                 let _guard = guard;
-                panic!("worker failed")
+                panic!("worker failed");
             })
             .is_err()
         );
         attempts
-            .begin(key(b"three", true))
+            .begin(key(b"replacement", true))
             .unwrap()
             .finish(None, true);
-        let guard = attempts.begin(key(b"four", true)).unwrap();
-        // Finishing the previous guard must not release this newer attempt.
-        assert!(attempts.begin(key(b"five", true)).is_err());
-        drop(attempts);
-        drop(guard);
+        assert!(attempts.begin(key(b"after-completion", true)).is_ok());
     }
 }

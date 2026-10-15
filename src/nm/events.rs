@@ -204,10 +204,7 @@ fn health_signal(message: &zbus::Message) -> Option<HealthSignal> {
 
 #[cfg(test)]
 mod tests {
-
-    use std::time::Instant;
-
-    use super::{HealthSignal, HealthSubject, NetworkEvents};
+    use super::HealthSubject;
 
     #[test]
     fn health_signals_require_the_matching_member_body_and_sender() -> anyhow::Result<()> {
@@ -257,49 +254,5 @@ mod tests {
             }
         }
         Ok(())
-    }
-
-    #[test]
-    fn detailed_health_survives_neutral_updates_but_not_owner_loss() {
-        let events = NetworkEvents::default();
-        let signal = |reason| HealthSignal {
-            owner: ":1.0".into(),
-            subject: HealthSubject::Device,
-            path: "/devices/1".to_string(),
-            state: 30,
-            previous_state: Some(120),
-            reason,
-            observed_at: Instant::now(),
-        };
-        events.notify_health(signal(17));
-        events.notify_health(signal(0));
-
-        assert_eq!(
-            events
-                .latest_health(HealthSubject::Device, "/devices/1")
-                .unwrap()
-                .reason,
-            0
-        );
-        assert_eq!(
-            events
-                .latest_detailed_health(HealthSubject::Device, "/devices/1")
-                .unwrap()
-                .reason,
-            17
-        );
-        let before = events.generation();
-        events.clear_health();
-        assert!(
-            events
-                .latest_health(HealthSubject::Device, "/devices/1")
-                .is_none()
-        );
-        assert!(
-            events
-                .latest_detailed_health(HealthSubject::Device, "/devices/1")
-                .is_none()
-        );
-        assert_ne!(events.generation(), before);
     }
 }

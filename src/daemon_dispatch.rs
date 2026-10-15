@@ -203,30 +203,3 @@ where
             .into()
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::normalized_streams;
-    use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
-    use crate::protocol::Stream;
-
-    #[test]
-    fn subscriptions_are_typed_deduplicated_and_reject_unknown_names() {
-        assert_eq!(
-            normalized_streams(vec![
-                "wifi.scan".to_string(),
-                "wifi.scan".to_string(),
-                "wifi.connect".to_string(),
-            ])
-            .unwrap(),
-            vec![Stream::WifiScan, Stream::WifiConnect]
-        );
-
-        let error =
-            normalized_streams(vec!["wifi.scan".to_string(), "not.real".to_string()]).unwrap_err();
-        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
-        assert_eq!(report.code, ErrorCode::ValidationError);
-        assert_eq!(report.operation, ErrorOperation::Subscribe);
-        assert_eq!(report.details["unsupported_streams"][0], "not.real");
-    }
-}

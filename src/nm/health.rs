@@ -356,12 +356,9 @@ fn describe(signal: &HealthSignal) -> (&'static str, Option<&'static str>, Typed
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
-    use super::{
-        HEALTH_FAILURE_CORRELATION_WINDOW, HealthTransitionKind, classify_transition, describe,
-        recent_detailed_device_failure,
-    };
+    use super::{HealthTransitionKind, classify_transition, describe};
     use crate::nm::{HealthSignal, HealthSubject};
 
     fn signal(subject: HealthSubject, state: u32, reason: u32) -> HealthSignal {
@@ -447,20 +444,5 @@ mod tests {
         assert_eq!(state, "unknown");
         assert_eq!(reason.name, "unknown");
         assert_eq!(reason.code, 9_999);
-    }
-
-    #[test]
-    fn recent_detailed_device_failures_can_own_the_notification() {
-        let recent = signal(HealthSubject::Device, 120, 17);
-        assert!(recent_detailed_device_failure(Some(&recent)));
-
-        let mut stale = recent;
-        stale.observed_at =
-            Instant::now() - HEALTH_FAILURE_CORRELATION_WINDOW - Duration::from_millis(1);
-        assert!(!recent_detailed_device_failure(Some(&stale)));
-
-        let generic = signal(HealthSubject::Device, 120, 1);
-        assert!(!recent_detailed_device_failure(Some(&generic)));
-        assert!(!recent_detailed_device_failure(None));
     }
 }

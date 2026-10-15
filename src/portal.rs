@@ -283,28 +283,23 @@ mod tests {
         assert_ne!(first, episode(":1.5", &status).unwrap());
         status.primary_connection.as_mut().unwrap().path = "/active/2".into();
         assert_ne!(first, episode(":1.4", &status).unwrap());
-    }
-    #[test]
-    fn incomplete_connection_identity_is_rejected_in_both_launch_modes() {
-        let mut missing = status();
-        missing.primary_connection = None;
-        let mut root = status();
-        root.primary_connection.as_mut().unwrap().path = "/".into();
-        let mut no_uuid = status();
-        no_uuid.primary_connection.as_mut().unwrap().uuid.clear();
-        for (owner, current) in [
-            ("", status()),
-            (":1.4", missing),
-            (":1.4", root),
-            (":1.4", no_uuid),
-        ] {
-            assert!(episode(owner, &current).is_err());
-            for mode in [Mode::Automatic, Mode::Manual] {
-                assert!(validate(&params(mode), owner, &current, &proof(&current), 100).is_err());
-            }
+        for mode in [Mode::Automatic, Mode::Manual] {
+            assert!(validate(&params(mode), "", &status, &proof(&status), 100).is_err());
         }
+        let reject = |current: &ConnectivityStatus| {
+            assert!(episode(":1.4", current).is_err());
+            for mode in [Mode::Automatic, Mode::Manual] {
+                assert!(validate(&params(mode), ":1.4", current, &proof(current), 100).is_err());
+            }
+        };
+        status.primary_connection.as_mut().unwrap().path = "/".into();
+        reject(&status);
+        status.primary_connection.as_mut().unwrap().path = "/active/2".into();
+        status.primary_connection.as_mut().unwrap().uuid.clear();
+        reject(&status);
+        status.primary_connection = None;
+        reject(&status);
     }
-
     #[test]
     fn url_policy_never_forwards_browser_pseudo_schemes_or_credentials() {
         for value in [
@@ -328,15 +323,5 @@ mod tests {
         let intent = validate(&params(Mode::Manual), ":1.4", &status, &Value::Null, 100).unwrap();
         assert_eq!(intent.url, "http://neverssl.com/");
         assert_eq!(intent.expires_at_ms, 10_100);
-    }
-    #[test]
-    fn request_cannot_supply_identity_url_or_episode() {
-        for extra in ["url", "identity", "episode"] {
-            assert!(
-                serde_json::from_value::<PrepareParams>(json!({"mode":"manual",extra:"forged"}))
-                    .is_err()
-            );
-        }
-        assert!(serde_json::from_value::<PrepareParams>(json!({"mode":"other"})).is_err());
     }
 }

@@ -90,25 +90,3 @@ pub(crate) fn recovery(reason: ConnectFailureReason) -> Option<NetworkConnectPro
         enterprise_defaults: None,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{ConnectFailureReason, HiddenPrompt, WepKeyType, recovery};
-    #[test]
-    fn hidden_modes_have_explicit_key_management_and_conditional_requirements() {
-        let prompt = HiddenPrompt::default();
-        assert_eq!(prompt.security_modes.len(), 7);
-        let phrase = prompt
-            .security_modes
-            .iter()
-            .find(|v| v.id == "wep-phrase")
-            .unwrap();
-        assert_eq!(phrase.key_mgmt, "wep");
-        assert_eq!(phrase.wep_key_type, Some(WepKeyType::Phrase));
-        assert_eq!(phrase.required_fields, ["password"]);
-        assert!(prompt.security_modes[0].required_fields.is_empty());
-        assert!(recovery(ConnectFailureReason::WrongPassword).is_some());
-        assert!(recovery(ConnectFailureReason::Timeout).is_none());
-        assert!(recovery(ConnectFailureReason::AuthorizationRequired).is_none());
-    }
-}

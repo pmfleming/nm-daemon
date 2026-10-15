@@ -405,44 +405,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ActivationWait, NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE, PendingFailure,
-        latch_pending_failure, requested_activation_stopped,
+        ActivationWait, NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE, latch_pending_failure,
     };
     use crate::deadline::Deadline;
     use crate::generated::ACTIVATION_FAILURE_GRACE;
-    use zvariant::OwnedObjectPath;
-
-    #[test]
-    fn requested_activation_disappearance_or_deactivation_is_terminal() {
-        let path = OwnedObjectPath::try_from("/active/1").unwrap();
-        assert!(requested_activation_stopped(Some(&path), None));
-        assert!(!requested_activation_stopped(Some(&path), Some(1)));
-        assert!(!requested_activation_stopped(Some(&path), Some(2)));
-        assert!(requested_activation_stopped(Some(&path), Some(3)));
-        assert!(requested_activation_stopped(Some(&path), Some(4)));
-        assert!(!requested_activation_stopped(None, None));
-    }
-
-    #[test]
-    fn generic_failure_is_latched_then_upgraded_without_extending_grace() {
-        let mut pending = None;
-        let mut status = crate::nm::WifiActivationStatus {
-            iface: "wlan0".into(),
-            device_state: 30,
-            device_state_reason: (30, 0),
-            active_connection_path: None,
-            active_connection_state: None,
-        };
-        let since = latch_pending_failure(&mut pending, &status).since;
-        status.device_state_reason.1 = NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE;
-        let upgraded = latch_pending_failure(&mut pending, &status);
-        assert_eq!(upgraded.since, since);
-        assert_eq!(
-            upgraded.status.device_state_reason,
-            status.device_state_reason
-        );
-    }
-
     #[test]
     fn informative_failure_survives_generic_snapshots_and_expires_at_the_grace_deadline() {
         let status = |reason| crate::nm::WifiActivationStatus {
@@ -452,12 +418,20 @@ mod tests {
             active_connection_path: None,
             active_connection_state: None,
         };
+        let mut pending = None;
+        let since = latch_pending_failure(&mut pending, &status(0)).since;
+        let upgraded = latch_pending_failure(
+            &mut pending,
+            &status(NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE),
+        );
+        assert_eq!(upgraded.since, since);
+        assert_eq!(
+            upgraded.status.device_state_reason.1,
+            NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE
+        );
+        // Simulate elapsed grace without sleeping, then receive a neutral update.
         let since = Instant::now() - ACTIVATION_FAILURE_GRACE;
-        let mut pending = Some(PendingFailure {
-            since,
-            status: status(super::NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE),
-        });
-
+        pending.as_mut().unwrap().since = since;
         latch_pending_failure(&mut pending, &status(0));
         let pending = pending.unwrap();
         assert_eq!(

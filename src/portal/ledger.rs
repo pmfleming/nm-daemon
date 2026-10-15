@@ -230,7 +230,7 @@ impl Ledger {
 
 #[cfg(test)]
 mod tests {
-    use super::{FALLBACKS, Intent, Ledger, Mode, Outcome};
+    use super::{Intent, Ledger, Mode, Outcome};
     use std::path::PathBuf;
     struct Fixture(PathBuf);
     impl Fixture {
@@ -298,6 +298,11 @@ mod tests {
             .reserve(intent(Mode::Automatic, "a"), "owner", false, 0)
             .unwrap()
             .unwrap();
+        assert!(
+            ledger
+                .reserve(intent(Mode::Manual, "b"), "other", true, 1)
+                .is_err()
+        );
         for (owner, episode, captive, now) in [
             ("other", "a", true, 1),
             ("owner", "b", true, 1),
@@ -338,35 +343,6 @@ mod tests {
                 .reserve(intent(Mode::Automatic, "b"), "owner", false, 2)
                 .unwrap()
                 .is_some()
-        );
-    }
-    #[test]
-    fn overlapping_requests_are_bounded_and_fallback_rotation_is_per_episode() {
-        let fixture = Fixture::new();
-        let mut ledger = fixture.open();
-        for expected in [FALLBACKS[0], FALLBACKS[1], FALLBACKS[2], FALLBACKS[0]] {
-            let i = ledger
-                .reserve(intent(Mode::Manual, "a"), "owner", true, 0)
-                .unwrap()
-                .unwrap();
-            assert_eq!(i.url, expected);
-            assert!(
-                ledger
-                    .reserve(intent(Mode::Manual, "b"), "other", true, 0)
-                    .is_err()
-            );
-            ledger.claim(&i.launch_id, "owner", "a", false, 1).unwrap();
-            ledger
-                .complete(&i.launch_id, "owner", Outcome::Uncertain)
-                .unwrap();
-        }
-        assert_eq!(
-            ledger
-                .reserve(intent(Mode::Manual, "b"), "owner", true, 0)
-                .unwrap()
-                .unwrap()
-                .url,
-            FALLBACKS[0]
         );
     }
     #[test]

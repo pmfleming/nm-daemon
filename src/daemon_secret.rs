@@ -1302,63 +1302,8 @@ mod tests {
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
 
-    use super::{
-        PendingRegistry, PendingSecretRequest, SecretResponse, apply_secret_response,
-        register_pending, remove_pending,
-    };
+    use super::{PendingSecretRequest, SecretResponse, apply_secret_response, register_pending};
     use crate::nm::ConnectionSettings;
-    use crate::variant::value_string;
-    #[test]
-    fn secret_request_respects_flags_before_lookup_or_interaction() {
-        for flags in 0..=7 {
-            for stored_available in [false, true] {
-                let mut request = pending_request("flag-policy", "flag-policy-key");
-                request.flags = flags;
-                let mut looked_up = false;
-                let mut prompted = false;
-                let result = super::resolve_secret_request(
-                    &Arc::new(request),
-                    ConnectionSettings::new(),
-                    |request, connection| {
-                        looked_up = true;
-                        if stored_available {
-                            super::apply_password(
-                                connection,
-                                &request.setting_name,
-                                "psk",
-                                "stored".into(),
-                            )?;
-                        }
-                        Ok(stored_available)
-                    },
-                    |request, mut connection| {
-                        prompted = true;
-                        super::apply_password(
-                            &mut connection,
-                            &request.setting_name,
-                            "psk",
-                            "fresh".into(),
-                        )?;
-                        Ok(connection)
-                    },
-                );
-                let use_stored = flags & super::REQUEST_NEW == 0 && stored_available;
-                let should_prompt = !use_stored && flags & super::ALLOW_INTERACTION != 0;
-                assert_eq!(looked_up, flags & super::REQUEST_NEW == 0);
-                assert_eq!(prompted, should_prompt);
-                if use_stored || should_prompt {
-                    let connection = result.unwrap();
-                    assert_eq!(
-                        value_string(&connection["802-11-wireless-security"]["psk"]).as_deref(),
-                        Some(if use_stored { "stored" } else { "fresh" }),
-                    );
-                } else {
-                    assert!(matches!(result, Err(super::SecretAgentError::NoSecrets(_))));
-                }
-            }
-        }
-    }
-
     #[test]
     fn nm_cancellation_during_lookup_prevents_prompt_and_stored_reply() {
         use zbus::DBusError;
@@ -1430,11 +1375,20 @@ mod tests {
                 request.setting_name = setting.into();
                 request.secret_keys = vec!["password".into(), "pin".into()];
                 request.flags = super::ALLOW_INTERACTION;
+                request.save_supported = false;
                 let mut prompted = false;
                 let connection = super::resolve_secret_request(
                     &Arc::new(request),
                     ConnectionSettings::new(),
                     |request, connection| {
+                        if !complete {
+                            super::apply_password(
+                                connection,
+                                setting,
+                                "password",
+                                "fresh-password".into(),
+                            )?;
+                        }
                         let mut stored = vec![crate::keyring::KeyringSecret {
                             key: "password".into(),
                             password: "stored-password".into(),
@@ -1450,7 +1404,7 @@ mod tests {
                     |request, mut connection| {
                         prompted = true;
                         // Supplying only the missing key preserves the stored password.
-                        apply_secret_response(
+                        let deferred = apply_secret_response(
                             &mut connection,
                             request,
                             SecretResponse {
@@ -1459,10 +1413,14 @@ mod tests {
                                     ("pin".into(), "1234".into()),
                                     ("not-requested".into(), "ignored".into()),
                                 ]),
-                                save: false,
+                                save: true,
                                 cancelled: false,
                             },
                         )?;
+                        assert!(matches!(
+                            deferred.unwrap()(),
+                            super::SecretPersistenceOutcome::Failed(_)
+                        ));
                         Ok(connection)
                     },
                 )
@@ -1476,94 +1434,18 @@ mod tests {
                         .map(|(key, value)| (key.as_str(), <&str>::try_from(value).unwrap()))
                         .collect()
                 };
-                assert_eq!(values["password"], "stored-password");
+                assert_eq!(
+                    values["password"],
+                    if complete {
+                        "stored-password"
+                    } else {
+                        "fresh-password"
+                    }
+                );
                 assert_eq!(values["pin"], "1234");
                 assert!(!values.contains_key("not-requested"));
             }
         }
-    }
-
-    #[test]
-    fn no_subscribers_fails_without_registering_or_waiting() {
-        use zbus::DBusError;
-        let request = pending_request("no-subscribers", "no-subscribers-key");
-        let started = Instant::now();
-        let error = super::wait_for_secret_response(
-            &std::sync::Weak::new(),
-            &Arc::new(request),
-            ConnectionSettings::new(),
-            &mut None,
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.name().as_str(),
-            "org.freedesktop.NetworkManager.SecretAgent.NoSecrets"
-        );
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(remove_pending("no-subscribers").is_none());
-    }
-
-    #[test]
-    fn pending_secrets_are_owner_scoped_and_timed_out_registrations_are_removed() {
-        let mut registry = PendingRegistry::default();
-        let (sender, _receiver) = mpsc::channel();
-        let request = Arc::new(pending_request("owned", "connection\nsetting"));
-        registry.insert(Arc::clone(&request), vec![":1.7".into()], sender);
-        assert!(Arc::ptr_eq(&registry.requests["owned"].request, &request));
-
-        assert!(registry.remove_for_owner("owned", Some(":1.8")).is_none());
-        assert!(registry.requests.contains_key("owned"));
-        assert!(registry.remove_for_owner("owned", None).is_none());
-        assert!(registry.remove_for_owner("owned", Some(":1.7")).is_some());
-        assert!(!registry.requests.contains_key("owned"));
-
-        let timed_out = Arc::new(pending_request("timed-out", "timed-out-key"));
-        let (registration, displaced) = register_pending(&timed_out, vec![":1.1".into()]).unwrap();
-        assert!(displaced.is_none());
-        assert!(matches!(
-            registration
-                .receiver
-                .recv_timeout(Duration::from_millis(10)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-        drop(registration);
-        assert!(remove_pending("timed-out").is_none());
-    }
-    #[test]
-    fn expired_requests_reject_their_owner_but_other_owners_cannot_remove_them() {
-        let mut registry = PendingRegistry::default();
-        let mut expired = pending_request("expired", "expired-key");
-        expired.deadline = Instant::now();
-        let (sender, _receiver) = mpsc::channel();
-        registry.insert(Arc::new(expired), vec![":1.7".into()], sender);
-        assert!(registry.remove_for_owner("expired", Some(":1.8")).is_none());
-        assert!(registry.requests.contains_key("expired"));
-        assert!(registry.remove_for_owner("expired", Some(":1.7")).is_none());
-        assert!(!registry.requests.contains_key("expired"));
-    }
-
-    #[test]
-    fn remember_defaults_on_but_native_not_saved_wins() -> anyhow::Result<()> {
-        let params: super::SecretProvideParams =
-            serde_json::from_value(serde_json::json!({"request_id": "test"}))?;
-        assert!(params.save);
-        let params: super::SecretProvideParams =
-            serde_json::from_value(serde_json::json!({"request_id": "test", "save": false}))?;
-        assert!(!params.save);
-        let settings = ConnectionSettings::from([(
-            "802-11-wireless-security".into(),
-            crate::variant::value_map([
-                ("psk", "temporary-secret".into()),
-                ("psk-flags", 2_u32.into()),
-            ])?,
-        )]);
-        assert!(!super::secret_may_be_saved(
-            &settings,
-            "802-11-wireless-security",
-            "psk"
-        ));
-        assert!(super::connection_secret_values(&settings).next().is_none());
-        Ok(())
     }
 
     fn pending_request(id: &str, key: &str) -> PendingSecretRequest {

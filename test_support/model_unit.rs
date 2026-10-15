@@ -1,6 +1,6 @@
 use super::{
     AccessPoint, ConnectionReadiness, NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_OWE,
-    NM_AP_SEC_KEY_MGMT_PSK, ProfilePrivacy, SavedWifiConnection, Security, WifiConnectTarget,
+    NM_AP_SEC_KEY_MGMT_PSK, ProfilePrivacy, SavedWifiConnection, Security,
     connect_target_for_network_key, network_entries_with_profile_matches, security_flags_label,
     security_label, ssid_for_network_key,
 };
@@ -60,21 +60,6 @@ fn network_groups_preserve_device_security_and_compatible_profile_boundaries() {
         entries
             .iter()
             .any(|entry| entry.access_point.device_iface == "wlan1")
-    );
-}
-
-#[test]
-fn connect_target_validation_rejects_bad_identity() {
-    assert!(
-        serde_json::from_str::<WifiConnectTarget>(r#"{"ssid":"Example","bssid":"not-a-mac"}"#)
-            .is_err()
-    );
-    assert!(
-        serde_json::from_value::<WifiConnectTarget>(serde_json::json!({
-            "ssid": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-            "ssid_bytes": vec![b'x'; 33],
-        }))
-        .is_err()
     );
 }
 

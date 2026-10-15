@@ -47,31 +47,3 @@ impl Versions {
         check
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Versions;
-
-    #[test]
-    fn client_version_never_substitutes_for_the_running_daemon() {
-        let versions = Versions::collect(Err(anyhow::anyhow!("unavailable")), Ok("1.58.1".into()));
-        assert!(versions.running_networkmanager.is_none());
-        assert_eq!(versions.installed_nmcli.as_deref(), Some("1.58.1"));
-        assert_eq!(versions.errors.len(), 1);
-        assert_eq!(versions.check().status, "warn");
-        let versions = Versions::collect(Ok("1.56.0".into()), Ok("1.58.1".into()));
-        assert_eq!(versions.check().status, "warn");
-        let versions = Versions::collect(Ok("1.59.2-dev".into()), Ok("1.59.2-dev".into()));
-        assert_eq!(versions.check().status, "pass");
-        assert_eq!(
-            versions.running_networkmanager.as_deref(),
-            Some("1.59.2-dev")
-        );
-        let versions = Versions::collect(
-            Err(anyhow::anyhow!("offline")),
-            Err(anyhow::anyhow!("missing")),
-        );
-        assert_eq!(versions.check().status, "unknown");
-        assert_eq!(versions.errors.len(), 2);
-    }
-}

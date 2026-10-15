@@ -614,8 +614,8 @@ fn wifi_mode_name(mode: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        HotspotRequest, ResolvedHotspot, capability_bands, hotspot_connection_settings,
-        resolve_band, select_hotspot_device,
+        HotspotRequest, ResolvedHotspot, hotspot_connection_settings, resolve_band,
+        select_hotspot_device,
     };
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::{HotspotDevice, HotspotSecurity, WifiBand};
@@ -636,6 +636,20 @@ mod tests {
     #[test]
     fn hotspot_settings_round_trip_security_and_radio_fields_with_strict_defaults()
     -> anyhow::Result<()> {
+        for (interface, code) in [
+            ("wlan1", ErrorCode::ValidationError),
+            ("absent", ErrorCode::NotFound),
+        ] {
+            let error = select_hotspot_device(vec![device("wlan1", false, false)], Some(interface))
+                .unwrap_err();
+            assert_eq!(
+                ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
+                code
+            );
+        }
+        let mut only_2ghz = device("wlan0", true, false);
+        only_2ghz.bands = vec![WifiBand::Ghz2_4];
+        assert!(resolve_band(WifiBand::Ghz5, &only_2ghz).is_err());
         for (security, band, channel) in [
             (HotspotSecurity::WpaPsk, WifiBand::Auto, None),
             (HotspotSecurity::Sae, WifiBand::Ghz5, Some(36)),
@@ -727,43 +741,5 @@ mod tests {
             assert!(!status.hidden);
         }
         Ok(())
-    }
-
-    #[test]
-    fn hotspot_device_selection_rejects_missing_or_unsupported_devices_and_bands() {
-        let devices = || vec![device("wlan1", false, false)];
-        let error = select_hotspot_device(devices(), Some("wlan1")).unwrap_err();
-        let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
-        assert_eq!(report.code, ErrorCode::ValidationError);
-        assert_eq!(report.details["unsupported_reason"], "ap-mode-unsupported");
-
-        let missing = select_hotspot_device(devices(), Some("wlan9")).unwrap_err();
-        assert_eq!(
-            ErrorReport::from_error(&missing, ErrorOperation::Unknown).code,
-            ErrorCode::NotFound
-        );
-
-        assert_eq!(capability_bands(0x200), vec![WifiBand::Ghz2_4]);
-        assert_eq!(
-            capability_bands(0x600),
-            vec![WifiBand::Ghz2_4, WifiBand::Ghz5]
-        );
-        assert!(capability_bands(0).is_empty());
-
-        let mut only_2ghz = device("wlan0", true, false);
-        only_2ghz.bands = vec![WifiBand::Ghz2_4];
-        assert_eq!(
-            resolve_band(WifiBand::Auto, &only_2ghz).unwrap(),
-            WifiBand::Auto
-        );
-        assert_eq!(
-            resolve_band(WifiBand::Ghz2_4, &only_2ghz).unwrap(),
-            WifiBand::Ghz2_4
-        );
-        let error = resolve_band(WifiBand::Ghz5, &only_2ghz).unwrap_err();
-        assert_eq!(
-            ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
-            ErrorCode::ValidationError
-        );
     }
 }

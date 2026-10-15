@@ -13,33 +13,6 @@ use crate::model::{
 use crate::variant::{owned_value, value_map};
 
 #[test]
-fn activation_pins_inherited_mdns_off_without_losing_explicit_policy() {
-    let target = example_connect_target(true);
-    for policy in [None, Some(-1), Some(0), Some(1), Some(2)] {
-        let mut existing =
-            super::base_wifi_connection_settings("Example", b"Example", false).unwrap();
-        if let Some(policy) = policy {
-            existing
-                .get_mut("connection")
-                .unwrap()
-                .insert("mdns".into(), owned_value(policy).unwrap());
-        }
-        let settings = cloned_wifi_connection_settings(
-            existing,
-            &target,
-            &test_ap(NM_AP_SEC_KEY_MGMT_PSK),
-            Some("secret123"),
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            setting::<i32>(&settings["connection"], "mdns"),
-            Some(policy.unwrap_or(0).max(0))
-        );
-    }
-}
-
-#[test]
 fn profile_activation_replaces_credentials_without_losing_security_or_network_options()
 -> anyhow::Result<()> {
     let mut target = example_connect_target(true);
@@ -130,6 +103,18 @@ fn profile_activation_replaces_credentials_without_losing_security_or_network_op
         setting::<String>(&routes[0], "next-hop").as_deref(),
         Some("192.0.2.1")
     );
+    for policy in [-1_i32, 0, 1, 2] {
+        let mut inherited = settings.clone();
+        inherited
+            .get_mut("connection")
+            .unwrap()
+            .insert("mdns".into(), owned_value(policy)?);
+        apply_saved_activation_settings(&mut inherited, &target, None, None, None)?;
+        assert_eq!(
+            setting::<i32>(&inherited["connection"], "mdns"),
+            Some(policy.max(0))
+        );
+    }
     Ok(())
 }
 

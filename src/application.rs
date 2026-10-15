@@ -1336,8 +1336,7 @@ fn cancelled_connect(
 mod tests {
     use std::time::Duration;
 
-    use super::{ScanRequest, retryable_candidate_failure};
-    use crate::model::ConnectFailureReason;
+    use super::ScanRequest;
 
     #[test]
     fn candidate_restrictions_require_known_matching_radio_properties() {
@@ -1370,20 +1369,6 @@ mod tests {
                 super::candidate_matches_profile_restrictions(&candidate, &profile),
                 expected
             );
-        }
-    }
-
-    #[test]
-    fn credential_authorization_validation_and_cancellation_failures_are_terminal() {
-        for reason in [
-            ConnectFailureReason::SecretRequired,
-            ConnectFailureReason::WrongPassword,
-            ConnectFailureReason::PasswordUnavailable,
-            ConnectFailureReason::AuthorizationRequired,
-            ConnectFailureReason::UnsupportedAuth,
-            ConnectFailureReason::ValidationError,
-        ] {
-            assert!(!retryable_candidate_failure(reason), "{reason:?}");
         }
     }
 

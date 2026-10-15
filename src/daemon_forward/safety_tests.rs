@@ -223,12 +223,29 @@ fn applied_but_unanswered_calls_never_fall_back() -> Result<()> {
                     Reply::Disconnect,
                     Reply::ServiceUnknown,
                     Reply::Malformed,
+                    Reply::Success,
+                    Reply::Rejected,
                 ] {
                     let fixture = Fixture::new(reply)?;
-                    assert_unknown(
-                        dispatch_forward(&fixture.proxy()?, &command(&args)),
-                        method.as_str(),
-                    );
+                    let result = dispatch_forward(&fixture.proxy()?, &command(&args));
+                    match reply {
+                        Reply::Success
+                            if !matches!(
+                                method,
+                                Method::WifiConnectTarget
+                                    | Method::HotspotStart
+                                    | Method::VpnConnect
+                            ) =>
+                        {
+                            assert!(matches!(result?, ForwardOutcome::Handled));
+                        }
+                        Reply::Rejected => assert!(
+                            result.is_err_and(|error| crate::output::is_reported_error(&error))
+                        ),
+                        _ => {
+                            assert_unknown(result, method.as_str());
+                        }
+                    }
                     assert_eq!(fixture.effects.load(Ordering::SeqCst), 1);
                     assert_eq!(
                         fixture.owners.lock().unwrap().len(),
@@ -279,63 +296,6 @@ fn absent_service_allows_direct_fallback_without_dispatch() -> Result<()> {
 }
 
 #[test]
-fn authoritative_success_and_api_rejection_do_not_fall_back() -> Result<()> {
-    isolated(
-        concat!(
-            module_path!(),
-            "::authoritative_success_and_api_rejection_do_not_fall_back"
-        ),
-        || {
-            let fixture = Fixture::new(Reply::Success)?;
-            assert!(matches!(
-                dispatch_forward(&fixture.proxy()?, &command(&["wifi", "disconnect"]))?,
-                ForwardOutcome::Handled
-            ));
-            for args in [
-                vec!["wifi", "disconnect"],
-                vec!["wifi", "connect", "Example"],
-            ] {
-                let fixture = Fixture::new(Reply::Rejected)?;
-                let result = dispatch_forward(&fixture.proxy()?, &command(&args));
-                assert!(result.is_err_and(|error| crate::output::is_reported_error(&error)));
-                assert_eq!(fixture.effects.load(Ordering::SeqCst), 1);
-            }
-            Ok(())
-        },
-    )
-}
-
-#[test]
-fn known_operation_recovers_with_same_owner_status_read() -> Result<()> {
-    isolated(
-        concat!(
-            module_path!(),
-            "::known_operation_recovers_with_same_owner_status_read"
-        ),
-        || {
-            for terminal in ["succeeded", "failed", "cancelled"] {
-                let fixture = Fixture::new(Reply::Recoverable)?;
-                let mut status = terminal_status();
-                status["data"]["result"]["event"]["event"] = json!(terminal);
-                *fixture.status.lock().unwrap() = status.to_string();
-                let result =
-                    dispatch_forward(&fixture.proxy()?, &command(&["wifi", "connect", "Example"]));
-                if terminal == "succeeded" {
-                    assert!(matches!(result?, ForwardOutcome::Handled));
-                } else {
-                    assert!(result.is_err_and(|error| crate::output::is_reported_error(&error)));
-                }
-                assert_eq!(fixture.effects.load(Ordering::SeqCst), 1);
-                let owners = fixture.owners.lock().unwrap();
-                assert_eq!(owners.len(), 2);
-                assert_eq!(owners[0], owners[1], "Recovery must not change bus owner");
-            }
-            Ok(())
-        },
-    )
-}
-
-#[test]
 fn incomplete_or_foreign_status_keeps_outcome_unknown() -> Result<()> {
     isolated(
         concat!(
@@ -343,7 +303,12 @@ fn incomplete_or_foreign_status_keeps_outcome_unknown() -> Result<()> {
             "::incomplete_or_foreign_status_keeps_outcome_unknown"
         ),
         || {
-            let mut replies = vec!["not JSON".to_string()];
+            let mut replies = vec![("not JSON".to_string(), None)];
+            for terminal in ["succeeded", "failed", "cancelled"] {
+                let mut status = terminal_status();
+                status["data"]["result"]["event"]["event"] = json!(terminal);
+                replies.push((status.to_string(), Some(terminal)));
+            }
             for (path, replacement) in [
                 ("/ok", json!(false)),
                 ("/data/result/status", json!("running")),
@@ -357,22 +322,27 @@ fn incomplete_or_foreign_status_keeps_outcome_unknown() -> Result<()> {
             ] {
                 let mut status = terminal_status();
                 *status.pointer_mut(path).unwrap() = replacement;
-                replies.push(status.to_string());
+                replies.push((status.to_string(), None));
             }
-            for reply in replies {
+            for (reply, terminal) in replies {
                 let fixture = Fixture::new(Reply::Recoverable)?;
                 *fixture.status.lock().unwrap() = reply;
-                let report = assert_unknown(
-                    dispatch_forward(&fixture.proxy()?, &command(&["wifi", "connect", "Example"])),
-                    Method::WifiConnectTarget.as_str(),
-                );
-                assert_eq!(report.details["request_id"], "connect-example");
+                let result =
+                    dispatch_forward(&fixture.proxy()?, &command(&["wifi", "connect", "Example"]));
+                match terminal {
+                    Some("succeeded") => assert!(matches!(result?, ForwardOutcome::Handled)),
+                    Some(_) => {
+                        assert!(result.is_err_and(|error| crate::output::is_reported_error(&error)))
+                    }
+                    None => {
+                        let report = assert_unknown(result, Method::WifiConnectTarget.as_str());
+                        assert_eq!(report.details["request_id"], "connect-example");
+                    }
+                }
                 assert_eq!(fixture.effects.load(Ordering::SeqCst), 1);
-                assert_eq!(
-                    fixture.owners.lock().unwrap().len(),
-                    2,
-                    "Only one recovery read is attempted"
-                );
+                let owners = fixture.owners.lock().unwrap();
+                assert_eq!(owners.len(), 2, "Only one recovery read is attempted");
+                assert_eq!(owners[0], owners[1], "Recovery must not change bus owner");
             }
             Ok(())
         },

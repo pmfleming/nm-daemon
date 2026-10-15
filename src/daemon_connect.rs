@@ -382,7 +382,8 @@ mod tests {
     };
     use crate::error::{DomainError, ErrorOperation, ErrorReport};
     use crate::model::{
-        ConnectEnginePath, ConnectFailureReason, ConnectResult, example_connect_target,
+        ConnectEnginePath, ConnectFailureReason, ConnectResult, WifiConnectTarget,
+        example_connect_target,
     };
     use serde_json::json;
 
@@ -399,84 +400,11 @@ mod tests {
         assert!(params.validated_identity().is_err());
         params.key = None;
         assert!(params.validated_identity().is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn resolved_candidates_retain_enterprise_overrides() -> anyhow::Result<()> {
-        let fake = crate::test_support::workflows::FakeNm::new([], false)?;
-        let networks = fake
-            .nm
-            .network_entries_for_access_points(fake.nm.list_all_access_points()?)?;
-        let params = serde_json::from_value::<super::DbusConnectTargetParams>(json!({
-            "key": networks[0].key,
-            "enterprise": {"identity": "alice", "domain_suffix_match": "example.test"}
-        }))?;
-        let request = params.into_request(&fake.nm)?;
-        let enterprise = request
-            .candidate
-            .target
-            .enterprise
-            .as_ref()
-            .expect("enterprise options");
-        assert_eq!(enterprise.identity.as_deref(), Some("alice"));
-        assert_eq!(
-            enterprise.domain_suffix_match.as_deref(),
-            Some("example.test")
-        );
-        assert!(request.candidate.band.is_some());
-        assert!(!request.alternatives.is_empty());
-        assert!(
-            request
-                .alternatives
-                .iter()
-                .all(|candidate| { json!(candidate.target.enterprise) == json!(enterprise) })
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn remember_policy_reaches_native_activation_and_every_retry_candidate() -> anyhow::Result<()> {
-        use crate::test_support::workflows::{FakeNm, Outcome};
-        for remember in [None, Some(true), Some(false)] {
-            let fake = FakeNm::new([Outcome::Connected], false)?;
-            let networks = fake
-                .nm
-                .network_entries_for_access_points(fake.nm.list_all_access_points()?)?;
-            let mut value = json!({"key": networks[0].key, "password": "synthetic-password"});
-            if let Some(remember) = remember {
-                value["remember"] = json!(remember);
-            }
-            let params: super::DbusConnectTargetParams = serde_json::from_value(value)?;
-            let request = params.into_request(&fake.nm)?;
-            for candidate in std::iter::once(&request.candidate).chain(&request.alternatives) {
-                assert_eq!(candidate.target.profile.remember, remember);
-            }
-            fake.nm
-                .add_and_activate_wifi_connection_for(
-                    &request.candidate.target,
-                    Some("synthetic-password"),
-                    None,
-                )?
-                .expect("native activation was requested");
-            let state = fake.state.lock().unwrap();
-            assert_eq!(
-                state.persist.as_deref(),
-                (remember == Some(false)).then_some("volatile")
-            );
-            if remember == Some(false) {
-                assert_eq!(
-                    crate::variant::setting::<bool>(&state.settings["connection"], "autoconnect"),
-                    Some(false)
-                );
-                assert!(
-                    uuid::Uuid::parse_str(
-                        crate::variant::setting::<&str>(&state.settings["connection"], "uuid")
-                            .unwrap()
-                    )
-                    .is_ok()
-                );
-            }
+        for invalid in [
+            json!({"ssid": "Example", "bssid": "not-a-mac"}),
+            json!({"ssid": "x".repeat(33), "ssid_bytes": vec![b'x'; 33]}),
+        ] {
+            assert!(serde_json::from_value::<WifiConnectTarget>(invalid).is_err());
         }
         Ok(())
     }
@@ -487,7 +415,28 @@ mod tests {
             ConnectTargetIdentity::from_target(&example_connect_target(false), Some("key"));
         let phase = ConnectPhase::Starting;
         let message = "message";
-        for (name, event, extra) in [
+        let success =
+            ConnectResult::connected("Example", "connected", ConnectEnginePath::Dbus, None);
+        let failure = ConnectResult::failed(
+            "Example",
+            ConnectFailureReason::ValidationError,
+            "bad target",
+        );
+        let error = ErrorReport::from_error(
+            &DomainError::validation(ErrorOperation::Connect, "bad target").into(),
+            ErrorOperation::Connect,
+        );
+        let success_data = json!({"result": success});
+        let failure_data = json!({"result":failure,"reason":failure.reason,"message":failure.message,"code":error.code,"details":error.api_details()});
+        let success = ConnectOutcome::Succeeded(success);
+        let failure = ConnectOutcome::Failed {
+            result: failure,
+            error,
+        };
+        let cancelled = ConnectOutcome::Cancelled {
+            message: message.into(),
+        };
+        for (name, event, mut expected) in [
             (
                 "started",
                 ConnectEvent::Started {
@@ -513,7 +462,7 @@ mod tests {
                 ConnectEvent::Cancelled {
                     phase,
                     target: &target,
-                    message: message.to_string(),
+                    message: message.into(),
                 },
                 json!({"message":message}),
             ),
@@ -522,65 +471,79 @@ mod tests {
                 ConnectEvent::Finished {
                     phase,
                     target: &target,
-                    outcome: &ConnectOutcome::Cancelled {
-                        message: message.to_string(),
-                    },
+                    outcome: &cancelled,
                 },
                 json!({"message":message}),
             ),
-        ] {
-            let mut expected = extra;
-            expected["request_id"] = json!("connect-test");
-            expected["phase"] = json!(phase);
-            expected["target"] = json!(target);
-            assert_eq!(
-                connect_event_payload("connect-test", &event),
-                (name, expected)
-            );
-        }
-        let error = ErrorReport::from_error(
-            &DomainError::validation(ErrorOperation::Connect, "bad target").into(),
-            ErrorOperation::Connect,
-        );
-        let succeeded =
-            ConnectResult::connected("Example", "connected", ConnectEnginePath::Dbus, None);
-        let failed = ConnectResult::failed(
-            "Example",
-            ConnectFailureReason::ValidationError,
-            "bad target",
-        );
-        let success_data = json!({"result": succeeded});
-        let failure_data = json!({"result":failed,"reason":failed.reason,"message":failed.message,"code":error.code,"details":error.api_details()});
-        for (name, phase, outcome, extra) in [
             (
                 "succeeded",
-                ConnectPhase::Connected,
-                ConnectOutcome::Succeeded(succeeded),
+                ConnectEvent::Finished {
+                    phase: ConnectPhase::Connected,
+                    target: &target,
+                    outcome: &success,
+                },
                 success_data,
             ),
             (
                 "failed",
-                ConnectPhase::Failed,
-                ConnectOutcome::Failed {
-                    result: failed,
-                    error,
+                ConnectEvent::Finished {
+                    phase: ConnectPhase::Failed,
+                    target: &target,
+                    outcome: &failure,
                 },
                 failure_data,
             ),
         ] {
-            let mut expected = extra;
             expected["request_id"] = json!("connect-test");
-            expected["phase"] = json!(phase);
             expected["target"] = json!(target);
-            let event = ConnectEvent::Finished {
-                phase,
-                target: &target,
-                outcome: &outcome,
-            };
+            expected["phase"] = json!(match name {
+                "succeeded" => ConnectPhase::Connected,
+                "failed" => ConnectPhase::Failed,
+                _ => phase,
+            });
             assert_eq!(
                 connect_event_payload("connect-test", &event),
                 (name, expected)
             );
         }
+    }
+
+    #[test]
+    fn resolved_candidates_retain_enterprise_overrides() -> anyhow::Result<()> {
+        let fake = crate::test_support::workflows::FakeNm::new([], false)?;
+        let networks = fake
+            .nm
+            .network_entries_for_access_points(fake.nm.list_all_access_points()?)?;
+        let params = serde_json::from_value::<super::DbusConnectTargetParams>(json!({
+            "key": networks[0].key,
+            "remember": false,
+            "enterprise": {"identity": "alice", "domain_suffix_match": "example.test"}
+        }))?;
+        let request = params.into_request(&fake.nm)?;
+        let enterprise = request
+            .candidate
+            .target
+            .enterprise
+            .as_ref()
+            .expect("enterprise options");
+        assert_eq!(enterprise.identity.as_deref(), Some("alice"));
+        assert_eq!(
+            enterprise.domain_suffix_match.as_deref(),
+            Some("example.test")
+        );
+        assert!(
+            std::iter::once(&request.candidate)
+                .chain(&request.alternatives)
+                .all(|candidate| candidate.target.profile.remember == Some(false))
+        );
+        assert!(request.candidate.band.is_some());
+        assert!(!request.alternatives.is_empty());
+        assert!(
+            request
+                .alternatives
+                .iter()
+                .all(|candidate| { json!(candidate.target.enterprise) == json!(enterprise) })
+        );
+        Ok(())
     }
 }

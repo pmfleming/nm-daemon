@@ -99,46 +99,6 @@ pub(super) fn take(
     })
 }
 
-#[cfg(test)]
-#[test]
-fn native_handoff_is_bounded_and_expires_without_reusing_profile_identity() -> anyhow::Result<()> {
-    crate::test_support::workflows::isolated(
-        concat!(
-            module_path!(),
-            "::native_handoff_is_bounded_and_expires_without_reusing_profile_identity"
-        ),
-        || {
-            let connection = ConnectionSettings::from([
-                (
-                    "connection".into(),
-                    crate::variant::value_map([("uuid", "synthetic-uuid".into())])?,
-                ),
-                (
-                    "802-11-wireless-security".into(),
-                    crate::variant::value_map([("psk", "synthetic-password".into())])?,
-                ),
-            ]);
-            for n in 0..40 {
-                stage(":1.owner", &format!("/profile/{n}"), &connection);
-            }
-            access(|cache| {
-                assert_eq!(cache.entries.len(), 32);
-                assert!(
-                    !cache
-                        .entries
-                        .keys()
-                        .any(|(_, path, _)| path == "/profile/0")
-                );
-                for entry in cache.entries.values_mut() {
-                    entry.deadline = Instant::now();
-                }
-            });
-            access(|cache| assert!(cache.entries.is_empty()));
-            Ok(())
-        },
-    )
-}
-
 pub(super) fn clear(path: Option<&str>) {
     access(|cache| {
         cache

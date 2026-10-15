@@ -445,12 +445,28 @@ mod tests {
         assert_eq!(saved["ok"], true);
         assert_eq!(saved["data"]["profiles"], json!([]));
 
+        let invalid_streams_json: String = proxy
+            .call("Subscribe", &(vec!["wifi.scan", "not.real"],))
+            .unwrap();
+        let invalid_streams: Value = serde_json::from_str(&invalid_streams_json).unwrap();
+        assert_eq!(invalid_streams["error"]["code"], "validation-error");
+        assert_eq!(
+            invalid_streams["error"]["details"]["unsupported_streams"][0],
+            "not.real"
+        );
         let mut events = proxy.receive_signal("Event").unwrap();
         let subscription_json: String = proxy
-            .call("Subscribe", &(vec!["network.connectivity"],))
+            .call(
+                "Subscribe",
+                &(vec!["network.connectivity", "network.connectivity"],),
+            )
             .unwrap();
         let subscription: Value = serde_json::from_str(&subscription_json).unwrap();
         let subscription_id = subscription["data"]["subscription"]["id"].as_str().unwrap();
+        assert_eq!(
+            subscription["data"]["subscription"]["streams"],
+            json!(["network.connectivity"])
+        );
 
         let (stream, subscribed) = next_event(&mut events);
         assert_eq!(stream, "network.connectivity");
