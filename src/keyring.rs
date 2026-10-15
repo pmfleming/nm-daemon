@@ -124,13 +124,8 @@ impl Keyring {
         setting_name: &str,
         key: &str,
     ) -> Result<KeyringOutcome<Option<String>>> {
-        for attrs in secret_attribute_sets(connection_path, settings, setting_name, key) {
-            let outcome = self.client.lookup(&attrs)?;
-            if !matches!(outcome, KeyringOutcome::Completed(None)) {
-                return Ok(outcome);
-            }
-        }
-        Ok(KeyringOutcome::Completed(None))
+        let attrs = primary_secret_attributes(connection_path, settings, setting_name, key);
+        self.client.lookup(&attrs)
     }
 
     pub(crate) fn store_secret(
@@ -153,24 +148,8 @@ impl Keyring {
         setting_name: &str,
         key: &str,
     ) -> Result<KeyringOutcome<usize>> {
-        let mut deleted = 0;
-        for attrs in secret_attribute_sets(connection_path, settings, setting_name, key) {
-            match self.client.delete(&attrs)? {
-                KeyringOutcome::Completed(count) => deleted += count,
-                KeyringOutcome::PromptUnsupported {
-                    operation,
-                    prompt,
-                    completed,
-                } => {
-                    return Ok(KeyringOutcome::PromptUnsupported {
-                        operation,
-                        prompt,
-                        completed: deleted + completed,
-                    });
-                }
-            }
-        }
-        Ok(KeyringOutcome::Completed(deleted))
+        let attrs = primary_secret_attributes(connection_path, settings, setting_name, key);
+        self.client.delete(&attrs)
     }
 }
 
@@ -436,6 +415,8 @@ fn primary_secret_attributes(
     setting_name: &str,
     key: &str,
 ) -> HashMap<String, String> {
+    // NM reuses settings paths after restart. A UUID is authoritative: do not
+    // search a legacy path entry when this profile's UUID has no stored secret.
     let identity = settings
         .get("connection")
         .and_then(|section| setting::<&str>(section, "uuid"))
@@ -445,22 +426,6 @@ fn primary_secret_attributes(
     let mut attrs = base_secret_attributes(setting_name, key);
     attrs.insert(identity.0.to_string(), identity.1.to_string());
     attrs
-}
-
-fn secret_attribute_sets(
-    connection_path: &str,
-    settings: &ConnectionSettings,
-    setting_name: &str,
-    key: &str,
-) -> Vec<HashMap<String, String>> {
-    // NM settings paths are reused after restart. A UUID identifies the profile
-    // exclusively; never read or delete a different profile's legacy path entry.
-    vec![primary_secret_attributes(
-        connection_path,
-        settings,
-        setting_name,
-        key,
-    )]
 }
 
 fn base_secret_attributes(setting_name: &str, key: &str) -> HashMap<String, String> {
@@ -656,6 +621,11 @@ mod tests {
                 .all(|attrs| attrs.contains_key("uuid") && !attrs.contains_key("connection_path"))
         );
 
+        assert_eq!(
+            searches.lock().unwrap().len(),
+            8,
+            "one search per key or delete"
+        );
         searches.lock().unwrap().clear();
         settings.clear();
         assert!(
