@@ -58,6 +58,46 @@ Validation: **136 passed, 4 ignored**; strict Clippy, formatting and diff checks
 Production reliability findings **7 → 6**. Additional malformed-identity cases add
 test lines and effort; the purpose is a single validation boundary, not fewer tests.
 
+## 5. Make scan ownership and scope one state
+
+`src/nm/scan_schedule.rs`: one optional SSID scope replaces a boolean plus a
+separately maintained scope. `None` is idle; `Some([])` is an owned wildcard scan.
+Only completion of the current generation takes that scope. Extended scheduling
+coverage checks late completion during a newer wildcard scan, preservation of the
+older result, and retirement of scans with no waiters. Existing SSID compatibility,
+waiter cleanup and cancellation/deadline precedence tests remain intact.
+
+Validation: **136 passed, 4 ignored**; strict Clippy, formatting and diff checks passed.
+Completion cognitive complexity decreases; regression assertions add test size.
+
+## Combined results and tradeoffs
+
+| Metric | Starting point | After five commits |
+| --- | ---: | ---: |
+| Cognitive complexity | 1,762 | 1,757 |
+| Cyclomatic complexity | 5,613 | 5,610 |
+| Halstead effort | 16,091,158 | 16,118,114 |
+| Function SLOC | 29,509 | 29,541 |
+| Physical Rust lines | 38,572 | 38,609 |
+| Clone-related sites, including `Arc::clone` | 384 | 382 |
+| Duplicated lines | 1,607 | 1,619 |
+| Production / test reliability findings | 8 / 345 | 6 / 348 |
+| Escape hatches | 0 | 0 |
+| Mean locality | 93.926 | 93.926 |
+| Mean leverage | 31.171 | 31.171 |
+
+These are not across-the-board metric wins. Changed runtime functions lose **53
+SLOC**, **8 cognitive points**, **6 cyclomatic points** and approximately **28,432
+Halstead effort**; added regression assertions account for the net size/effort
+increase. No assertions were pruned to improve scores. Function SLOC is the analyzer's
+function-span metric, not a count of executable statements. Clone counts are syntax
+sites, not allocation measurements. Two production panic findings were removed;
+remaining findings are not declared safe by this review.
+
+Ownership is more local and cancellation behavior has one reusable implementation,
+but module-level locality/leverage scores are unchanged. Both endpoint architecture
+reports still have **43 unresolved semantic references** and remain partial.
+
 ## Evidence protocol
 
 Uses the local `../rust-quality-lens` executable, copied to
@@ -74,6 +114,13 @@ Local evidence lives under `target/quality-next-five/`: `baseline/`, `step-N/`,
 bash target/quality-next-five/validate.sh step-N
 python3 target/quality-next-five/summarize.py
 ```
+
+Final live-checkout tests (**136 passed, 4 ignored**), strict Clippy and Cargo machete
+also passed. All 111 delivered Rust files match the final measured/tested snapshot.
+Package-scoped formatting and full formatting against the frozen dependency pass.
+A later unrestricted live `cargo fmt --all -- --check` reports a concurrent formatting
+difference in sibling `daemon-framework/crates/shelllist-daemon-core/src/file.rs`;
+that unrelated dependency file was not changed to silence the check.
 
 No hardware networking, real desktop-keyring fixture, coverage or MSRV run is claimed.
 The four environment-dependent tests remain ignored.

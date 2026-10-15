@@ -63,8 +63,8 @@ pub(super) struct ScanScheduler {
 
 #[derive(Debug, Default)]
 struct DeviceScanState {
-    in_flight: bool,
-    in_flight_ssids: Vec<Vec<u8>>,
+    // None is idle; Some([]) owns a wildcard scan, not an idle device.
+    in_flight: Option<Vec<Vec<u8>>>,
     generation: u64,
     waiters: HashMap<u64, usize>,
     completions: HashMap<u64, SharedScanOutcome>,
@@ -78,9 +78,9 @@ impl ScanScheduler {
     pub(super) fn claim(&self, device_path: &str, ssids: &[Vec<u8>]) -> ScanTurn {
         let mut devices = self.lock();
         let state = devices.entry(device_path.to_string()).or_default();
-        if state.in_flight {
+        if let Some(in_flight) = &state.in_flight {
             *state.waiters.entry(state.generation).or_default() += 1;
-            return if scan_scope_covers(&state.in_flight_ssids, ssids) {
+            return if scan_scope_covers(in_flight, ssids) {
                 ScanTurn::Join {
                     generation: state.generation,
                 }
@@ -90,8 +90,7 @@ impl ScanScheduler {
                 }
             };
         }
-        state.in_flight = true;
-        state.in_flight_ssids = normalized_ssids(ssids);
+        state.in_flight = Some(normalized_ssids(ssids));
         state.generation = state.generation.wrapping_add(1);
         state.previous_request = state.last_request;
         state.last_request = Some(Instant::now());
@@ -102,15 +101,13 @@ impl ScanScheduler {
 
     /// Completes one owned scan and wakes callers waiting for its exact result.
     pub(super) fn complete(&self, device_path: &str, generation: u64, outcome: SharedScanOutcome) {
+        // Retire the current scope even when nobody is waiting for its result.
         if let Some(state) = self.lock().get_mut(device_path)
-            && state.in_flight
             && state.generation == generation
+            && state.in_flight.take().is_some()
+            && state.waiters.contains_key(&generation)
         {
-            state.in_flight = false;
-            state.in_flight_ssids.clear();
-            if state.waiters.contains_key(&generation) {
-                state.completions.insert(generation, outcome);
-            }
+            state.completions.insert(generation, outcome);
         }
         self.finished.notify_all();
     }
@@ -326,9 +323,33 @@ mod tests {
             scheduler.claim("/devices/1", &[]),
             ScanTurn::Request { generation: 2 }
         );
+        // A late completion must neither retire generation 2's wildcard scope
+        // nor replace the successful result still retained for generation 1.
+        scheduler.complete(
+            "/devices/1",
+            1,
+            SharedScanOutcome::Failed(ErrorReport::from_error(
+                &anyhow::anyhow!("late failure"),
+                ErrorOperation::Scan,
+            )),
+        );
+        assert!(matches!(
+            scheduler.wait_for_completion(
+                "/devices/1",
+                1,
+                Deadline::from_now(Duration::ZERO).unwrap(),
+                None,
+            ),
+            ScanWait::Completed(SharedScanOutcome::Succeeded)
+        ));
         assert_eq!(
             scheduler.claim("/devices/1", &cafe),
             ScanTurn::Wait { generation: 2 }
+        );
+        scheduler.complete("/devices/2", 1, SharedScanOutcome::Succeeded);
+        assert_eq!(
+            scheduler.claim("/devices/2", &[]),
+            ScanTurn::Request { generation: 2 }
         );
     }
     #[test]
