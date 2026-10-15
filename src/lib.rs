@@ -13,6 +13,7 @@ mod connect_cancel;
 mod connect_error;
 mod connect_wait;
 mod contract;
+mod credential_migration;
 mod daemon;
 mod daemon_band;
 mod daemon_connect;
@@ -53,3 +54,4 @@ mod test_support;
 
 pub use app::{report_error, run};
 pub use cast_policy::run as run_cast_policy;
+pub use credential_migration::run as credential_inventory;
