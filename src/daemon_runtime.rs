@@ -86,6 +86,17 @@ struct TaskHandle {
     cancellation: Arc<AtomicBool>,
 }
 
+impl TaskHandle {
+    fn request_cancel(&self) -> CancelledTask {
+        self.cancellation.store(true, Ordering::Release);
+        CancelledTask {
+            nm: Arc::clone(&self.nm),
+            kind: self.kind,
+            target_ssid: self.target_ssid.clone(),
+        }
+    }
+}
+
 struct TerminalRequestResult {
     stream: Stream,
     event: Value,
@@ -365,12 +376,7 @@ impl DaemonRuntime {
                 return;
             }
             task.timed_out = true;
-            task.cancellation.store(true, Ordering::Release);
-            CancelledTask {
-                nm: Arc::clone(&task.nm),
-                kind: task.kind,
-                target_ssid: task.target_ssid.clone(),
-            }
+            task.request_cancel()
         };
         tracing::warn!(%request_id, "Wi-Fi operation deadline reached; awaiting cancellation acknowledgement");
         self.nm.wake_waiters();
@@ -690,14 +696,7 @@ impl DaemonRuntime {
                     .get_owned(request_id, task.owner.as_deref())
                     .is_none()
             })
-            .map(|task| {
-                task.cancellation.store(true, Ordering::Relaxed);
-                CancelledTask {
-                    nm: Arc::clone(&task.nm),
-                    kind: task.kind,
-                    target_ssid: task.target_ssid.as_ref().map(Arc::clone),
-                }
-            })
+            .map(TaskHandle::request_cancel)
     }
 
     fn abort_cancelled_connect(&self, request_id: &str, task: Option<&CancelledTask>) {
@@ -770,17 +769,7 @@ impl DaemonRuntime {
                         .get_owned(request_id, Some(owner))
                         .is_none()
             })
-            .map(|(request_id, task)| {
-                task.cancellation.store(true, Ordering::Relaxed);
-                (
-                    request_id.clone(),
-                    CancelledTask {
-                        nm: Arc::clone(&task.nm),
-                        kind: task.kind,
-                        target_ssid: task.target_ssid.as_ref().map(Arc::clone),
-                    },
-                )
-            })
+            .map(|(request_id, task)| (request_id.clone(), task.request_cancel()))
             .collect()
     }
 
@@ -1158,6 +1147,20 @@ mod tests {
         let current = register();
         drop(stale);
         assert_eq!(runtime.request_status("reused", None)["status"], "running");
+        assert!(runtime.cancel_task("reused", Some("other")).is_none());
+        assert!(
+            !current
+                .cancellation
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        let cancelled = runtime.cancel_task("reused", None).unwrap();
+        assert_eq!(cancelled.kind, super::TaskKind::Scan);
+        assert!(cancelled.target_ssid.is_none());
+        assert!(
+            current
+                .cancellation
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _current = current;
