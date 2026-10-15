@@ -9,7 +9,7 @@ mod ledger;
 use crate::{
     daemon_runtime::DaemonRuntime,
     error::{DomainError, ErrorOperation},
-    model::ConnectivityStatus,
+    model::{ConnectivityStatus, PrimaryConnectionIdentity},
     output::api_data_value,
 };
 
@@ -72,6 +72,13 @@ fn safe_url(value: &str) -> Option<String> {
 }
 
 pub(crate) fn episode(nm_owner: &str, status: &ConnectivityStatus) -> Result<String> {
+    episode_context(nm_owner, status).map(|(episode, _)| episode)
+}
+
+fn episode_context<'a>(
+    nm_owner: &str,
+    status: &'a ConnectivityStatus,
+) -> Result<(String, &'a PrimaryConnectionIdentity)> {
     let primary = status
         .primary_connection
         .as_ref()
@@ -80,11 +87,8 @@ pub(crate) fn episode(nm_owner: &str, status: &ConnectivityStatus) -> Result<Str
         return Err(invalid("primary connection identity is unavailable"));
     }
     // NM's unique bus owner fences restarts; the active-object path fences reconnects.
-    Ok(serde_json::to_string(&(
-        nm_owner,
-        &primary.path,
-        &primary.uuid,
-    ))?)
+    let episode = serde_json::to_string(&(nm_owner, &primary.path, &primary.uuid))?;
+    Ok((episode, primary))
 }
 
 pub(crate) fn validate(
@@ -94,12 +98,8 @@ pub(crate) fn validate(
     proof: &Value,
     now: u64,
 ) -> Result<Intent> {
-    let episode = episode(nm_owner, status)?;
+    let (episode, current) = episode_context(nm_owner, status)?;
     if params.mode == Mode::Automatic {
-        let current = status
-            .primary_connection
-            .as_ref()
-            .expect("validated primary");
         let result = &proof["event"]["data"]["result"];
         let previous = &result["connectivity"]["primary_connection"];
         if params.fallback
@@ -284,6 +284,27 @@ mod tests {
         status.primary_connection.as_mut().unwrap().path = "/active/2".into();
         assert_ne!(first, episode(":1.4", &status).unwrap());
     }
+    #[test]
+    fn incomplete_connection_identity_is_rejected_in_both_launch_modes() {
+        let mut missing = status();
+        missing.primary_connection = None;
+        let mut root = status();
+        root.primary_connection.as_mut().unwrap().path = "/".into();
+        let mut no_uuid = status();
+        no_uuid.primary_connection.as_mut().unwrap().uuid.clear();
+        for (owner, current) in [
+            ("", status()),
+            (":1.4", missing),
+            (":1.4", root),
+            (":1.4", no_uuid),
+        ] {
+            assert!(episode(owner, &current).is_err());
+            for mode in [Mode::Automatic, Mode::Manual] {
+                assert!(validate(&params(mode), owner, &current, &proof(&current), 100).is_err());
+            }
+        }
+    }
+
     #[test]
     fn url_policy_never_forwards_browser_pseudo_schemes_or_credentials() {
         for value in [

@@ -44,6 +44,20 @@ Validation: **135 passed, 4 ignored**; strict Clippy, formatting and diff checks
 Production reliability findings **8 → 7**. The added scheduling regression increases
 aggregate test effort and lines; no allocation or latency improvement is claimed.
 
+## 4. Validate portal context once
+
+`src/portal.rs`: episode construction returns its validated primary connection
+alongside the episode string. Automatic-launch proof checks consume that same
+borrowed connection instead of re-reading an option and asserting it exists.
+Removed the production `expect`; episode identity and error messages are unchanged.
+New regression coverage rejects absent owners, missing primary connections, root
+paths and empty UUIDs in both manual and automatic modes. URL and proof policy
+were not relaxed.
+
+Validation: **136 passed, 4 ignored**; strict Clippy, formatting and diff checks passed.
+Production reliability findings **7 → 6**. Additional malformed-identity cases add
+test lines and effort; the purpose is a single validation boundary, not fewer tests.
+
 ## Evidence protocol
 
 Uses the local `../rust-quality-lens` executable, copied to
