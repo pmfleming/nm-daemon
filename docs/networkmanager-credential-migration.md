@@ -40,13 +40,57 @@ read-only against the laptop. The repository dev shell currently fails its
 existing Rust toolchain-version assertion; Cargo/Rust 1.95.0 from the installed
 Nix store were used directly without changing lockfiles/toolchain policy.
 
+## Step 2 — native semantics (completed 2026-10-15)
+
+The rollout steps correspond to phases 0–5 of the proposal. Step 2 is the
+isolated semantics gate, before replacing the runtime backend.
+
+`nix/tests/credential-storage.nix` and its VM-only Python fixture now cover:
+
+- GetSettings excluding secrets and non-secret updates retaining them;
+- destructive partial secret-bearing updates, then complete preserving updates;
+- nonzero version fences rejecting stale updates;
+- shared WEP flags, nested VPN data/secrets, enterprise password preservation and
+  CA/domain validation, and WireGuard peer identity rather than array position;
+- delayed SecretAgent reply, native system-owned persistence without agent
+  storage, and explicit version-checked TO_DISK after terminal activation;
+- NOT_SAVED and a separately identified volatile use-once clone;
+- actual read-only filesystem failure inside NM's private mount namespace;
+- full VM shutdown/start and read-back with no SecretAgent or Secret Service.
+
+All pass against NM 1.56.0, the repository's patched stable 1.58.1, and pinned
+1.59.2-dev. The checks are exposed as
+`checks.x86_64-linux.credential-storage-{minimum,stable,development}`. Validation
+used a standalone test evaluator with the installed system's Nixpkgs revision
+`fd1462031fdee08f65fd0b4c6b64e22239a77870`, without changing project lockfiles or
+bypassing the framework's Rust-version assertion. Rust library tests also pass:
+85 passed, four existing tests ignored.
+
+Important measured behavior:
+
+- Native activation can succeed after disk failure **with Unsaved still false**.
+  Neither activation success nor that property is a durable-save acknowledgment.
+- NM can call SaveSecrets even for a system-owned profile. The fixture rejects
+  every call, yet native persistence works. Runtime handling must inspect the
+  actual agent-owned values, not reject every callback indiscriminately.
+- Marking an inactive profile VOLATILE via Update2 removes it before a later
+  activation. Use atomic AddAndActivateConnection2 with `persist=volatile`.
+- A no-storage agent still causes persistence when responding to flags=0.
+  A UI save:false bit cannot prevent this; reject incompatible delivery or use
+  a separate temporary activation.
+
+These tests establish native behavior, not implementation acceptance. The new
+writer/runtime still require their own cancellation, owner-change, staged-edit,
+permission, unknown-schema, no-provider and frontend contract tests before
+migration/deployment. No personal credentials have been copied or changed.
+
 ## Remaining checkpoints
 
-2. NM-only persistent storage and retained native prompts.
-3. No-save/temporary correctness and preserving profile updates.
-4. Verified copy of existing legacy credentials, source retained.
+3. Shared preserving writer, NM-only runtime, migration tooling and coordinated
+   frontend changes, with implementation-specific regression coverage.
+4. Controlled copy/verification and coordinated deployment; source retained.
 5. User-observed cold boot and before-login connection verification.
-6. Exact-item cleanup and retirement of legacy runtime storage after verification.
+6. Exact-item cleanup and retirement of legacy code after verification.
 
 Do not mark a checkpoint complete based only on an earlier one. In particular,
 a read-back in a warm NM session is not a cold-boot persistence test.

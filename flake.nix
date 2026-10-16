@@ -153,6 +153,13 @@
           );
         in
         compatibility
+        // builtins.listToAttrs (map (target: {
+          name = "credential-storage-${target}";
+          value = import ./nix/tests/credential-storage.nix {
+            inherit pkgs;
+            nmPackage = targets.${target};
+          };
+        }) (builtins.attrNames targets))
         // {
           package = self.packages.${system}.default;
           discoveryModule = let
