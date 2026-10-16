@@ -1,5 +1,5 @@
-//! Explicit, read-only legacy credential inventory. Never run at daemon startup.
-//! No GetSecrets/OpenSession/Unlock calls: even a locked vault stays untouched.
+//! Explicit legacy credential inventory and opt-in exact-item disposal.
+//! Never run at daemon startup. Never read secret values or unlock a vault.
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
@@ -13,6 +13,9 @@ use crate::variant::{setting, setting_strings, value_string_map};
 const NM: &str = "org.freedesktop.NetworkManager";
 const PROFILE: &str = "org.freedesktop.NetworkManager.Settings.Connection";
 const SECRET: &str = "org.freedesktop.secrets";
+
+#[cfg(test)]
+mod disposal_tests;
 
 #[derive(Serialize)]
 struct Inventory {
@@ -62,6 +65,96 @@ struct LegacyItem {
 pub fn run() -> Result<()> {
     let inventory = inventory()?;
     println!("{}", serde_json::to_string_pretty(&inventory)?);
+    Ok(())
+}
+
+/// Destructive opt-in: the caller explicitly accepts losing this credential.
+/// This is not migration and does not claim an NM replacement exists.
+pub fn discard_legacy(item: &str, uuid: &str, setting: &str, key: &str) -> Result<()> {
+    let connection = zbus::blocking::connection::Builder::session()?
+        .method_timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    discard_on(&connection, item, uuid, setting, key)?;
+    println!("Deleted one verified nm-daemon credential; no password was read or copied.");
+    Ok(())
+}
+
+fn discard_on(
+    connection: &Connection,
+    path: &str,
+    uuid: &str,
+    setting: &str,
+    key: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        !uuid.is_empty() && !setting.is_empty() && !key.is_empty(),
+        "exact item identity is required"
+    );
+    let bus = zbus::blocking::fdo::DBusProxy::new(connection)?;
+    let owner = bus.get_name_owner(SECRET.try_into()?)?.to_string();
+    let service = Proxy::new(
+        connection,
+        owner.as_str(),
+        "/org/freedesktop/secrets",
+        "org.freedesktop.Secret.Service",
+    )?;
+    let expected = HashMap::from([
+        ("application", "nm-daemon"),
+        ("uuid", uuid),
+        ("setting", setting),
+        ("key", key),
+    ]);
+    let search = || -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
+        service
+            .call("SearchItems", &(expected.clone(),))
+            .map_err(|_| anyhow::anyhow!("legacy metadata search failed"))
+    };
+    let (unlocked, locked) = search()?;
+    anyhow::ensure!(
+        unlocked.iter().any(|p| p.as_str() == path) && !locked.iter().any(|p| p.as_str() == path),
+        "exact item is absent or locked; no deletion attempted"
+    );
+    let item = zbus::blocking::proxy::Builder::<Proxy>::new(connection)
+        .destination(owner.as_str())?
+        .path(path)?
+        .interface("org.freedesktop.Secret.Item")?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()?;
+    let check = || -> Result<HashMap<String, String>> {
+        let attributes: HashMap<String, String> = item.get_property("Attributes")?;
+        anyhow::ensure!(
+            expected
+                .iter()
+                .all(|(k, v)| attributes.get(*k).map(String::as_str) == Some(*v)),
+            "item ownership/identity mismatch; no deletion attempted"
+        );
+        anyhow::ensure!(
+            !item.get_property::<bool>("Locked")?,
+            "item is locked; no deletion attempted"
+        );
+        Ok(attributes)
+    };
+    let attributes = check()?;
+    let modified: u64 = item.get_property("Modified")?;
+    anyhow::ensure!(
+        check()? == attributes
+            && item.get_property::<u64>("Modified")? == modified
+            && bus.get_name_owner(SECRET.try_into()?)?.as_str() == owner,
+        "item/provider changed; no deletion attempted"
+    );
+    let prompt: OwnedObjectPath = item.call("Delete", &()).map_err(|_| {
+        anyhow::anyhow!("item deletion not acknowledged; re-inventory before retrying")
+    })?;
+    anyhow::ensure!(
+        prompt.as_str() == "/",
+        "deletion requires a provider prompt; completion unconfirmed, no prompt presented or dismissed"
+    );
+    let (unlocked, locked) = search()?;
+    anyhow::ensure!(
+        !unlocked.iter().chain(&locked).any(|p| p.as_str() == path)
+            && bus.get_name_owner(SECRET.try_into()?)?.as_str() == owner,
+        "deletion outcome unconfirmed; re-inventory before retrying"
+    );
     Ok(())
 }
 

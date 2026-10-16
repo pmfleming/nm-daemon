@@ -37,11 +37,6 @@ mod forget;
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated_config.rs"));
 }
-// Retained solely for transition-era provider fixtures, not linked into the
-// normal daemon. Legacy reading belongs in explicit migration tooling.
-#[cfg(test)]
-#[allow(dead_code)]
-mod keyring;
 mod logging;
 mod model;
 mod network_credentials;
@@ -59,4 +54,6 @@ mod test_support;
 
 pub use app::{report_error, run};
 pub use cast_policy::run as run_cast_policy;
-pub use credential_migration::run as credential_inventory;
+pub use credential_migration::{
+    discard_legacy as discard_legacy_credential, run as credential_inventory,
+};

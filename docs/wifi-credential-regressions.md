@@ -1,5 +1,11 @@
 # Wi-Fi credential regression acceptance
 
+Historical keyring-backed acceptance record. The runtime keyring backend and its
+provider-test runner were retired on 2026-10-16 after explicit user-approved
+credential disposal. For current NM-only behavior, tests and pending hardware
+acceptance, see [the revised rollout](networkmanager-credential-migration.md).
+The old provider commands below describe the historical implementation.
+
 ## Manual Connect follow-up
 
 See [manual-wifi-activation.md](manual-wifi-activation.md) for the saved-profile
