@@ -9,6 +9,69 @@ use crate::variant::{owned_value, setting, value_string_map};
 
 pub(crate) const AGENT_OWNED: u32 = 1;
 pub(crate) const NOT_SAVED: u32 = 2;
+
+/// Bounded transient handoff only; deliberately not Debug/Serialize.
+pub(crate) struct SecretValue {
+    pub(crate) key: String,
+    pub(crate) password: String,
+}
+
+/// Values for explicitly supported schemas, never a generic password fallback.
+pub(crate) fn values(settings: &ConnectionSettings) -> Result<Vec<(String, String, String)>> {
+    let mut result = Vec::new();
+    for (section, data) in settings {
+        let mut keys = known_keys(section)
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect::<Vec<_>>();
+        if section == "vpn"
+            && let Some(secrets) = data.get("secrets").and_then(value_string_map)
+        {
+            keys.extend(secrets.keys().map(|k| (*k).to_string()));
+        }
+        if section == "wireguard" {
+            for peer in peers(data)? {
+                if let Some(public) = setting::<&str>(&peer, "public-key") {
+                    keys.push(format!("peers.{public}.preshared-key"));
+                }
+            }
+        }
+        for key in keys {
+            if let Some(value) = text(settings, section, &key).filter(|v| !v.is_empty()) {
+                result.push((section.clone(), key, value));
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Canonical public policy snapshot. Exclude only credentials and NM-maintained
+/// observation metadata, not ACLs, certificate policy, addresses or user data.
+pub(crate) fn public_settings(settings: &ConnectionSettings) -> Result<ConnectionSettings> {
+    let mut public = settings.clone();
+    for (section, data) in &mut public {
+        for key in known_keys(section) {
+            data.remove(*key);
+        }
+        if section == "vpn" {
+            data.remove("secrets");
+        }
+        if section == "wireguard" && data.contains_key("peers") {
+            let mut peers = peers(data)?;
+            for peer in &mut peers {
+                peer.remove("preshared-key");
+            }
+            data.insert("peers".into(), owned_value(peers)?);
+        }
+        if section == "connection" {
+            data.remove("timestamp");
+        }
+        if section == "802-11-wireless" {
+            data.remove("seen-bssids");
+        }
+    }
+    Ok(public)
+}
 pub(crate) fn known_keys(section: &str) -> &'static [&'static str] {
     match section {
         "802-11-wireless-security" => &[

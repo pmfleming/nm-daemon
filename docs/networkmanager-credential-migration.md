@@ -110,11 +110,55 @@ Private-bus tests cover read/write errors, stale versions, competing edits durin
 GetSecrets, staged/temporary profiles, zero versions, UUID mismatches, unknown
 secret fields and unsupported NM versions. Returned backend errors are redacted.
 
-Still pending within step 3: NM-only SecretAgent runtime, post-reply durability
-confirmation and lifecycle coverage, frontend/QR coordination, remaining mutation
-paths, and explicit copy/verify/journal/cleanup tooling. The legacy runtime backend
-is deliberately still present at this checkpoint. Do not deploy this intermediate
-state or treat the writer tests as migration acceptance.
+### Runtime/frontend foundation (still not deployment-ready)
+
+The normal SecretAgent no longer looks up, unlocks, stores or deletes desktop
+keyring items. Legacy keyring implementation/tests remain for migration research;
+production compiles no runtime keyring backend. SaveSecrets keeps only the bounded
+one-shot agent-owned handoff and rejects all durable agent-save acknowledgements,
+including opaque values; NM must persist its own system-owned values. DeleteSecrets
+invalidates pending work/handoff without deleting legacy items, calling back into
+NM, or waiting on a confirmation that might itself be awaiting this callback. Capabilities retain the deprecated keyring shape, disabled, and identify
+NetworkManager as the storage provider.
+
+System-owned requests reject `save:false` before consuming the pending request:
+native delivery can persist independently of deferred saves. NOT_SAVED values
+remain transient. Agent-owned saving requires explicit migration; requests mixing
+system-owned and agent-owned values fail closed until migration or separate
+temporary activation, rather than silently converting flags. VPN message hints
+are not password fields or permission to guess a persistent password.
+
+A deferred confirmation captures public profile policy and an unambiguous
+ACTIVATING connection before replying. After dispatch it waits for ACTIVATED,
+checks owner/cancellation, policy, permissions, staged state and secret equality,
+then uses version-fenced empty Update2 TO_DISK. Confirmation never overlays an old
+credential reply or flushes known staged edits. `stored` means explicit disk-write
+acknowledgement, not just dispatch, activation or Unsaved=false. Failure can mean
+unknown durability, not proof that native activation saved nothing.
+
+Actual runtime VM checks pass on all three validated NM versions: persistent PSK,
+rejected save:false with the original request still usable, NOT_SAVED/agent-owned
+reply policy, disk-write failure despite successful activation, NM restart/stale
+reply fencing, zero calls to a locked Secret Service trap, and full shutdown/start
+read-back without an agent. This does not establish an enterprise/VPN MFA hardware
+matrix or every confirmation race. One full Rust run timed out in the isolated
+activation fixture; its isolated rerun and subsequent full run passed, without
+raising timeouts or adding retries. Keep this as a test-flakiness risk.
+
+Shelllist disables misleading native Remember opt-outs, preserves separate
+connection-intent opt-out, reports NM/neutral storage wording and handles legacy
+backends conservatively. Native Qt tests cover disabled-control interaction,
+cancellation, submission guards and migration-required requests. Validation:
+92 Rust library tests passed (four existing ignored); 319 native Qt cases passed
+(one existing RHI-only skip), frontend/producer contract check and authoritative
+full QML lint passed. Panel review found no new numeric-style/wrapper exceptions.
+Private-bus lifecycle coverage also rejects opaque SaveSecrets acknowledgements
+and proves DeleteSecrets cancels prompts without waiting on the confirmation lock.
+
+Still pending within step 3: complete confirmation race/permission/multi-secret
+coverage, remaining mutation paths, QR integration audit, explicit
+copy/verify/journal/cleanup tooling, and coordinated rollout acceptance. Do not
+deploy this intermediate state or treat these VM tests as migration acceptance.
 
 ## Remaining checkpoints
 

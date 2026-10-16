@@ -37,6 +37,10 @@ mod forget;
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated_config.rs"));
 }
+// Retained solely for transition-era provider fixtures, not linked into the
+// normal daemon. Legacy reading belongs in explicit migration tooling.
+#[cfg(test)]
+#[allow(dead_code)]
 mod keyring;
 mod logging;
 mod model;

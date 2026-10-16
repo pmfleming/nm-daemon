@@ -316,7 +316,9 @@ fn make_temporary(settings: &mut ConnectionSettings) -> Result<()> {
         .filter(|(name, _)| matches!(name.as_str(), "802-11-wireless-security" | "802-1x"))
     {
         for key in known_secret_keys(setting) {
-            section.insert(secret_flags_key(key), super::owned_value(2_u32)?); // NOT_SAVED
+            let flag_key = secret_flags_key(key);
+            let old = crate::variant::setting::<u32>(section, &flag_key).unwrap_or(0);
+            section.insert(flag_key, super::owned_value((old & !1) | 2)?); // NOT_SAVED, retain NOT_REQUIRED
         }
     }
     Ok(())

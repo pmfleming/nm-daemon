@@ -201,7 +201,10 @@ fn restart_recovers_registration_and_fences_pending_work_and_secrets() -> Result
                 let result = proxy.call::<_, _, ConnectionSettings>(
                     "GetSecrets",
                     &(
-                        ConnectionSettings::new(),
+                        ConnectionSettings::from([(
+                            "802-11-wireless-security".into(),
+                            crate::variant::value_map([("psk-flags", 2u32.into())]).unwrap(),
+                        )]),
                         OwnedObjectPath::try_from(PROFILE).unwrap(),
                         "802-11-wireless-security",
                         Vec::<String>::new(),
@@ -248,6 +251,83 @@ fn restart_recovers_registration_and_fences_pending_work_and_secrets() -> Result
             let stale = Arc::new(stale);
             assert!(super::super::register_pending(&stale, vec!["frontend".into()]).is_err());
             assert!(super::super::ensure_request_owner(&stale).is_err());
+
+            // DeleteSecrets must cancel the entire profile without waiting on
+            // a confirmation that could itself await NM's callback completion.
+            {
+                let writer = executor.block_on(super::super::persistence::writer_guard_for_test());
+                let mut request = super::super::PendingSecretRequest::new(
+                    PROFILE.try_into()?,
+                    "802-11-wireless-security",
+                    Vec::new(),
+                    3,
+                );
+                request.nm_owner = Some(new.unique_name().unwrap().to_string());
+                let request = Arc::new(request);
+                let _inflight =
+                    super::super::InflightRegistration::new(&request, &Arc::downgrade(&runtime))?;
+                let (pending, _) =
+                    super::super::register_pending(&request, vec!["frontend".into()])?;
+                let save_proxy = Proxy::new(
+                    &new,
+                    connection.unique_name().unwrap().as_str(),
+                    SECRET_AGENT_OBJECT_PATH,
+                    "org.freedesktop.NetworkManager.SecretAgent",
+                )?;
+                for flags in [0u32, 1u32] {
+                    let opaque = ConnectionSettings::from([(
+                        "802-1x".into(),
+                        std::collections::HashMap::from([
+                            (
+                                "password-raw".into(),
+                                crate::variant::owned_value(vec![0xffu8, 0xfe])?,
+                            ),
+                            (
+                                "password-raw-flags".into(),
+                                crate::variant::owned_value(flags)?,
+                            ),
+                        ]),
+                    )]);
+                    let result = save_proxy.call::<_, _, ()>(
+                        "SaveSecrets",
+                        &(opaque, OwnedObjectPath::try_from(PROFILE)?),
+                    );
+                    assert!(
+                        matches!(result, Err(zbus::Error::MethodError(ref name, _, _)) if name.as_str() == "org.freedesktop.DBus.Error.NotSupported"),
+                        "opaque values must not become false durable acknowledgements"
+                    );
+                }
+                let caller = new.clone();
+                let target = connection.unique_name().unwrap().to_string();
+                let (done, completed) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    let proxy = Proxy::new(
+                        &caller,
+                        target,
+                        SECRET_AGENT_OBJECT_PATH,
+                        "org.freedesktop.NetworkManager.SecretAgent",
+                    )
+                    .unwrap();
+                    let result = proxy.call::<_, _, ()>(
+                        "DeleteSecrets",
+                        &(
+                            ConnectionSettings::new(),
+                            OwnedObjectPath::try_from(PROFILE).unwrap(),
+                        ),
+                    );
+                    done.send(result.is_ok()).unwrap();
+                });
+                assert!(completed.recv_timeout(Duration::from_secs(2))?);
+                assert!(
+                    pending
+                        .receiver
+                        .recv_timeout(Duration::from_secs(2))?
+                        .cancelled
+                );
+                assert!(request.cancelled.load(Ordering::Acquire));
+                worker.join().unwrap();
+                drop(writer);
+            }
 
             // An old owner still connected to the bus cannot cancel/save/delete secrets.
             let proxy = Proxy::new(

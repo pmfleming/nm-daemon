@@ -54,7 +54,7 @@ impl DeferredReply {
             "/test/profile".into(),
             None,
             true,
-            Some(Box::new(move || {
+            Some(Box::new(move |_| {
                 entered.send(()).unwrap();
                 release
                     .lock()

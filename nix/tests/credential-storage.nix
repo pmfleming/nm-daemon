@@ -20,6 +20,8 @@ pkgs.testers.runNixOSTest {
     ] ++ pkgs.lib.optional (daemonPackage != null) daemonPackage;
     environment.etc."nm-test/credential-storage.py".source = ./credential-storage.py;
     environment.etc."nm-test/credential-writer.py".source = ./credential-writer.py;
+    environment.etc."nm-test/credential_runtime.py".source = ./credential-runtime.py;
+    environment.etc."nm-test/secret_recovery.py".source = ./secret-recovery.py;
     environment.etc."nm-test/hostapd.conf".text = ''
       interface=wlan1
       driver=nl80211

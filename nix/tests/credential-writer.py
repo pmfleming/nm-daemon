@@ -62,6 +62,10 @@ try:
     assert enterprise.GetSettings()["802-1x"]["domain-suffix-match"] == "example.invalid"
     assert not session.name_has_owner("org.freedesktop.secrets")
     print("PASS actual Rust writer: WEP/enterprise preservation and no Secret Service provider")
+    import sys
+    sys.path.insert(0, "/etc/nm-test")
+    from credential_runtime import exercise
+    exercise(address)
 finally:
     daemon.terminate()
     try:

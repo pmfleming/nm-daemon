@@ -101,10 +101,14 @@ impl Harness {
             .get_mut(SECURITY)
             .unwrap()
             .insert("psk".into(), crate::variant::owned_value("synthetic-old")?);
-        self.agent()?.call::<_, _, ()>(
+        let result = self.agent()?.call::<_, _, ()>(
             "SaveSecrets",
             &(native, OwnedObjectPath::try_from(PROFILE)?),
-        )?;
+        );
+        assert!(
+            result.is_err(),
+            "agent-owned persistence must not be acknowledged"
+        );
         Ok(())
     }
     fn callback(
@@ -260,6 +264,7 @@ fn manual_saved_activation_uses_real_agent_callbacks_without_speculative_forms_o
                 "other-agent",
                 "rejected",
             ] {
+                eprintln!("activation case: {case}");
                 let harness = Harness::new(!matches!(case, "no-frontend" | "other-agent"))?;
                 if matches!(case, "available" | "rejected") {
                     harness.native_handoff()?;

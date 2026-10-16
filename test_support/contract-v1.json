@@ -1134,14 +1134,23 @@
         "stream": "wifi.secret"
       },
       "keyring": {
-        "available": true,
-        "default_save": true,
-        "persistence_supported": true,
-        "prompt_handling": "unlock",
-        "prompt_policy": "interactive_unlock_with_timeout"
+        "available": false,
+        "default_save": false,
+        "deprecated": true,
+        "persistence_supported": false,
+        "prompt_handling": "none",
+        "prompt_policy": "none"
       },
-      "message": "SecretAgent delivers credentials before deferred keyring saving; only saves may open a bounded desktop unlock dialog",
-      "registered": true
+      "message": "NetworkManager owns durable credentials; delivery and verified persistence are separate outcomes",
+      "registered": true,
+      "storage": {
+        "confirmation": "terminal_activation_and_explicit_to_disk",
+        "default_save": true,
+        "legacy_agent_owned": "explicit_migration_required",
+        "persistence_supported": true,
+        "provider": "networkmanager",
+        "temporary_saved_profile": "separate_volatile_clone"
+      }
     }
   },
   "secret_provide": {
@@ -1174,13 +1183,16 @@
             "password",
             "private-key-password"
           ],
+          "migration_required": false,
           "primary_secret_key": "password",
+          "save_required": true,
           "save_supported": true,
           "secret_keys": [
             "password",
             "private-key-password"
           ],
           "setting_name": "802-1x",
+          "storage_provider": "networkmanager",
           "timeout_ms": 90000
         },
         "event": "requested",
@@ -1208,7 +1220,8 @@
       {
         "data": {
           "connection_path": "/org/freedesktop/NetworkManager/Settings/1",
-          "status": "stored"
+          "status": "stored",
+          "storage_provider": "networkmanager"
         },
         "event": "persistence",
         "protocol": "nm-api",
@@ -1219,21 +1232,9 @@
       {
         "data": {
           "connection_path": "/org/freedesktop/NetworkManager/Settings/1",
-          "operation": "create",
-          "prompt": "/org/freedesktop/secrets/prompt/1",
-          "status": "prompt_unsupported"
-        },
-        "event": "persistence",
-        "protocol": "nm-api",
-        "request_id": "secret-contract",
-        "stream": "wifi.secret",
-        "version": 2
-      },
-      {
-        "data": {
-          "connection_path": "/org/freedesktop/NetworkManager/Settings/1",
-          "error": "keyring unavailable",
-          "status": "failed"
+          "error": "NetworkManager confirmation call failed",
+          "status": "failed",
+          "storage_provider": "networkmanager"
         },
         "event": "persistence",
         "protocol": "nm-api",

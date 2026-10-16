@@ -1144,6 +1144,9 @@ fn operation_stream_events(stream: Stream) -> Vec<Value> {
                         "primary_secret_key": "password",
                         "flags": 0,
                         "save_supported": true,
+                        "save_required": true,
+                        "storage_provider": "networkmanager",
+                        "migration_required": false,
                         "timeout_ms": crate::generated::SECRET_TIMEOUT.as_millis(),
                     }),
                 ),
@@ -1151,15 +1154,11 @@ fn operation_stream_events(stream: Stream) -> Vec<Value> {
                 ("delivered", json!({})),
                 (
                     "persistence",
-                    json!({ "status": "stored", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" }),
+                    json!({ "status": "stored", "storage_provider": "networkmanager", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" }),
                 ),
                 (
                     "persistence",
-                    json!({ "status": "prompt_unsupported", "operation": "create", "prompt": "/org/freedesktop/secrets/prompt/1", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" }),
-                ),
-                (
-                    "persistence",
-                    json!({ "status": "failed", "error": "keyring unavailable", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" }),
+                    json!({ "status": "failed", "storage_provider": "networkmanager", "error": "NetworkManager confirmation call failed", "connection_path": "/org/freedesktop/NetworkManager/Settings/1" }),
                 ),
             ],
         ),
@@ -1462,23 +1461,7 @@ fn forget_result_fixture() -> Value {
 }
 
 fn secret_capabilities_fixture() -> Value {
-    json!({
-        "registered": true,
-        "agent_path": crate::daemon_secret::SECRET_AGENT_OBJECT_PATH,
-        "keyring": {
-            "available": true,
-            "persistence_supported": true,
-            "default_save": true,
-            "prompt_handling": "unlock",
-            "prompt_policy": "interactive_unlock_with_timeout",
-        },
-        "events": {
-            "stream": Stream::WifiSecret,
-            "implemented": true,
-            "persistence_outcomes": true,
-        },
-        "message": "SecretAgent delivers credentials before deferred keyring saving; only saves may open a bounded desktop unlock dialog",
-    })
+    crate::daemon_secret::capabilities_json(true)
 }
 
 #[cfg(test)]

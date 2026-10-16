@@ -1,11 +1,11 @@
-//! Short-lived, one-shot handoff from NM's SaveSecrets to GetSecrets. A locked
-//! keyring must not hide the password NM just supplied while creating a profile.
+//! Short-lived, one-shot handoff from NM's SaveSecrets to GetSecrets.
+//! This is not durable storage and has no Secret Service dependency.
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use super::{ConnectionSettings, PendingSecretRequest, SECRET_TIMEOUT, connection_secret_values};
-use crate::keyring::KeyringSecret;
+use crate::network_credentials::SecretValue;
 
 #[derive(Default)]
 struct Handoff {
@@ -71,7 +71,7 @@ pub(super) fn stage(owner: &str, path: &str, connection: &ConnectionSettings) {
 pub(super) fn take(
     request: &PendingSecretRequest,
     connection: &ConnectionSettings,
-) -> Vec<KeyringSecret> {
+) -> Vec<SecretValue> {
     let Some(uuid) = uuid(connection) else {
         return Vec::new();
     };
@@ -94,7 +94,7 @@ pub(super) fn take(
         values
             .into_iter()
             .filter(|(key, _)| request.secret_keys.contains(key))
-            .map(|(key, password)| KeyringSecret { key, password })
+            .map(|(key, password)| SecretValue { key, password })
             .collect()
     })
 }

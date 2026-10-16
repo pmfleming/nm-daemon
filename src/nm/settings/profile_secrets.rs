@@ -13,22 +13,7 @@ use crate::model::WifiProfileUpdate;
 
 /// NetworkManager's built-in secret names; plugin-defined hints are handled by the agent.
 pub(crate) fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
-    // Legacy SecretAgent callers are migrated separately; do not change their
-    // keyring behavior as a side effect of the profile-writer rollout.
-    match setting_name {
-        "802-11-wireless-security" => &[
-            "psk",
-            "wep-key0",
-            "wep-key1",
-            "wep-key2",
-            "wep-key3",
-            "leap-password",
-        ],
-        "802-1x" => &["password", "private-key-password", "pin"],
-        "wifi-p2p" => &["wps-pin"],
-        "gsm" | "cdma" => &["password", "pin"],
-        _ => &["password"],
-    }
+    crate::network_credentials::known_keys(setting_name)
 }
 
 pub(crate) fn secret_flags_key(key: &str) -> String {

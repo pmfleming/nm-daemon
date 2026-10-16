@@ -306,6 +306,10 @@ def verify_cold():
     assert no_disk_psk(paths["storage-not-saved"])
     assert no_disk_psk(paths["storage-readonly"])
     assert secrets(paths["storage-wep"], SEC)[SEC]["wep-key1"] == "fghij"
+    if "runtime-persistent" in paths:
+        assert secrets(paths["runtime-persistent"], SEC)[SEC]["psk"] == SECRET
+        for name in ["runtime-temporary", "runtime-readonly", "runtime-external-agent", "runtime-restart"]:
+            assert no_disk_psk(paths[name])
     print("PASS cold-boot read-back with no SecretAgent or Secret Service", flush=True)
 
 

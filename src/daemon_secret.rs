@@ -17,17 +17,18 @@ mod persistence;
 #[cfg(test)]
 mod regressions;
 mod session;
+mod storage;
 pub(crate) use lifecycle::watch_network_manager;
-use zvariant::{OwnedObjectPath, OwnedValue};
+use zvariant::OwnedObjectPath;
 
 use crate::daemon_runtime::DaemonRuntime;
-use crate::error::best_effort;
 use crate::generated::SECRET_TIMEOUT;
-use crate::nm::settings::profile_secrets::{known_secret_keys, secret_flags_key};
+use crate::network_credentials::{self as credential_schema, SecretValue};
 use crate::nm::{ConnectionSettings, NM_DEST};
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
-use crate::variant::{value_string, value_string_map};
+#[cfg(test)]
+use crate::variant::value_string_map;
 
 // AgentManager.Register accepts an identifier, not an object path. NM always
 // calls agents at this standardized path, even when registration succeeded.
@@ -167,11 +168,34 @@ impl SecretAgentInterface {
     ) -> Result<zbus::object_server::ResponseDispatchNotifier<ConnectionSettings>, SecretAgentError>
     {
         let mut request = PendingSecretRequest::new(connection_path, setting_name, hints, flags);
-        request.save_supported = request
-            .secret_keys
-            .iter()
-            .all(|key| secret_may_be_saved(&connection, setting_name, key));
         request.nm_owner = Some(self.authorize(&header).await?);
+        request.nm_connection = self
+            .runtime
+            .upgrade()
+            .map(|runtime| runtime.network_manager_connection());
+        if request.hints.is_empty()
+            && setting_name == "802-11-wireless-security"
+            && let Some(security) = connection.get(setting_name)
+        {
+            if crate::variant::setting::<&str>(security, "key-mgmt") == Some("none") {
+                let index = crate::variant::setting::<u32>(security, "wep-tx-keyidx")
+                    .unwrap_or(0)
+                    .min(3);
+                request.secret_keys = vec![format!("wep-key{index}")];
+            } else if crate::variant::setting::<&str>(security, "auth-alg") == Some("leap") {
+                request.secret_keys = vec!["leap-password".into()];
+            }
+        }
+        request.policy =
+            storage::Policy::from_request(&connection, setting_name, &request.secret_keys)
+                .map_err(|_| {
+                    SecretAgentError::NoSecrets(
+                        "Unsupported or ambiguous credential retention policy".into(),
+                    )
+                })?;
+        request.save_supported =
+            !request.policy.persistent.is_empty() && !request.policy.migration_required;
+        persistence::invalidate(&request.connection_path);
         request.activation = crate::activation::find(
             request.nm_owner.as_deref().unwrap(),
             &connection,
@@ -186,7 +210,7 @@ impl SecretAgentInterface {
             .as_ref()
             .map(|scope| scope.track_credentials());
         let runtime = self.runtime.clone();
-        // Register before scheduling/performing keyring I/O, not only when a prompt is needed.
+        // Register before scheduling work, not only when a prompt is needed.
         let inflight = InflightRegistration::new(&request, &runtime)?;
         let delivery_request = Arc::clone(&request);
         let (connection, save) = secret_worker(move || {
@@ -226,6 +250,7 @@ impl SecretAgentInterface {
     ) -> zbus::fdo::Result<()> {
         self.authorize(&header).await?;
         session::clear(Some(connection_path.as_str()));
+        persistence::invalidate(connection_path.as_str());
         tracing::info!(%connection_path, setting_name, "NetworkManager cancelled SecretAgent request");
         let key = PendingSecretRequest::key_for(connection_path.as_str(), setting_name);
         if let Some((request_id, sender)) = cancel_pending_by_key(&key) {
@@ -243,46 +268,38 @@ impl SecretAgentInterface {
     ) -> zbus::fdo::Result<zbus::object_server::ResponseDispatchNotifier<()>> {
         let owner = self.authorize(&header).await?;
         ensure_secret_owner(Some(&owner))?;
-        // NM may strip agent-owned passwords before GetSecrets. Retain a
-        // bounded, owner/UUID-scoped handoff before keyring I/O can block.
+        // This is a bounded live-request handoff, never a durable copy.
         session::stage(&owner, connection_path.as_str(), &connection);
-        let request_id = connection_path.to_string();
-        let profile_path = request_id.clone();
-        let save = Box::new(
-            move || match save_connection_secrets(&connection_path, &connection) {
-                Ok(()) => SecretPersistenceOutcome::Stored,
-                Err(error) => SecretPersistenceOutcome::Failed(format!("{error:#}")),
-            },
-        );
-        Ok(persistence::after_reply(
-            (),
-            self.runtime.clone(),
-            request_id,
-            profile_path,
-            Some(owner),
-            false,
-            Some(save),
+        // NM can invoke this even for system-owned credentials. It must retain
+        // those itself; this agent never acknowledges a durable agent save.
+        // Rejecting every callback also covers opaque/unknown secret values
+        // that the text-only transient handoff cannot represent.
+        Err(zbus::fdo::Error::NotSupported(
+            "Durable SecretAgent storage is unavailable; NetworkManager owns storage. Explicitly migrate agent-owned profiles.".into(),
         ))
     }
 
     async fn delete_secrets(
         &self,
-        connection: ConnectionSettings,
+        _connection: ConnectionSettings,
         connection_path: OwnedObjectPath,
         #[zbus(header)] header: Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let owner = self.authorize(&header).await?;
         session::clear(Some(connection_path.as_str()));
         persistence::invalidate(connection_path.as_str());
-        // Finish any already-running write, then delete; queued saves cannot
-        // resurrect a forgotten profile's password after this reply.
-        let _writer = persistence::deletion_guard().await;
-        secret_worker(move || {
-            ensure_secret_owner(Some(&owner))?;
-            delete_connection_secrets(&connection_path, &connection);
-            Ok(())
-        })
-        .await
+        ensure_secret_owner(Some(&owner))?;
+        let cancelled =
+            with_pending_registry(|registry| registry.cancel_connection(connection_path.as_str()));
+        for (request_id, sender) in cancelled {
+            let _ = sender.send(SecretResponse::cancelled());
+            emit_secret_cancelled(&self.runtime, &request_id);
+        }
+        // NM owns deletion. Never recurse into NM or wait on a confirmation
+        // that may itself be waiting for this callback. An empty NM commit
+        // cannot restore an old response; cancellation/version fences retire it.
+        // Legacy keyring items are untouched.
+        Ok(())
     }
 }
 
@@ -327,17 +344,13 @@ fn apply_stored_secret(
     connection: &mut ConnectionSettings,
 ) -> zbus::fdo::Result<bool> {
     let supplied = session::take(request, connection);
-    if apply_stored_values(request, connection, supplied)? {
-        return Ok(true);
-    }
-    let stored = lookup_stored_secrets(request, connection);
-    apply_stored_values(request, connection, stored)
+    apply_stored_values(request, connection, supplied)
 }
 
 fn apply_stored_values(
     request: &PendingSecretRequest,
     connection: &mut ConnectionSettings,
-    stored: Vec<crate::keyring::KeyringSecret>,
+    stored: Vec<SecretValue>,
 ) -> zbus::fdo::Result<bool> {
     for secret in stored {
         // A partial native handoff may contain a freshly supplied password;
@@ -369,17 +382,8 @@ fn secret_value_present(
     connection: &ConnectionSettings,
     key: &str,
 ) -> bool {
-    let Some(section) = connection.get(&request.setting_name) else {
-        return false;
-    };
-    if request.setting_name == "vpn" {
-        return section
-            .get("secrets")
-            .and_then(value_string_map)
-            .and_then(|values| values.get(key).copied())
-            .is_some_and(|value| !value.is_empty());
-    }
-    crate::variant::setting::<&str>(section, key).is_some_and(|value| !value.is_empty())
+    credential_schema::text(connection, &request.setting_name, key)
+        .is_some_and(|value| !value.is_empty())
 }
 
 fn wait_for_secret_response(
@@ -517,31 +521,59 @@ fn default_save() -> bool {
 }
 
 pub(crate) fn capabilities(_: SecretCapabilitiesParams) -> Result<Value> {
-    let keyring_available = crate::keyring::available();
     api_data_value(
         Method::WifiSecretCapabilities.spec().response_key,
-        &json!({
-            "registered": REGISTERED.load(Ordering::Relaxed),
-            "agent_path": SECRET_AGENT_OBJECT_PATH,
-            "keyring": {
-                "available": keyring_available,
-                "persistence_supported": keyring_available,
-                "default_save": true,
-                "prompt_handling": "unlock",
-                "prompt_policy": "interactive_unlock_with_timeout",
-            },
-            "events": {
-                "stream": Stream::WifiSecret,
-                "implemented": true,
-                "persistence_outcomes": true,
-            },
-            "message": "SecretAgent delivers credentials before deferred keyring saving; only saves may open a bounded desktop unlock dialog",
-        }),
+        &capabilities_json(REGISTERED.load(Ordering::Relaxed)),
         "serialize secret-agent capabilities response JSON",
     )
 }
 
+pub(crate) fn capabilities_json(registered: bool) -> Value {
+    json!({
+        "registered": registered,
+        "agent_path": SECRET_AGENT_OBJECT_PATH,
+        "keyring": {
+            "available": false,
+            "persistence_supported": false,
+            "default_save": false,
+            "prompt_handling": "none",
+            "prompt_policy": "none",
+            "deprecated": true,
+        },
+        "storage": {
+            "provider": "networkmanager",
+            "persistence_supported": true,
+            "default_save": true,
+            "confirmation": "terminal_activation_and_explicit_to_disk",
+            "temporary_saved_profile": "separate_volatile_clone",
+            "legacy_agent_owned": "explicit_migration_required",
+        },
+        "events": {
+            "stream": Stream::WifiSecret,
+            "implemented": true,
+            "persistence_outcomes": true,
+        },
+        "message": "NetworkManager owns durable credentials; delivery and verified persistence are separate outcomes",
+    })
+}
+
 pub(crate) fn provide(owner: Option<&str>, params: SecretProvideParams) -> Result<Value> {
+    if !params.cancel {
+        let rejection = with_pending_registry(|registry| {
+            registry
+                .requests
+                .get(&params.request_id)
+                .filter(|entry| {
+                    owner.is_some_and(|owner| entry.owners.contains(owner)) && entry.request.live()
+                })
+                .and_then(|entry| entry.request.policy.rejection(params.save))
+        });
+        if let Some(reason) = rejection {
+            return Err(crate::error::DomainError::validation(crate::error::ErrorOperation::SecretOperation,
+                "This retention choice cannot be honored by the current profile; use a temporary connection or explicit migration")
+                .with_detail("reason", reason).with_detail("delivered", false).into());
+        }
+    }
     let accepted = if let Some(sender) = remove_pending_for_owner(&params.request_id, owner) {
         sender
             .send(SecretResponse {
@@ -705,6 +737,9 @@ fn emit_secret_requested(runtime: &Weak<DaemonRuntime>, request: &PendingSecretR
             "flag_details": secret_flag_details(request.flags),
             "plugin_defined_secret_names": accepts_plugin_secret_names(&request.setting_name),
             "save_supported": request.save_supported,
+            "save_required": !request.policy.persistent.is_empty(),
+            "storage_provider": "networkmanager",
+            "migration_required": request.policy.migration_required,
             "timeout_ms": request.deadline.saturating_duration_since(Instant::now()).as_millis(),
         }),
     );
@@ -744,12 +779,6 @@ fn emit_secret_persistence(
             "request_id": request_id,
             "status": "stored",
         }),
-        SecretPersistenceOutcome::PromptUnsupported { operation, prompt } => json!({
-            "request_id": request_id,
-            "status": "prompt_unsupported",
-            "operation": operation.to_string(),
-            "prompt": prompt,
-        }),
         SecretPersistenceOutcome::Failed(error) => json!({
             "request_id": request_id,
             "status": "failed",
@@ -757,6 +786,7 @@ fn emit_secret_persistence(
         }),
     };
     data["connection_path"] = json!(connection_path);
+    data["storage_provider"] = json!("networkmanager");
     emit_secret_event(runtime, request_id, "persistence", data);
 }
 
@@ -773,43 +803,15 @@ fn emit_secret_event(
     runtime.emit_external(Stream::WifiSecret, request_id.to_string(), event, data);
 }
 
-fn lookup_stored_secrets(
-    request: &PendingSecretRequest,
-    connection: &ConnectionSettings,
-) -> Vec<crate::keyring::KeyringSecret> {
-    // Never put a desktop unlock dialog on NetworkManager's delivery deadline.
-    let keyring = crate::keyring::Keyring::new();
-    let result = keyring.and_then(|keyring| {
-        keyring.lookup_secrets(
-            &request.connection_path,
-            connection,
-            &request.setting_name,
-            &request.secret_keys,
-        )
-    });
-    match result {
-        Ok(crate::keyring::KeyringOutcome::Completed(secret)) => secret,
-        Ok(crate::keyring::KeyringOutcome::PromptUnsupported {
-            operation,
-            prompt,
-            completed,
-        }) => {
-            tracing::info!(request_id = %request.id, %operation, %prompt, "keyring lookup requires an unsupported desktop prompt");
-            completed
-        }
-        Err(err) => {
-            tracing::debug!(request_id = %request.id, error = %crate::error::err_chain(&err), "keyring lookup failed");
-            Vec::new()
-        }
-    }
-}
-
 fn apply_secret_response(
     connection: &mut ConnectionSettings,
     request: &Arc<PendingSecretRequest>,
     response: SecretResponse,
 ) -> SecretResult<Option<persistence::Save>> {
     reject_cancelled_response(response.cancelled)?;
+    if let Some(reason) = request.policy.rejection(response.save) {
+        return Err(SecretAgentError::NoSecrets(reason.into()));
+    }
     let mut values = response_values(request, response.password, response.values);
     values.retain(|key, value| request.secret_keys.contains(key) && !value.is_empty());
     if values.is_empty() {
@@ -826,34 +828,7 @@ fn apply_secret_response(
     if !response.save {
         return Ok(None);
     }
-    // Only public identity metadata is needed by the deferred save; do not
-    // duplicate the whole connection or unrelated credentials.
-    let identity = ["uuid", "id"]
-        .into_iter()
-        .filter_map(|key| {
-            let value = connection
-                .get("connection")?
-                .get(key)
-                .and_then(value_string)?;
-            Some(owned_value(value).map(|value| (key.to_string(), value)))
-        })
-        .collect::<zbus::fdo::Result<HashMap<_, _>>>()?;
-    let settings = ConnectionSettings::from([("connection".into(), identity)]);
-    let request = Arc::clone(request);
-    Ok(Some(Box::new(move || {
-        if !request.save_supported {
-            return SecretPersistenceOutcome::Failed(
-                "This connection requires temporary credentials; the password was not saved."
-                    .into(),
-            );
-        }
-        if ensure_request_owner(&request).is_err() {
-            return SecretPersistenceOutcome::Failed(
-                "Credential request cancelled before saving".into(),
-            );
-        }
-        persistence_outcome(&request, &settings, &values)
-    })))
+    Ok(Some(storage::prepare(request, connection, values)))
 }
 
 fn reject_cancelled_response(cancelled: bool) -> SecretResult<()> {
@@ -888,184 +863,34 @@ fn apply_response_values(
     })
 }
 
-fn persistence_outcome(
-    request: &PendingSecretRequest,
-    connection: &ConnectionSettings,
-    values: &HashMap<String, String>,
-) -> SecretPersistenceOutcome {
-    let keyring = match crate::keyring::Keyring::interactive() {
-        Ok(keyring) => keyring,
-        Err(error) => return SecretPersistenceOutcome::Failed(format!("{error:#}")),
-    };
-    values
-        .iter()
-        .map(|(key, value)| store_secret_outcome(&keyring, request, connection, key, value))
-        .find(|outcome| !matches!(outcome, SecretPersistenceOutcome::Stored))
-        .unwrap_or(SecretPersistenceOutcome::Stored)
-}
-
 fn apply_password(
     connection: &mut ConnectionSettings,
     setting_name: &str,
     key: &str,
     password: String,
 ) -> zbus::fdo::Result<()> {
-    if setting_name == "vpn" {
-        return apply_vpn_secret(connection, key, password);
-    }
-    connection
-        .entry(setting_name.to_string())
-        .or_default()
-        .insert(key.to_string(), owned_value(password)?);
-    Ok(())
-}
-
-/// NetworkManager reads VPN secrets from the plugin's own `vpn.secrets`
-/// string map; a value written beside it in the `vpn` section is ignored.
-fn apply_vpn_secret(
-    connection: &mut ConnectionSettings,
-    key: &str,
-    password: String,
-) -> zbus::fdo::Result<()> {
-    let vpn = connection.entry("vpn".to_string()).or_default();
-    let mut secrets = vpn
-        .get("secrets")
-        .and_then(value_string_map)
-        .unwrap_or_default();
-    secrets.insert(key, &password);
-    let secrets = OwnedValue::try_from(zvariant::Value::new(secrets))
-        .map_err(|err| zbus::fdo::Error::Failed(format!("create VPN secret map: {err:#}")))?;
-    vpn.insert("secrets".to_string(), secrets);
-    Ok(())
-}
-
-fn store_secret_outcome(
-    keyring: &crate::keyring::Keyring,
-    request: &PendingSecretRequest,
-    connection: &ConnectionSettings,
-    key: &str,
-    password: &str,
-) -> SecretPersistenceOutcome {
-    match keyring.store_secret(
-        &request.connection_path,
-        connection,
-        &request.setting_name,
-        key,
-        password,
-    ) {
-        Ok(crate::keyring::KeyringOutcome::Completed(())) => SecretPersistenceOutcome::Stored,
-        Ok(crate::keyring::KeyringOutcome::PromptUnsupported {
-            operation, prompt, ..
-        }) => {
-            tracing::warn!(request_id = %request.id, %operation, %prompt, "secret was not stored because the keyring requires an unsupported desktop prompt");
-            SecretPersistenceOutcome::PromptUnsupported { operation, prompt }
-        }
-        Err(err) => {
-            tracing::warn!(request_id = %request.id, error = %crate::error::err_chain(&err), "failed to store secret in keyring");
-            SecretPersistenceOutcome::Failed(format!("{err:#}"))
-        }
-    }
-}
-
-fn save_connection_secrets(
-    connection_path: &OwnedObjectPath,
-    connection: &ConnectionSettings,
-) -> Result<()> {
-    let keyring = crate::keyring::Keyring::interactive()?;
-    for (setting, key, password) in connection_secret_values(connection) {
-        match keyring.store_secret(connection_path.as_str(), connection, setting, key, password)? {
-            crate::keyring::KeyringOutcome::Completed(()) => {}
-            crate::keyring::KeyringOutcome::PromptUnsupported { operation, .. } => {
-                anyhow::bail!("password was not saved: unsupported keyring {operation} prompt");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn delete_connection_secrets(connection_path: &OwnedObjectPath, connection: &ConnectionSettings) {
-    let Some(keyring) = best_effort(
-        format!(
-            "failed to open keyring while deleting NetworkManager secrets for {connection_path}"
-        ),
-        crate::keyring::Keyring::new,
-    ) else {
-        return;
-    };
-    connection
-        .keys()
-        .flat_map(|setting| {
-            known_secret_keys(setting)
-                .iter()
-                .copied()
-                .map(move |key| (setting.as_str(), key))
-        })
-        .for_each(|(setting, key)| {
-            delete_connection_secret(&keyring, connection_path, connection, setting, key)
-        });
-}
-
-fn delete_connection_secret(
-    keyring: &crate::keyring::Keyring,
-    connection_path: &OwnedObjectPath,
-    connection: &ConnectionSettings,
-    setting_name: &str,
-    key: &str,
-) {
-    let outcome = best_effort(
-        format!(
-            "failed to delete NetworkManager secret {setting_name}.{key} for {connection_path}"
-        ),
-        || keyring.delete_secret(connection_path.as_str(), connection, setting_name, key),
-    );
-    match outcome {
-        Some(crate::keyring::KeyringOutcome::Completed(deleted)) => {
-            tracing::debug!(%connection_path, setting_name, key, deleted, "deleted NetworkManager secrets from keyring");
-        }
-        Some(crate::keyring::KeyringOutcome::PromptUnsupported {
-            operation,
-            prompt,
-            completed,
-        }) => {
-            tracing::warn!(%connection_path, setting_name, key, %operation, %prompt, deleted = completed, "keyring delete stopped because it requires an unsupported desktop prompt");
-        }
-        None => {}
-    }
-}
-
-fn connection_secret_values(
-    connection: &ConnectionSettings,
-) -> impl Iterator<Item = (&str, &str, &str)> {
-    connection.iter().flat_map(move |(setting_name, values)| {
-        known_secret_keys(setting_name)
-            .iter()
-            .filter(move |key| secret_may_be_saved(connection, setting_name, key))
-            .filter_map(move |key| {
-                crate::variant::setting::<&str>(values, key)
-                    .filter(|value| !value.is_empty())
-                    .map(|value| (setting_name.as_str(), *key, value))
-            })
+    credential_schema::set_text(connection, setting_name, key, password).map_err(|_| {
+        zbus::fdo::Error::NotSupported("Unsupported secret field or peer identity".into())
     })
 }
 
-fn owned_value(value: String) -> zbus::fdo::Result<OwnedValue> {
-    crate::variant::owned_value(value)
-        .map_err(|err| zbus::fdo::Error::Failed(format!("create D-Bus secret variant: {err:#}")))
-}
-
-fn secret_may_be_saved(connection: &ConnectionSettings, setting: &str, key: &str) -> bool {
-    let flags_key = secret_flags_key(key);
-    let flags = connection
-        .get(setting)
-        .and_then(|values| crate::variant::setting::<u32>(values, &flags_key))
-        .unwrap_or(0);
-    flags & 2 == 0 // NetworkManager NOT_SAVED
+fn connection_secret_values(connection: &ConnectionSettings) -> Vec<(String, String, String)> {
+    credential_schema::values(connection)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(section, key, _)| {
+            credential_schema::flags(connection, section, key)
+                .is_ok_and(|flags| flags & credential_schema::NOT_SAVED == 0)
+        })
+        .collect()
 }
 
 struct PendingSecretRequest {
     deadline: Instant,
     activation: Option<Arc<crate::activation::State>>,
     save_supported: bool,
+    policy: storage::Policy,
+    nm_connection: Option<Connection>,
     cancelled: Arc<AtomicBool>,
     nm_owner: Option<String>,
     id: String,
@@ -1090,6 +915,8 @@ impl PendingSecretRequest {
             deadline: Instant::now() + SECRET_TIMEOUT,
             activation: None,
             save_supported: true,
+            policy: storage::Policy::default(),
+            nm_connection: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             nm_owner: None,
             id: crate::daemon_runtime::next_request_id("secret"),
@@ -1136,19 +963,21 @@ fn secret_keys_for(setting_name: &str, hints: &[String]) -> Vec<String> {
     if accepts_plugin_secret_names(setting_name) {
         let mut keys = hints
             .iter()
+            .filter(|hint| setting_name != "vpn" || !hint.starts_with("x-vpn-message:"))
             .map(|hint| normalize_plugin_hint(setting_name, hint))
             .filter(|hint| !hint.is_empty())
             .collect::<Vec<_>>();
         keys.dedup();
-        if keys.is_empty() {
+        if hints.is_empty() {
             keys.push(default_secret_key_for_setting(setting_name).to_string());
         }
         return keys;
     }
-    let known = known_secret_keys(setting_name);
+    // Unknown hints must fail schema validation, not silently turn an OTP or
+    // another unsupported challenge into the profile's persistent password.
     let mut keys = hints
         .iter()
-        .filter(|hint| known.contains(&hint.as_str()))
+        .filter(|hint| !hint.is_empty())
         .cloned()
         .collect::<Vec<_>>();
     if keys.is_empty() {
@@ -1202,10 +1031,6 @@ impl SecretResponse {
 
 enum SecretPersistenceOutcome {
     Stored,
-    PromptUnsupported {
-        operation: crate::keyring::KeyringPromptOperation,
-        prompt: OwnedObjectPath,
-    },
     Failed(String),
 }
 
@@ -1276,6 +1101,26 @@ impl PendingRegistry {
         self.remove_by_key(key)
     }
 
+    fn cancel_connection(&mut self, path: &str) -> Vec<(String, Sender<SecretResponse>)> {
+        for (key, cancelled) in &self.inflight {
+            if key
+                .split_once('\n')
+                .is_some_and(|(connection, _)| connection == path)
+            {
+                cancelled.store(true, Ordering::Release);
+            }
+        }
+        let keys = self
+            .requests
+            .values()
+            .filter(|entry| entry.request.connection_path == path)
+            .map(|entry| entry.request.key.clone())
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .filter_map(|key| self.cancel_by_key(&key))
+            .collect()
+    }
+
     fn remove_by_key(&mut self, key: &str) -> Option<(String, Sender<SecretResponse>)> {
         let request_id = self
             .requests
@@ -1302,7 +1147,10 @@ mod tests {
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
 
-    use super::{PendingSecretRequest, SecretResponse, apply_secret_response, register_pending};
+    use super::{
+        PendingSecretRequest, SecretResponse, SecretValue, apply_secret_response, register_pending,
+        storage,
+    };
     use crate::nm::ConnectionSettings;
     #[test]
     fn nm_cancellation_during_lookup_prevents_prompt_and_stored_reply() {
@@ -1389,12 +1237,12 @@ mod tests {
                                 "fresh-password".into(),
                             )?;
                         }
-                        let mut stored = vec![crate::keyring::KeyringSecret {
+                        let mut stored = vec![SecretValue {
                             key: "password".into(),
                             password: "stored-password".into(),
                         }];
                         if complete {
-                            stored.push(crate::keyring::KeyringSecret {
+                            stored.push(SecretValue {
                                 key: "pin".into(),
                                 password: "1234".into(),
                             });
@@ -1418,7 +1266,7 @@ mod tests {
                             },
                         )?;
                         assert!(matches!(
-                            deferred.unwrap()(),
+                            deferred.unwrap()(&std::sync::atomic::AtomicBool::new(false)),
                             super::SecretPersistenceOutcome::Failed(_)
                         ));
                         Ok(connection)
@@ -1453,6 +1301,8 @@ mod tests {
             deadline: Instant::now() + super::SECRET_TIMEOUT,
             activation: None,
             save_supported: true,
+            policy: storage::Policy::default(),
+            nm_connection: None,
             cancelled: Default::default(),
             nm_owner: None,
             id: id.to_string(),

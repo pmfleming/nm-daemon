@@ -440,7 +440,7 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 38] = &[
         response_key: "secret_agent",
         stream: Some(Stream::WifiSecret),
         operation: ErrorOperation::SecretOperation,
-        description: "Reports SecretAgent and keyring capabilities.",
+        description: "Reports SecretAgent and NetworkManager credential storage capabilities.",
     },
     MethodSpec {
         method: Method::WifiSecretProvide,
@@ -693,7 +693,7 @@ pub(crate) static STREAM_REGISTRY: &[StreamSpec; 14] = &[
             "delivered",
             "persistence",
         ],
-        description: "SecretAgent prompt, cancellation, and keyring persistence events.",
+        description: "SecretAgent prompt, cancellation, and NetworkManager persistence events.",
     },
     StreamSpec {
         stream: Stream::DaemonRequest,

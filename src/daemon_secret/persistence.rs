@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use zbus::object_server::ResponseDispatchNotifier;
 
-pub(super) type Save = Box<dyn FnOnce() -> SecretPersistenceOutcome + Send>;
+pub(super) type Save = Box<dyn FnOnce(&AtomicBool) -> SecretPersistenceOutcome + Send>;
 static CAPACITY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 static WRITER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 type Tickets = HashMap<String, Vec<Weak<AtomicBool>>>;
@@ -43,7 +43,8 @@ pub(super) fn invalidate(path: &str) {
     }
 }
 
-pub(super) async fn deletion_guard() -> tokio::sync::MutexGuard<'static, ()> {
+#[cfg(test)]
+pub(super) async fn writer_guard_for_test() -> tokio::sync::MutexGuard<'static, ()> {
     WRITER.lock().await
 }
 
@@ -100,7 +101,7 @@ fn queued_saves_cannot_resurrect_deleted_secrets_and_capacity_is_bounded() -> an
                     "/undispatched".into(),
                     None,
                     false,
-                    Some(Box::new(move || {
+                    Some(Box::new(move |_| {
                         let _ = ran.send(());
                         SecretPersistenceOutcome::Stored
                     })),
@@ -120,7 +121,7 @@ fn queued_saves_cannot_resurrect_deleted_secrets_and_capacity_is_bounded() -> an
                 let pending = tokio::spawn(persist(
                     None,
                     flag,
-                    Box::new(|| panic!("forgotten secret was persisted")),
+                    Box::new(|_| panic!("forgotten secret was persisted")),
                 ));
                 tokio::task::yield_now().await;
                 invalidate("/forgotten");
@@ -133,7 +134,7 @@ fn queued_saves_cannot_resurrect_deleted_secrets_and_capacity_is_bounded() -> an
                 let result = persist(
                     None,
                     ticket("/full"),
-                    Box::new(|| panic!("full queue accepted a save")),
+                    Box::new(|_| panic!("full queue accepted a save")),
                 )
                 .await;
                 assert!(matches!(result, SecretPersistenceOutcome::Failed(_)));
@@ -149,11 +150,13 @@ async fn persist(
     save: Save,
 ) -> SecretPersistenceOutcome {
     let Ok(_capacity) = CAPACITY.try_acquire() else {
-        return SecretPersistenceOutcome::Failed("Keyring save queue is full; retry saving".into());
+        return SecretPersistenceOutcome::Failed(
+            "Credential confirmation queue is full; retry saving".into(),
+        );
     };
     let Ok(_writer) = tokio::time::timeout(SECRET_TIMEOUT, WRITER.lock()).await else {
         return SecretPersistenceOutcome::Failed(
-            "Keyring save expired in queue; retry saving".into(),
+            "Credential confirmation expired in queue; retry saving".into(),
         );
     };
     if cancelled.load(Ordering::Acquire) {
@@ -164,7 +167,11 @@ async fn persist(
     if super::ensure_secret_owner(owner.as_deref()).is_err() {
         return SecretPersistenceOutcome::Failed("NetworkManager changed before saving".into());
     }
-    tokio::task::spawn_blocking(save).await.unwrap_or_else(|_| {
-        SecretPersistenceOutcome::Failed("Keyring save worker stopped; retry saving".into())
-    })
+    tokio::task::spawn_blocking(move || save(&cancelled))
+        .await
+        .unwrap_or_else(|_| {
+            SecretPersistenceOutcome::Failed(
+                "Credential confirmation worker stopped; retry saving".into(),
+            )
+        })
 }
