@@ -1,5 +1,24 @@
 # NetworkManager-only credential migration
 
+## Current decision — discard, do not import (2026-10-16)
+
+The user explicitly requested ignoring nm-daemon's stored passwords and deleting
+them directly. This supersedes the copy-before-delete requirement **for those
+legacy nm-daemon items only**; it does not authorize deleting other applications'
+secrets or changing NM profiles. Missing passwords will be entered again.
+
+One exact, unlocked nm-daemon PSK item was verified by application/UUID/setting/key
+and deleted with `nm-credential-migrate discard-legacy --confirm-loss`. No password
+was read or copied. A fresh inventory found zero nm-daemon items; NM profile
+metadata was unchanged. No inventoried profile advertised agent-owned flags, but
+that is not proof that every password exists on disk. The old installed daemon
+has not been replaced yet and could recreate items until coordinated deployment.
+
+Implementation is complete for the revised no-import scope. Deployment, manual
+entry of missing credentials, and physical pre-login/cold-boot acceptance remain
+pending. GNOME Keyring, login/sudo authentication and the host's NM configuration
+were not changed. Only the explicitly approved legacy item was deleted.
+
 ## Target and safety gates
 
 NetworkManager is the intended sole persistent network credential store. Keep
@@ -7,11 +26,11 @@ SecretAgent prompting, but retire nm-daemon's runtime keyring storage. Temporary
 connections and one-time authentication remain temporary. Do not remove GNOME
 Keyring or alter login/sudo authentication.
 
-Copy values and correct ownership flags together. Preserve the full profile and
-all unrelated secrets; NM replaces settings and a partial secret-bearing update
-can discard omitted secrets. Verify persistence before deleting source items.
-Never reconnect/restart NM during inventory or copying. Hardware reboot validation
-and explicit cleanup remain separate checkpoints.
+Preserve the full profile and all unrelated secrets; a partial secret-bearing
+NM update can discard omitted secrets. Never perform flag-only ownership
+conversion. Inventory/disposal do not reconnect or restart NM. No import/resume
+journal is required under the revised decision. Hardware validation remains a
+separate checkpoint; legacy disposal is not evidence of NM persistence.
 
 ## Step 1 — inventory (completed 2026-10-15)
 
@@ -84,7 +103,7 @@ writer/runtime still require their own cancellation, owner-change, staged-edit,
 permission, unknown-schema, no-provider and frontend contract tests before
 migration/deployment. No personal credentials have been copied or changed.
 
-## Step 3 — writer foundation (in progress; not deployment-ready)
+## Step 3 — preserving writer (implemented)
 
 The shared schema and version-checked writer are implemented for advanced Wi-Fi
 profile edits and saved-profile credential replacement. They preserve unrelated
@@ -110,11 +129,11 @@ Private-bus tests cover read/write errors, stale versions, competing edits durin
 GetSecrets, staged/temporary profiles, zero versions, UUID mismatches, unknown
 secret fields and unsupported NM versions. Returned backend errors are redacted.
 
-### Runtime/frontend foundation (still not deployment-ready)
+### NM-only runtime/frontend (implemented)
 
 The normal SecretAgent no longer looks up, unlocks, stores or deletes desktop
-keyring items. Legacy keyring implementation/tests remain for migration research;
-production compiles no runtime keyring backend. SaveSecrets keeps only the bounded
+keyring items. The legacy keyring implementation, prompt code and obsolete
+provider-test runner have now been removed; production has no keyring backend. SaveSecrets keeps only the bounded
 one-shot agent-owned handoff and rejects all durable agent-save acknowledgements,
 including opaque values; NM must persist its own system-owned values. DeleteSecrets
 invalidates pending work/handoff without deleting legacy items, calling back into
@@ -148,25 +167,57 @@ raising timeouts or adding retries. Keep this as a test-flakiness risk.
 Shelllist disables misleading native Remember opt-outs, preserves separate
 connection-intent opt-out, reports NM/neutral storage wording and handles legacy
 backends conservatively. Native Qt tests cover disabled-control interaction,
-cancellation, submission guards and migration-required requests. Validation:
+cancellation, submission guards and migration-required requests. Earlier foundation validation:
 92 Rust library tests passed (four existing ignored); 319 native Qt cases passed
 (one existing RHI-only skip), frontend/producer contract check and authoritative
 full QML lint passed. Panel review found no new numeric-style/wrapper exceptions.
 Private-bus lifecycle coverage also rejects opaque SaveSecrets acknowledgements
 and proves DeleteSecrets cancels prompts without waiting on the confirmation lock.
 
-Still pending within step 3: complete confirmation race/permission/multi-secret
-coverage, remaining mutation paths, QR integration audit, explicit
-copy/verify/journal/cleanup tooling, and coordinated rollout acceptance. Do not
-deploy this intermediate state or treat these VM tests as migration acceptance.
+### Completion under the revised decision
 
-## Remaining checkpoints
+- The exact-item disposal command requires explicit loss acknowledgement, pins the
+  provider, rechecks ownership/identity/locked/modified metadata, never reads or
+  unlocks secrets, and does not claim success for a returned provider prompt.
+- All profile Update/Update2 writes now use the preserving, version-fenced writer
+  or the post-activation empty-commit confirmation. Band recovery compensates only
+  its band field on the current profile; it no longer replays whole checkpoints
+  that could restore obsolete passwords or overwrite unrelated edits. Recovery
+  refuses a competing band change and does not reconnect a different profile.
+- Qrca delegates to `nm-daemon client` and `wifi.qr.connect`, with credentials on
+  stdin, not argv. It waits for the matching terminal event, handles early replies
+  and transport loss without replay, and has no independent profile writer.
+- Private-bus confirmation tests cover owner replacement, deletion, cancellation,
+  staged edits, permission/auth requirements, policy changes, activation failure,
+  read/write errors, concurrent edits before/after commit, mismatched secrets,
+  and mixed permanent/OTP/unrelated secret handling. Capture performs no secret
+  reads; confirmation never overlays the submitted values.
+- The final Rust suite has 91 passing tests and three existing ignored tests.
+  Retiring the keyring backend also retires its old provider tests. VM checks on
+  all three NM versions additionally cover actual band-edit password preservation.
+  The final full frontend run passed 327 Qt cases (one existing RHI-only skip),
+  authoritative QML lint and the producer contract check. Qrca's 14 native
+  Qt/QProcess cases cover both Remember choices and failure ordering. The actual
+  local-build production NM/Qrca packages passed their tests, including isolated
+  scanner GUI startup. Lockfiles and the Rust toolchain policy were unchanged.
 
-3. Shared preserving writer, NM-only runtime, migration tooling and coordinated
-   frontend changes, with implementation-specific regression coverage.
-4. Controlled copy/verification and coordinated deployment; source retained.
-5. User-observed cold boot and before-login connection verification.
-6. Exact-item cleanup and retirement of legacy code after verification.
+The earlier intermittent activation-fixture timeout also occurred once in the
+production Nix build; diagnostic isolated runs and the subsequent production test
+run passed without weakening assertions, extending timeouts or adding retries to
+the suite. Additional case/phase diagnostics are retained. This remains a known
+flakiness risk, not a claimed fix.
+
+## Remaining rollout checkpoints
+
+4. Deploy daemon, Shelllist and Qrca together. Enter missing passwords through
+   normal Connect prompts with Remember enabled; verify explicit NM storage.
+   No automatic import, profile recreation or ownership-only conversion.
+5. User-observed cold boot and before-login connection verification with backup
+   connectivity. This cannot be inferred from disposable VM results.
+6. Legacy disposal and backend retirement are completed under the user's explicit
+   loss approval, before hardware verification. Recheck after replacing the old
+   daemon in case it recreated an entry in the meantime; do not delete unrelated
+   credentials.
 
 Do not mark a checkpoint complete based only on an earlier one. In particular,
 a read-back in a warm NM session is not a cold-boot persistence test.

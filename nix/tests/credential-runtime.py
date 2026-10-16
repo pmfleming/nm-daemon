@@ -55,7 +55,7 @@ def exercise(address):
     manager = dbus.Interface(system.get_object(NM, ROOT), NM)
     service = dbus.Interface(system.get_object(NM, ROOT + "/Settings"), NM + ".Settings")
     client = Client()
-    client.request("subscribe", streams=["wifi.secret"])
+    client.request("subscribe", streams=["wifi.secret", "wifi.band"])
     registered(client)
     capabilities = client.call("wifi.secret.capabilities")["secret_agent"]
     assert capabilities["storage"]["provider"] == "networkmanager"
@@ -113,6 +113,11 @@ def exercise(address):
         confirmed = outcome(event)
         assert confirmed["status"] == "stored", confirmed
         assert disk(persistent)["wifi-security"]["psk"] == SECRET
+        band = client.call("wifi.band.set", path=str(persistent), band="2.4")["result"]["request_id"]
+        status = client.event("wifi.band", lambda e: e.get("request_id") == band and e["event"] in ["succeeded", "failed", "cancelled"])
+        assert status["event"] == "succeeded", status
+        assert disk(persistent)["wifi-security"]["psk"] == SECRET
+        active = props(manager.GetDeviceByIpIface("wlan0")).Get(NM + ".Device", "ActiveConnection")
         manager.DeactivateConnection(active)
 
         for name, flags in [("runtime-temporary", 2), ("runtime-external-agent", 1)]:

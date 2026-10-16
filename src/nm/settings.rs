@@ -260,19 +260,6 @@ impl Nm {
         Ok(())
     }
 
-    pub(super) fn update_connection_settings(
-        &self,
-        path: &OwnedObjectPath,
-        settings: ConnectionSettings,
-        action: &str,
-    ) -> Result<()> {
-        let proxy = self.proxy_path(path, SETTINGS_CONNECTION_IFACE)?;
-        tracing::info!(connection = %path, action, "updating saved NetworkManager connection settings");
-        proxy
-            .call::<_, _, ()>("Update", &(settings,))
-            .with_context(|| format!("Update {action} for {path}"))
-    }
-
     pub(super) fn saved_wifi_connection_by_path(
         &self,
         path: &OwnedObjectPath,

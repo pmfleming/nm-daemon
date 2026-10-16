@@ -303,6 +303,9 @@ fn confirm(
 }
 
 #[cfg(test)]
+mod confirmation_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::variant::value_map;

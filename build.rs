@@ -171,10 +171,6 @@ fn generate_durations(path: &Path, generated: &mut String) {
             "network_snapshot_stale_after_ms",
             "NETWORK_SNAPSHOT_STALE_AFTER",
         ),
-        (
-            "wifi_band_checkpoint_timeout_ms",
-            "WIFI_BAND_CHECKPOINT_TIMEOUT",
-        ),
         ("scan_default_timeout_ms", "SCAN_DEFAULT_TIMEOUT"),
         ("scan_request_interval_ms", "SCAN_REQUEST_INTERVAL"),
         ("scan_retry_delay_ms", "SCAN_RETRY_DELAY"),

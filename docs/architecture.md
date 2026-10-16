@@ -56,7 +56,7 @@ Verification requires the selected device to report activation and the exact SSI
 
 ## Transactional Wi-Fi band selection
 
-`wifi.band.status` resolves an active saved profile to its exact Wi-Fi device and reports the current AP band, selected profile constraint, and visible bands for the same exact SSID/interface. `wifi.band.set` runs on the bounded cancellable worker lane. It rejects unavailable bands before mutation, creates a NetworkManager checkpoint, updates `802-11-wireless.band`, reactivates the exact profile, waits for full activation, and verifies the resulting band. Success destroys the checkpoint. Failure, cancellation, or checkpoint-finalization failure restores the original settings and rolls the checkpoint back, preventing a failed pin from leaving the machine stranded.
+`wifi.band.status` resolves an active saved profile to its exact Wi-Fi device and reports the current AP band, selected profile constraint, and visible bands for the same exact SSID/interface. `wifi.band.set` runs on the bounded cancellable worker lane. It rejects unavailable bands before mutation, version-fences the public band edit, reactivates the exact profile and verifies the resulting band. Failure/cancellation compensates only the band field on the current profile and requests recovery activation only if another profile has not taken over. A conflicting band change or failed recovery is reported for manual recovery. Whole-profile checkpoints are deliberately not replayed: they could restore obsolete passwords, ACLs or IP settings over unrelated edits.
 
 ## Domain model and compatibility boundary
 
@@ -152,7 +152,7 @@ Normal networking never accesses Secret Service. `daemon_secret/session.rs` reta
 
 System-owned native replies cannot opt out of NM persistence: `save:false` is rejected without consuming the prompt. One-time use must start a separate volatile connection. NOT_SAVED fields remain transient; agent-owned saving requires explicit migration, and mixed ownership fails closed. DeleteSecrets cancels pending work/handoff without touching legacy keyring items or recursively changing NM. Expiry emits correlated `cancelled` with `reason: "expired"`; late replies return `unavailable`.
 
-Capabilities identify `storage.provider: "networkmanager"`; the deprecated keyring capability is disabled. Unattended reconnection depends on verified NM keyfiles, not unlocking the login keyring. GNOME Keyring for unrelated applications and login/sudo authentication remain untouched. This is an intermediate implementation, **not a deployment-ready migration**; see [rollout gates](networkmanager-credential-migration.md).
+Capabilities identify `storage.provider: "networkmanager"`; the deprecated keyring capability is disabled. Unattended reconnection depends on verified NM keyfiles, not unlocking the login keyring. GNOME Keyring for unrelated applications and login/sudo authentication remain untouched. The user chose explicit legacy disposal without import. Implementation is complete for that scope; coordinated deployment, fresh password entry and hardware acceptance remain separate [rollout gates](networkmanager-credential-migration.md).
 
 ## Tests and contract ownership
 

@@ -385,7 +385,7 @@ The underlying connection workflow is the canonical `AlreadyActive → SavedProf
 
 ### `wifi.band`
 
-`wifi.band.status` reports the active band, the profile's selected constraint, and all currently visible bands for the same exact SSID and interface. `wifi.band.set` accepts `auto`, `2.4`, `5`, or `6`, creates a NetworkManager checkpoint, updates the saved profile, reactivates it, and verifies the resulting band. An unavailable requested band is rejected before mutation. Activation failure or cancellation restores the original profile settings and rolls back the checkpoint; success destroys the checkpoint. The operation is owner-scoped, cancellable, and emits `started`, `progress`, `succeeded`, `failed`, or `cancelled` on `wifi.band`.
+`wifi.band.status` reports the active band, the profile's selected constraint, and all currently visible bands for the same exact SSID and interface. `wifi.band.set` accepts `auto`, `2.4`, `5`, or `6`, version-fences the band edit, reactivates the saved profile, and verifies the resulting band. An unavailable band is rejected before mutation. Failure/cancellation compensates only the band field using current settings and another version fence, preserving current credentials and unrelated edits. Conflicting band changes or failed recovery require explicit manual action; a different active profile is not reconnected. The operation is owner-scoped, cancellable, and emits `started`, `progress`, `succeeded`, `failed`, or `cancelled` on `wifi.band`.
 
 ### Advanced Wi-Fi profile editing
 
@@ -547,7 +547,7 @@ Implemented here:
 
 Still open:
 
-- Complete migration tooling, remaining mutation-path/QR audit and rollout acceptance; see the credential migration checkpoints.
+- Coordinated deployment, fresh entry of missing passwords, and physical cold-boot/pre-login acceptance; legacy import was explicitly declined. See the credential rollout checkpoints.
 
 Advanced profile `reveal-secret` responses expose the NetworkManager `setting_name`, all editable `secret_keys`, the `primary_secret_key`, and a named `values` object. Profile `update` accepts matching named values under `settings.secrets`; the legacy `settings.password` field updates the primary key. This covers WPA Personal, all WEP key slots, LEAP, and 802.1X password/private-key-password/PIN fields, allowing frontends to build multi-field forms without flattening credentials into one password.
 

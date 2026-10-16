@@ -1,5 +1,5 @@
 //! Actual ActivateConnection -> exported SecretAgent callbacks on a private bus.
-//! Synthetic credentials only; the workflow runner disables the desktop keyring.
+//! Synthetic credentials only, on a private bus with no desktop services.
 use super::{
     SECRET_AGENT_OBJECT_PATH, SecretProvideParams, change_network_manager_owner,
     export_secret_agent, provide, with_pending_registry,
@@ -300,7 +300,9 @@ fn manual_saved_activation_uses_real_agent_callbacks_without_speculative_forms_o
                     .nm
                     .network_entries_for_access_points(harness.fake.nm.list_all_access_points()?)?;
                 let request = app.connect_request_for_key(&entries[0].key, None, None, None)?;
+                eprintln!("activation case {case}: starting workflow");
                 let result = app.connect(&request, None, |_| Ok(()))?;
+                eprintln!("activation case {case}: workflow returned");
                 let secrets = returned.recv_timeout(Duration::from_secs(5))?;
                 assert_activation_outcome(case, result, secrets, &harness)?;
                 if case == "available" {
@@ -338,6 +340,7 @@ fn manual_saved_activation_uses_real_agent_callbacks_without_speculative_forms_o
                 if matches!(case, "cancelled" | "no-frontend") {
                     assert_eq!(state.deactivated, [ACTIVE]);
                 }
+                eprintln!("activation case {case}: assertions complete");
                 assert!(with_pending_registry(|registry| registry
                     .requests
                     .is_empty()));

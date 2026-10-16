@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
@@ -7,7 +7,6 @@ use zvariant::OwnedObjectPath;
 use super::{ACTIVE_CONNECTION_IFACE, ConnectionSettings, DEVICE_IFACE, Nm};
 use crate::connect_wait::wait_for_active_target;
 use crate::error::{DomainError, ErrorOperation, cancellation_requested, check_cancellation};
-use crate::generated::WIFI_BAND_CHECKPOINT_TIMEOUT;
 use crate::model::{
     InterfaceName, NmObjectPath, WifiBand, WifiBandSelectionResult, WifiBandStatus, WifiDevice,
     connect_target_for_network_key, ssid_hex,
@@ -20,7 +19,6 @@ struct BandChange {
     before: WifiBandStatus,
     ssid_bytes: Vec<u8>,
     original: ConnectionSettings,
-    checkpoint: OwnedObjectPath,
 }
 
 impl Nm {
@@ -116,15 +114,13 @@ impl Nm {
                 )
             })?;
         let profile = self.saved_wifi_connection_by_path(&profile_path)?;
-        let original = self.connection_settings(&profile_path)?;
-        let checkpoint = self.create_band_checkpoint(&device.path)?;
+        let original = self.begin_credential_edit(&profile_path)?.settings;
         Ok(BandChange {
             profile_path,
             device,
             before,
             ssid_bytes: profile.ssid_bytes,
             original,
-            checkpoint,
         })
     }
 
@@ -134,8 +130,16 @@ impl Nm {
         requested: WifiBand,
         cancellation: Option<&AtomicBool>,
     ) -> Result<()> {
+        let mut edit = self.begin_credential_edit(&change.profile_path)?;
+        ensure_same_band_target(&edit.settings, &change.original)?;
+        anyhow::ensure!(
+            selected_band(&edit.settings) == selected_band(&change.original),
+            "band changed before update; retry explicitly"
+        );
+        set_selected_band(&mut edit.settings, requested)?;
+        self.commit_credential_edit(edit, false)?;
         let result = self
-            .apply_band_and_reactivate(
+            .reactivate_band(
                 &change.profile_path,
                 &change.device,
                 &change.before,
@@ -145,17 +149,15 @@ impl Nm {
             )
             .and_then(|()| check_band_cancelled(cancellation));
         if let Err(error) = result {
-            self.rollback_band_change(&change.checkpoint, &change.profile_path, change.original);
+            if let Err(rollback) = self.rollback_band_change(&change, requested) {
+                return Err(error.context(format!("Band recovery was not confirmed; inspect the current connection before retrying: {rollback}")));
+            }
             return Err(normalize_band_change_error(error, cancellation));
-        }
-        if let Err(error) = self.destroy_checkpoint(&change.checkpoint) {
-            self.rollback_band_change(&change.checkpoint, &change.profile_path, change.original);
-            return Err(error);
         }
         Ok(())
     }
 
-    fn apply_band_and_reactivate(
+    fn reactivate_band(
         &self,
         profile_path: &OwnedObjectPath,
         device: &crate::model::WifiDevice,
@@ -164,9 +166,6 @@ impl Nm {
         requested: WifiBand,
         cancellation: Option<&AtomicBool>,
     ) -> Result<()> {
-        let mut settings = self.connection_settings(profile_path)?;
-        set_selected_band(&mut settings, requested)?;
-        self.update_connection_settings(profile_path, settings, "Wi-Fi band selection")?;
         check_band_cancelled(cancellation)?;
 
         let root = OwnedObjectPath::try_from("/").context("create root object path")?;
@@ -231,46 +230,99 @@ impl Nm {
         Ok(None)
     }
 
-    fn create_band_checkpoint(&self, device_path: &OwnedObjectPath) -> Result<OwnedObjectPath> {
-        let timeout_seconds = WIFI_BAND_CHECKPOINT_TIMEOUT
-            .as_secs()
-            .min(u64::from(u32::MAX)) as u32;
-        self.root_proxy()
-            .call(
-                "CheckpointCreate",
-                &(vec![device_path.clone()], timeout_seconds, 0_u32),
-            )
-            .context("create NetworkManager checkpoint for Wi-Fi band selection")
+    fn rollback_band_change(&self, change: &BandChange, requested: WifiBand) -> Result<()> {
+        let mut edit = self.begin_credential_edit(&change.profile_path)?;
+        ensure_same_band_target(&edit.settings, &change.original)?;
+        restore_band_fields(&mut edit.settings, &change.original, requested)?;
+        self.commit_credential_edit(edit, false)?;
+        // A whole NM checkpoint can restore stale passwords, ACLs and IP policy.
+        // Compensate only our band field, using the current profile and
+        // a fresh version fence. Never restore a secret-bearing old snapshot.
+        let device = self.proxy_path(&change.device.path, DEVICE_IFACE)?;
+        let active: OwnedObjectPath = device.get_property("ActiveConnection")?;
+        if active.as_str() != "/" {
+            let active = self.proxy_path(&active, ACTIVE_CONNECTION_IFACE)?;
+            let current: OwnedObjectPath = active.get_property("Connection")?;
+            anyhow::ensure!(
+                current == change.profile_path,
+                "another profile is active; recovery will not reconnect it"
+            );
+        }
+        let root = OwnedObjectPath::try_from("/")?;
+        let _: OwnedObjectPath = self.root_proxy().call(
+            "ActivateConnection",
+            &(&change.profile_path, &change.device.path, root),
+        )?;
+        Ok(())
     }
+}
 
-    fn rollback_band_change(
-        &self,
-        checkpoint: &OwnedObjectPath,
-        profile_path: &OwnedObjectPath,
-        original: ConnectionSettings,
-    ) {
-        if let Err(error) =
-            self.update_connection_settings(profile_path, original, "Wi-Fi band selection rollback")
-        {
-            tracing::error!(profile = %profile_path, error = %crate::error::err_chain(&error), "failed to restore Wi-Fi profile after band selection failure");
-        }
-        let rollback: Result<HashMap<String, u32>> = self
-            .root_proxy()
-            .call("CheckpointRollback", &(checkpoint.clone(),))
-            .with_context(|| format!("roll back NetworkManager checkpoint {checkpoint}"));
-        if let Err(error) = rollback {
-            tracing::error!(checkpoint = %checkpoint, error = %crate::error::err_chain(&error), "failed to roll back Wi-Fi band checkpoint");
-        }
-        if let Err(error) = self.destroy_checkpoint(checkpoint) {
-            tracing::warn!(checkpoint = %checkpoint, error = %crate::error::err_chain(&error), "failed to destroy rolled-back Wi-Fi band checkpoint");
-        }
+fn ensure_same_band_target(
+    current: &ConnectionSettings,
+    original: &ConnectionSettings,
+) -> Result<()> {
+    for (section, key) in [("connection", "uuid"), ("802-11-wireless", "ssid")] {
+        anyhow::ensure!(
+            current.get(section).and_then(|s| s.get(key))
+                == original.get(section).and_then(|s| s.get(key)),
+            "profile identity changed; band operation cancelled"
+        );
     }
+    Ok(())
+}
 
-    fn destroy_checkpoint(&self, checkpoint: &OwnedObjectPath) -> Result<()> {
-        self.root_proxy()
-            .call::<_, _, ()>("CheckpointDestroy", &(checkpoint.clone(),))
-            .with_context(|| format!("destroy NetworkManager checkpoint {checkpoint}"))
+fn restore_band_fields(
+    current: &mut ConnectionSettings,
+    original: &ConnectionSettings,
+    applied: WifiBand,
+) -> Result<()> {
+    anyhow::ensure!(
+        selected_band(current) == applied,
+        "band changed externally; recovery cancelled"
+    );
+    let before = original.get("802-11-wireless").and_then(|s| s.get("band"));
+    let section = current.entry("802-11-wireless".into()).or_default();
+    match before {
+        Some(value) => {
+            section.insert("band".into(), value.try_clone()?);
+        }
+        None => {
+            section.remove("band");
+        }
     }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn band_compensation_preserves_current_credentials_and_unrelated_edits() -> Result<()> {
+    let mut original = ConnectionSettings::new();
+    set_selected_band(&mut original, WifiBand::Auto)?;
+    let mut current = original.clone();
+    set_selected_band(&mut current, WifiBand::Ghz5)?;
+    current.insert(
+        "802-11-wireless-security".into(),
+        crate::variant::value_map([("psk", "new-credential".into())])?,
+    );
+    current.insert(
+        "connection".into(),
+        crate::variant::value_map([("id", "concurrent-edit".into())])?,
+    );
+    let keep = current.clone();
+    restore_band_fields(&mut current, &original, WifiBand::Ghz5)?;
+    assert_eq!(current["connection"], keep["connection"]);
+    assert_eq!(
+        current["802-11-wireless-security"],
+        keep["802-11-wireless-security"]
+    );
+    set_selected_band(&mut current, WifiBand::Ghz6)?;
+    assert!(restore_band_fields(&mut current, &original, WifiBand::Ghz5).is_err());
+    current.get_mut("802-11-wireless").unwrap().insert(
+        "ssid".into(),
+        super::owned_value(b"another-network".to_vec())?,
+    );
+    assert!(ensure_same_band_target(&current, &original).is_err());
+    Ok(())
 }
 
 fn validate_requested_band(before: &WifiBandStatus, requested: WifiBand) -> Result<()> {
