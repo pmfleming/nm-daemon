@@ -13,6 +13,7 @@ use crate::nl80211::{KernelWirelessTelemetry, WirelessTelemetry};
 mod activate;
 mod band;
 mod connectivity;
+mod credential_writer;
 mod devices;
 mod events;
 mod health;

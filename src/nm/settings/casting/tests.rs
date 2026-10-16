@@ -24,6 +24,10 @@ fn settings(mdns: i32) -> ConnectionSettings {
             [
                 ("id".into(), owned_value("Example".to_string()).unwrap()),
                 (
+                    "uuid".into(),
+                    owned_value("fixture-uuid".to_string()).unwrap(),
+                ),
+                (
                     "type".into(),
                     owned_value("802-11-wireless".to_string()).unwrap(),
                 ),
@@ -43,6 +47,7 @@ fn settings(mdns: i32) -> ConnectionSettings {
 }
 
 struct State {
+    version: u64,
     saved: ConnectionSettings,
     applied: ConnectionSettings,
     active: bool,
@@ -98,8 +103,30 @@ impl Saved {
     fn get_settings(&self) -> ConnectionSettings {
         self.0.lock().unwrap().saved.clone()
     }
-    fn update(&self, settings: ConnectionSettings) {
-        self.0.lock().unwrap().saved = settings;
+    #[zbus(property(emits_changed_signal = "false"))]
+    fn version_id(&self) -> u64 {
+        self.0.lock().unwrap().version
+    }
+    #[zbus(property)]
+    fn unsaved(&self) -> bool {
+        false
+    }
+    #[zbus(property)]
+    fn filename(&self) -> &str {
+        "/etc/NetworkManager/system-connections/fixture.nmconnection"
+    }
+    fn update2(
+        &self,
+        settings: ConnectionSettings,
+        flags: u32,
+        args: std::collections::HashMap<String, zvariant::OwnedValue>,
+    ) -> std::collections::HashMap<String, zvariant::OwnedValue> {
+        let mut state = self.0.lock().unwrap();
+        assert_eq!(flags, 1);
+        assert_eq!(u64::try_from(&args["version-id"]).unwrap(), state.version);
+        state.saved = settings;
+        state.version += 1;
+        std::collections::HashMap::new()
     }
 }
 
@@ -180,6 +207,7 @@ fn run_policy_test() {
             .insert("method".into(), owned_value("manual".to_string()).unwrap());
         let expected_ip = applied["ipv4"].clone();
         let state = Arc::new(Mutex::new(State {
+            version: 1,
             saved,
             applied,
             active,

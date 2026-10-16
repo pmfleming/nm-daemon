@@ -5,14 +5,16 @@ use anyhow::Result;
 use crate::variant::setting_text;
 
 use super::{
-    ConnectionSettings, WEP_KEYS, WifiSecretKind, has_wep_settings, owned_value,
-    setting_string_list, setting_u32, wep_secret_key, wifi_secret_kind,
+    ConnectionSettings, WEP_KEYS, WifiSecretKind, has_wep_settings, setting_string_list,
+    setting_u32, wep_secret_key, wifi_secret_kind,
 };
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::WifiProfileUpdate;
 
 /// NetworkManager's built-in secret names; plugin-defined hints are handled by the agent.
 pub(crate) fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
+    // Legacy SecretAgent callers are migrated separately; do not change their
+    // keyring behavior as a side effect of the profile-writer rollout.
     match setting_name {
         "802-11-wireless-security" => &[
             "psk",
@@ -30,11 +32,7 @@ pub(crate) fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
 }
 
 pub(crate) fn secret_flags_key(key: &str) -> String {
-    if key.starts_with("wep-key") {
-        "wep-key-flags".into()
-    } else {
-        format!("{key}-flags")
-    }
+    crate::network_credentials::flags_key(key)
 }
 
 pub(super) struct ProfileSecretSpec {
@@ -78,7 +76,7 @@ fn enterprise_profile_secret_spec() -> ProfileSecretSpec {
     profile_secret_spec_for(
         "enterprise",
         "802-1x",
-        &["password", "private-key-password", "pin"],
+        crate::network_credentials::known_keys("802-1x"),
         "password",
     )
 }
@@ -138,6 +136,10 @@ pub(super) fn update_profile_secrets(
     let spec = profile_secret_spec(settings);
     let replacements = secret_replacements(&spec, update);
     if replacements.is_empty() {
+        anyhow::ensure!(
+            update.password.as_deref().is_none_or(str::is_empty),
+            "this Wi-Fi profile has no editable primary secret"
+        );
         return Ok(());
     }
     let Some(setting_name) = spec.setting_name else {
@@ -151,10 +153,9 @@ pub(super) fn update_profile_secrets(
     for (key, value) in &replacements {
         validate_replacement(settings, &spec, key, value)?;
     }
-    let section = settings.entry(setting_name.to_string()).or_default();
     for (key, value) in replacements {
-        section.insert(key.to_string(), owned_value(value.to_string())?);
-        section.insert(format!("{key}-flags"), owned_value(0_u32)?);
+        crate::network_credentials::set_system_owned(settings, setting_name, key)?;
+        crate::network_credentials::set_text(settings, setting_name, key, value.to_string())?;
     }
     Ok(())
 }

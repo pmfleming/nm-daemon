@@ -84,6 +84,38 @@ writer/runtime still require their own cancellation, owner-change, staged-edit,
 permission, unknown-schema, no-provider and frontend contract tests before
 migration/deployment. No personal credentials have been copied or changed.
 
+## Step 3 — writer foundation (in progress; not deployment-ready)
+
+The shared schema and version-checked writer are implemented for advanced Wi-Fi
+profile edits and saved-profile credential replacement. They preserve unrelated
+secrets, CA/domain validation and public settings, and reject staged/in-memory
+profiles, unreadable credentials, unknown returned secret schemas, stale versions,
+flag-only ownership conversion, NOT_SAVED/NOT_REQUIRED policy loss and ambiguous
+shared WEP ownership conversion. New Wi-Fi credential builders explicitly choose
+NM storage; explicit agent-owned creation is rejected.
+
+Real-daemon VM tests caught and fixed WEP detection against secret-free NM
+metadata. They also established that successful GetSecrets advances VersionId
+exactly once, even for cache hits. The writer counts that exact internal update;
+it never adopts an arbitrary new version that could conceal an external edit.
+This behavior is gated to the three validated NM versions. Adding another version
+requires rerunning the semantics and actual-writer checks.
+
+The actual Rust writer passes replacement/preservation tests and VM cold-boot
+checks on 1.56.0, 1.58.1 and 1.59.2-dev. Checks are exposed as
+`credential-writer-{minimum,stable,development}` alongside the native-only checks.
+Local validation packaged the Cargo-built Rust 1.95.0 binary and its runtime
+libraries into disposable VMs; this is not a production Nix build/deployment.
+Private-bus tests cover read/write errors, stale versions, competing edits during
+GetSecrets, staged/temporary profiles, zero versions, UUID mismatches, unknown
+secret fields and unsupported NM versions. Returned backend errors are redacted.
+
+Still pending within step 3: NM-only SecretAgent runtime, post-reply durability
+confirmation and lifecycle coverage, frontend/QR coordination, remaining mutation
+paths, and explicit copy/verify/journal/cleanup tooling. The legacy runtime backend
+is deliberately still present at this checkpoint. Do not deploy this intermediate
+state or treat the writer tests as migration acceptance.
+
 ## Remaining checkpoints
 
 3. Shared preserving writer, NM-only runtime, migration tooling and coordinated

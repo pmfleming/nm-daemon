@@ -160,6 +160,14 @@
             nmPackage = targets.${target};
           };
         }) (builtins.attrNames targets))
+        // builtins.listToAttrs (map (target: {
+          name = "credential-writer-${target}";
+          value = import ./nix/tests/credential-storage.nix {
+            inherit pkgs;
+            nmPackage = targets.${target};
+            daemonPackage = self.packages.${system}.default;
+          };
+        }) (builtins.attrNames targets))
         // {
           package = self.packages.${system}.default;
           discoveryModule = let

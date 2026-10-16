@@ -233,16 +233,18 @@ impl Nm {
     ) -> Result<()> {
         let _transaction = self.begin_profile_transaction();
         let path = OwnedObjectPath::try_from(path).context("parse connection path")?;
-        let mut settings = self.connection_settings(&path)?;
-        if casting.is_some() && saved_wifi_connection_from_settings(&path, &settings).is_none() {
+        let mut edit = self.begin_credential_edit(&path)?;
+        if casting.is_some() && saved_wifi_connection_from_settings(&path, &edit.settings).is_none()
+        {
             return Err(DomainError::validation(
                 ErrorOperation::ProfileOperation,
                 "Cast discovery requires a saved Wi-Fi profile",
             )
             .into());
         }
-        mutate(&mut settings)?;
-        self.update_connection_settings(&path, settings, action)?;
+        mutate(&mut edit.settings)?;
+        tracing::info!(connection = %path, action, "updating saved NetworkManager connection settings");
+        self.commit_credential_edit(edit, false)?;
         if let Some(enabled) = casting {
             self.reapply_casting(&path, enabled).map_err(|error| {
                 DomainError::new(
@@ -269,20 +271,6 @@ impl Nm {
         proxy
             .call::<_, _, ()>("Update", &(settings,))
             .with_context(|| format!("Update {action} for {path}"))
-    }
-
-    pub(super) fn update_connection_settings_for_activation(
-        &self,
-        path: &OwnedObjectPath,
-        settings: ConnectionSettings,
-    ) -> Result<()> {
-        const BLOCK_AUTOCONNECT: u32 = 0x20;
-        let proxy = self.proxy_path(path, SETTINGS_CONNECTION_IFACE)?;
-        let args = HashMap::<String, OwnedValue>::new();
-        let _: HashMap<String, OwnedValue> = proxy
-            .call("Update2", &(settings, BLOCK_AUTOCONNECT, args))
-            .with_context(|| format!("Update2 credentials for {path}"))?;
-        Ok(())
     }
 
     pub(super) fn saved_wifi_connection_by_path(
@@ -735,8 +723,14 @@ fn has_wep_settings(settings: &ConnectionSettings, secrets: Option<&ConnectionSe
                 "802-11-wireless-security",
                 &format!("{key}-flags"),
             )
-    }) || section_has_key(settings, "802-11-wireless-security", "wep-tx-keyidx")
+    }) || section_has_key(settings, "802-11-wireless-security", "wep-key-flags")
+        || section_has_key(settings, "802-11-wireless-security", "wep-key-type")
+        || section_has_key(settings, "802-11-wireless-security", "wep-tx-keyidx")
         || section_has_key(settings, "802-11-wireless-security", "auth-alg")
+        || settings
+            .get("802-11-wireless-security")
+            .and_then(|s| setting::<&str>(s, "key-mgmt"))
+            == Some("none")
 }
 
 fn secret_payload(

@@ -90,7 +90,13 @@ def no_disk_psk(path):
 
 
 def secrets(path, section):
-    return connection(path).GetSecrets(section)
+    before = version(path)
+    values = connection(path).GetSecrets(section)
+    # Successful NM GetSecrets processes even cached secrets via exactly one
+    # settings update. The preserving writer must count that update, not
+    # accept an arbitrary newly observed version (which masks external edits).
+    assert version(path) == before + 1, "GetSecrets version behavior changed"
+    return values
 
 
 def fails(operation):

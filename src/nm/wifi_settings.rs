@@ -11,7 +11,7 @@ use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     AccessPoint, EnterpriseAuth, WepKeyType, WifiConnectTarget, enterprise_key_mgmt,
 };
-use crate::variant::{insert_optional_strings, insert_optional_values, insert_string, value_map};
+use crate::variant::{insert_optional_strings, insert_string, value_map};
 pub(super) use profile::{apply_target_connection_metadata, apply_target_profile_settings};
 
 pub(super) fn psk_wifi_connection_settings(
@@ -366,17 +366,25 @@ fn insert_enterprise_flag_settings(
     dot1x: &mut HashMap<String, OwnedValue>,
     enterprise: &EnterpriseAuth,
 ) -> Result<()> {
-    insert_optional_values(
-        dot1x,
-        [
-            ("password-flags", enterprise.password_flags),
-            (
-                "private-key-password-flags",
-                enterprise.private_key_password_flags,
-            ),
-            ("pin-flags", enterprise.pin_flags),
-        ],
-    )
+    for (key, requested) in [
+        ("password", enterprise.password_flags),
+        (
+            "private-key-password",
+            enterprise.private_key_password_flags,
+        ),
+        ("pin", enterprise.pin_flags),
+    ] {
+        if let Some(flags) = requested {
+            anyhow::ensure!(
+                flags & 1 == 0,
+                "agent-owned storage is unsupported for new credentials"
+            );
+            dot1x.insert(format!("{key}-flags"), owned_value(flags)?);
+        } else if dot1x.contains_key(key) {
+            dot1x.insert(format!("{key}-flags"), owned_value(0u32)?);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn wep_wifi_connection_settings(
@@ -479,7 +487,11 @@ fn wireless_security_section(
     key_mgmt: &str,
     password: &str,
 ) -> Result<HashMap<String, OwnedValue>> {
-    value_map([("key-mgmt", key_mgmt.into()), ("psk", password.into())])
+    value_map([
+        ("key-mgmt", key_mgmt.into()),
+        ("psk", password.into()),
+        ("psk-flags", 0u32.into()),
+    ])
 }
 
 fn wep_security_section(
@@ -490,6 +502,7 @@ fn wep_security_section(
     value_map([
         ("key-mgmt", "none".into()),
         ("wep-key0", password.into()),
+        ("wep-key-flags", 0u32.into()),
         ("wep-key-type", wep_key_type.nm_value().into()),
     ])
 }

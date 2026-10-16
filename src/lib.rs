@@ -40,6 +40,7 @@ mod generated {
 mod keyring;
 mod logging;
 mod model;
+mod network_credentials;
 mod nl80211;
 mod nm;
 mod output;

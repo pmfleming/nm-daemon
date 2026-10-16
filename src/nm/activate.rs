@@ -71,17 +71,17 @@ impl Nm {
             let visible_ap = self
                 .visible_access_point_for(target)?
                 .map(|(_device, _path, ap)| ap);
-            let mut settings = self.connection_settings(connection_path)?;
+            let mut edit = self.begin_credential_edit(connection_path)?;
             apply_saved_activation_settings(
-                &mut settings,
+                &mut edit.settings,
                 target,
                 visible_ap.as_ref(),
                 password,
                 wep_key_type,
             )?;
-            apply_target_connection_metadata(&mut settings, target)?;
+            apply_target_connection_metadata(&mut edit.settings, target)?;
             tracing::info!(ssid = %target.ssid, connection = %connection_path, "updating compatible saved profile before activation");
-            return self.update_connection_settings_for_activation(connection_path, settings);
+            return self.commit_credential_edit(edit, true);
         }
         let settings = self.connection_settings(connection_path)?;
         super::profile_policy::validate_private_ca_paths(

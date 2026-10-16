@@ -1,8 +1,8 @@
 # Native NM storage semantics gate, independent of nm-daemon/Secret Service.
 # All credentials and network interfaces belong to this disposable VM.
-{ pkgs, nmPackage ? pkgs.networkmanager }:
+{ pkgs, nmPackage ? pkgs.networkmanager, daemonPackage ? null }:
 pkgs.testers.runNixOSTest {
-  name = "nm-credential-storage-${nmPackage.version}";
+  name = "nm-credential-storage-${nmPackage.version}${pkgs.lib.optionalString (daemonPackage != null) "-writer"}";
   globalTimeout = 300;
   nodes.machine = { lib, ... }: {
     networking.networkmanager = {
@@ -17,8 +17,9 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [
       pkgs.hostapd
       (pkgs.python3.withPackages (p: [ p.dbus-python p.pygobject3 ]))
-    ];
+    ] ++ pkgs.lib.optional (daemonPackage != null) daemonPackage;
     environment.etc."nm-test/credential-storage.py".source = ./credential-storage.py;
+    environment.etc."nm-test/credential-writer.py".source = ./credential-writer.py;
     environment.etc."nm-test/hostapd.conf".text = ''
       interface=wlan1
       driver=nl80211
@@ -42,6 +43,9 @@ pkgs.testers.runNixOSTest {
     running_version = machine.succeed("nmcli -t -f VERSION general").strip()
     assert running_version == "${nmPackage.version}", running_version
     print(machine.succeed("python3 /etc/nm-test/credential-storage.py", timeout=180))
+    ${pkgs.lib.optionalString (daemonPackage != null) ''
+      print(machine.succeed("python3 /etc/nm-test/credential-writer.py", timeout=60))
+    ''}
     # No process/session cache survives this boundary; source agent is gone.
     machine.shutdown()
     machine.start()
