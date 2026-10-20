@@ -114,7 +114,36 @@ Full frozen-graph `nix flake check --no-update-lock-file --keep-going
   must check its exact frozen graph and retest changed component outputs; this
   result is not permission to reuse tests for later framework edits.
 
-## Remaining stage
+## Stage 5 — deployed and verified
 
-5. NixOS configuration/build/switch and verification of both running executables,
-   with a recorded rollback generation. Deployment requires root authorization.
+The user reported the system updated. Read-only verification on October 20 at
+12:36 CEST confirmed:
+
+- Active generation **421**:
+  `/nix/store/khbcahch96c0k52p0glgk8657aacl3f8-nixos-system-thinkpad-26.05.20260719.fd14620`.
+  Previous generation **420** remains at the baseline path recorded in the host
+  deployment document.
+- NM is active, with live D-Bus version and installed nmcli **1.58.1**. Its D-Bus
+  owner PID **504197** matches systemd's MainPID, started at 12:33:57 CEST.
+- The NM unit selects the tested `c8wj9jkx1svq5fwvs049ndz1m5zbrcrr` package above;
+  its provenance manifest confirms the stable source and six reviewed backports.
+- The actual nm-daemon `/proc` executable matches the tested
+  `/nix/store/gf34mqxiclhr3viwhr4j7zwsfsjj76bw-nm-daemon-0.1.0/bin/nm-daemon` and
+  its loaded user unit. It is active and its v2 SecretAgent reports registered
+  with NetworkManager-owned storage.
+- Wi-Fi is active on `wlp2s0`; connectivity is `connected:full`. No profiles or
+  credentials were changed during verification.
+
+The operator supplied the result of the final privileged executable check:
+
+```sh
+sudo readlink -f "/proc/$(systemctl show NetworkManager.service -p MainPID --value)/exe"
+```
+
+Result:
+`/nix/store/c8wj9jkx1svq5fwvs049ndz1m5zbrcrr-networkmanager-1.58.1/bin/NetworkManager`.
+This matches the canonical target of the tested package's `/sbin/NetworkManager`.
+Both running executables are verified and stage 5 is complete. Host commit
+`43d0d6f` records the module import, package/unit assertions and deployment evidence;
+it excludes the unrelated GeoClue edit and preserves concurrent Bluetooth work.
+Physical cold-boot/pre-login and live CLAT/NAT64 acceptance remain separate checks.
