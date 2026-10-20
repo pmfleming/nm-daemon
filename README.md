@@ -58,7 +58,7 @@ Current D-Bus surface:
 
 - Bus name: `org.laufan.NmDaemon`
 - Object path: `/org/laufan/NmDaemon`
-- Interface: `org.laufan.NmDaemon1`
+- Interface: `org.laufan.NmDaemon2`
 - Methods:
   - `Call(in s method, in s params_json) -> (out s response_json)`
   - `Subscribe(in as streams) -> (out s response_json)`
@@ -89,7 +89,7 @@ The package also installs `share/dbus-1/services/org.laufan.NmDaemon.service`. S
 
 ## CLI compatibility
 
-When the user D-Bus service is available, compatible CLI commands forward through `org.laufan.NmDaemon1.Call`. Use `--direct` or `NM_DAEMON_DIRECT=1` to bypass the daemon for debugging/recovery.
+When the user D-Bus service is available, compatible CLI commands forward through `org.laufan.NmDaemon2.Call`. Use `--direct` or `NM_DAEMON_DIRECT=1` to bypass the daemon for debugging/recovery.
 
 Forwarded today:
 
@@ -132,7 +132,7 @@ Secrets must use stdin (`wifi connect-target` request JSON or `wifi connect --pa
 
 Runtime files and logs live under `$XDG_RUNTIME_DIR/nm-daemon` by default. Cache reads distinguish missing, stale-schema, corrupt, and available data; writes use private files, repository locking, and atomic replacement. Persistent connect-attempt history is appended to `$XDG_STATE_HOME/nm-daemon/connects.jsonl`, while structured forget outcomes are appended to `profile-operations.jsonl` in the same state directory; both rotate at 512 KiB and retain three older files. Logging environment variables are `NM_DAEMON_LOG_FILE`, `NM_DAEMON_LOG`, and `NM_DAEMON_STDERR_LOG`. Disconnect-and-forget logs include request IDs, SSID identity length, profile IDs and object paths, cancellation/deactivation decisions, per-profile outcomes, and final counts; secrets are never included.
 
-`nm-daemon daemon` registers a NetworkManager SecretAgent on the system bus when NetworkManager is available, exports `/org/laufan/NmDaemon/SecretAgent`, emits owner-directed `wifi.secret` requested/cancelled events to frontends with an active `wifi.secret` subscription, and accepts named secret values, explicit cancellation, and an optional save request through `wifi.secret.provide` only from an owner that received the prompt. NetworkManager is the only runtime durable credential store. System-owned requests require `save:true`; one-time use requires a separate temporary connection, not a native reply with `save:false`. Delivery and activation are distinct from the deferred, version-fenced NM disk-write confirmation reported by `wifi.secret persistence`. Agent-owned saving requires explicit migration; ordinary networking never accesses Secret Service. The revised rollout deliberately does not import old nm-daemon passwords. Deploy daemon/frontend/Qrca together, re-enter missing credentials and complete the [hardware acceptance gates](./docs/networkmanager-credential-migration.md); implementation tests do not prove laptop pre-login connectivity. Prompt events include `secret_keys` and `primary_secret_key` so frontends can label password/PIN fields accurately. The generic agent recognizes NetworkManager 1.60's `wifi-p2p.wps-pin`; nm-daemon does not otherwise expose Wi-Fi Direct operations.
+`nm-daemon daemon` registers a NetworkManager SecretAgent on the system bus when NetworkManager is available, exports `/org/freedesktop/NetworkManager/SecretAgent`, emits owner-directed `wifi.secret` requested/cancelled events to frontends with an active `wifi.secret` subscription, and accepts named secret values, explicit cancellation, and an optional save request through `wifi.secret.provide` only from an owner that received the prompt. NetworkManager is the only runtime durable credential store. System-owned requests require `save:true`; one-time use requires a separate temporary connection, not a native reply with `save:false`. Delivery and activation are distinct from the deferred, version-fenced NM disk-write confirmation reported by `wifi.secret persistence`. Agent-owned saving requires explicit migration; ordinary networking never accesses Secret Service. The revised rollout deliberately does not import old nm-daemon passwords. Deploy daemon/frontend/Qrca together, re-enter missing credentials and complete the [hardware acceptance gates](./docs/networkmanager-credential-migration.md); implementation tests do not prove laptop pre-login connectivity. Prompt events include `secret_keys` and `primary_secret_key` so frontends can label password/PIN fields accurately. The generic agent recognizes NetworkManager 1.60's `wifi-p2p.wps-pin`; nm-daemon does not otherwise expose Wi-Fi Direct operations.
 
 Visible-network connection parity probe:
 

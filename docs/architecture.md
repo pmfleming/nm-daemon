@@ -31,7 +31,7 @@ Tokio D-Bus/JSONL transports ─> shared runtime ─> bounded blocking lanes, ca
 
 `src/actions.rs` and the `src/daemon_*.rs` handlers are adapters around these services. Disconnect and saved-profile mutations are exposed through both the forwarding CLI and the canonical D-Bus application boundary.
 
-Application calls return typed domain results and events. The CLI converts them to `nm-api` JSON/JSONL, while D-Bus methods return the same versioned envelope as a JSON string and emit events through `org.laufan.NmDaemon1.Event`. Connect events expose typed state-machine phases and a target identity containing the original network key, exact SSID bytes, and available interface/device/AP identifiers; presentation code never has to classify progress messages.
+Application calls return typed domain results and events. The CLI converts them to `nm-api` JSON/JSONL, while D-Bus methods return the same versioned envelope as a JSON string and emit events through `org.laufan.NmDaemon2.Event`. Connect events expose typed state-machine phases and a target identity containing the original network key, exact SSID bytes, and available interface/device/AP identifiers; presentation code never has to classify progress messages.
 
 ## Connection state machine
 

@@ -12,7 +12,7 @@ This document describes the current `nm-daemon` user D-Bus API for Shelllist and
 - Daemon command: `nm-daemon daemon`
 - User/session bus name: `org.laufan.NmDaemon`
 - User/session object path: `/org/laufan/NmDaemon`
-- Frontend interface: `org.laufan.NmDaemon1`
+- Frontend interface: `org.laufan.NmDaemon2`
 
 The frontend JSON payload protocol intentionally remains `nm-api` v1 for compatibility:
 
@@ -109,7 +109,7 @@ Pseudo-code:
 response_json = dbus.call(
   "org.laufan.NmDaemon",
   "/org/laufan/NmDaemon",
-  "org.laufan.NmDaemon1",
+  "org.laufan.NmDaemon2",
   "Call",
   "wifi.networks",
   "{\"cached\":true}"

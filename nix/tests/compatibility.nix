@@ -101,7 +101,7 @@ pkgs.testers.runNixOSTest {
 
     def call_command(method, params={}):
         return ("busctl --address=unix:path=/run/nm-test-session-bus --json=short call "
-                "org.laufan.NmDaemon /org/laufan/NmDaemon org.laufan.NmDaemon1 Call ss "
+                "org.laufan.NmDaemon /org/laufan/NmDaemon org.laufan.NmDaemon2 Call ss "
                 + shlex.quote(method) + " " + shlex.quote(json.dumps(params)))
 
     def call(method, params={}):
