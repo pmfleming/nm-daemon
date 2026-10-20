@@ -7,14 +7,22 @@ The reviewed production baseline is NetworkManager **1.58.1**, source commit
 
 - [`f84bd5115485`](https://github.com/NetworkManager/NetworkManager/commit/f84bd5115485a78a5f8c12e910c5b7a0674bd0e3): create new IWD mirrored profiles atomically with `0600` permissions.
 - [`cca7761701c6`](https://github.com/NetworkManager/NetworkManager/commit/cca7761701c6c727bcfdf2e7517a73220ba6df4c): accept explicit `phase1-peaplabel="0"` when generating supplicant configuration.
+- [`f772ae0108d8`](https://github.com/NetworkManager/NetworkManager/commit/f772ae0108d80741c485a3847793cf1a5d6c4e1a): retain the device during queued state transitions (use-after-free fix).
+- [`38698689ccf3`](https://github.com/NetworkManager/NetworkManager/commit/38698689ccf33229e427bcfcf1041ddf31aa0430), [`03ab223b9da9`](https://github.com/NetworkManager/NetworkManager/commit/03ab223b9da95e423ea3e236b368caf6308efb50), [`ab4c4c62762e`](https://github.com/NetworkManager/NetworkManager/commit/ab4c4c62762ec1b92aae7c2c5f4128858be448f5): correct CLAT ICMP checksum handling.
+
+The 1.58.1 source already contains the private-CA-directory security restriction
+and hidden-network/band matching fix; they do not need duplicate backports.
 
 `packages.x86_64-linux.networkmanagerStable` pins the source and patch hashes,
 rebases the Nixpkgs path integration patch (the old ping helper was removed),
 keeps the new CLAT feature and native compiler hardening, and runs upstream's pure supplicant
-configuration suite, including the PEAP regression. Package provenance is
+configuration and Wi-Fi device suites, including the PEAP and hidden-AP regressions.
+CLAT is compiled in but remains opt-in at runtime; these pure suites are not
+CLAT traffic certification. Package provenance is
 installed at `share/nm-daemon/networkmanager-provenance.json`. The version string
 alone cannot identify backports. Recheck upstream releases before future updates;
-1.58.2 was an unreleased maintenance version at this review, not a release tag.
+As of October 20, 2026, 1.58.2 is still an unreleased maintenance version,
+not a release tag. See the [current rollout](networkmanager-rollout-2026-10-20.md).
 
 Build without switching the host:
 
@@ -48,7 +56,7 @@ Before switching:
 5. Preserve private-profile CA-path restrictions; do not remove trust settings or
    make a profile public to bypass validation.
 
-Validation: the pinned package built successfully against locked Nixpkgs
+Historical validation (before the October 20 backports): the package built successfully against Nixpkgs
 `567a49d1913ce81ac6e9582e3553dd90a955875f`; upstream's supplicant suite and udev
 installation checks passed. NixOS evaluation selected 1.58.1 without enabling
 the service. Runtime IWD/EAP and cross-version tests belong to the VM gate; this
@@ -60,7 +68,11 @@ See the [pinned compatibility gates](networkmanager-compatibility.md) for minimu
 patched-stable and development targets across wpa_supplicant/IWD, test scope and
 commands. `debug diagnose` now reports running D-Bus NM and installed nmcli
 versions separately. The development package is test-only **1.59.2-dev**, not a
-released 1.60 or the production module's default.
+released 1.60 or the production module's default. Credential compatibility policy
+is centralized in `src/networkmanager_compatibility.rs`. Any new version, or a new
+development revision with the same version string, requires both native storage
+and actual-writer/runtime VM checks before deployment; do not weaken the guard
+into a version range.
 
 ## Legacy profiles and existing IWD files
 

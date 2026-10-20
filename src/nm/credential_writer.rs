@@ -86,7 +86,7 @@ impl Nm {
         if has_secrets(&edit.settings) {
             let running: String = self.root_proxy().get_property("Version")?;
             ensure!(
-                matches!(running.as_str(), "1.56.0" | "1.58.1" | "1.59.2-dev"),
+                crate::networkmanager_compatibility::validated_storage_version(&running),
                 "credential writes require a validated NetworkManager version"
             );
             // Save the intended secret patch separately. Read *every* supported

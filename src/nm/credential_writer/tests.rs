@@ -261,7 +261,7 @@ fn preserving_writer_rejects_races_staged_edits_unknown_schemas_and_unreadable_s
                     );
                     assert_eq!(s.writes, 1);
                 } else {
-                    let error = result.err().expect(failure);
+                    let error = result.expect_err(failure);
                     assert!(!format!("{error:#}").contains("do-not-log-synthetic-value"));
                     assert!(s.written.is_none(), "{failure}");
                     assert_eq!(s.writes, usize::from(failure == "write"), "{failure}");

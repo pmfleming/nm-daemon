@@ -40,6 +40,7 @@ mod generated {
 mod logging;
 mod model;
 mod network_credentials;
+mod networkmanager_compatibility;
 mod nl80211;
 mod nm;
 mod output;

@@ -7,14 +7,14 @@ They do not deploy a host package or migrate host profiles.
 
 | Target | NetworkManager | Wi-Fi backends |
 | --- | --- | --- |
-| Minimum adapter baseline | 1.56.0 from locked Nixpkgs `567a49d1913ce81ac6e9582e3553dd90a955875f` | wpa_supplicant, IWD |
-| Production candidate | 1.58.1, `7406dfbcc35beed79bf2734e3e7376ead320bd99`, with IWD-mode and PEAP-label fixes | wpa_supplicant, IWD |
-| Development compatibility only | **1.59.2-dev**, `ed1f38cd449b32e935d994eed61600230cf4004b` | wpa_supplicant, IWD |
+| Minimum adapter baseline | 1.56.0 from locked Nixpkgs `8eeec934ae0dbeca3d7868c059568a65c08b2fc3` | wpa_supplicant, IWD |
+| Production candidate | 1.58.1, `7406dfbcc35beed79bf2734e3e7376ead320bd99`, with IWD-mode, PEAP-label, device-lifetime and CLAT-checksum fixes | wpa_supplicant, IWD |
+| Development compatibility only | **1.59.2-dev**, `ed279d788f3b1443254f8ba5a8a3217cf1cf9596` | wpa_supplicant, IWD |
 
 The development target is **not released 1.60**. Its source hash is pinned; it is
 never selected by the opt-in production module. Stable and development packages
 include a `share/nm-daemon/networkmanager-provenance.json` manifest and run the
-upstream supplicant configuration suite during their builds. Minimum support
+upstream supplicant configuration and Wi-Fi device suites during their builds. Minimum support
 means adapter compatibility, **not** that an unpatched 1.56 package is safe to
 deploy. The minimum IWD fixture disables NM's known-unsafe mirror writer.
 
@@ -85,6 +85,9 @@ coverage. In particular, IWD's independent known-network secret storage/promptin
 is not certified by the wpa_supplicant prompt fixture, and hotspot capability
 reporting is not a full hotspot activation matrix. No desktop Secret Service
 prompt completion, physical Wi-Fi 6/7 behavior, or live-host upgrade is asserted.
+
+Current rollout and gate results: [October 20 rollout](networkmanager-rollout-2026-10-20.md).
+The historical results below used the previous pins and daemon interface.
 
 ## Verified result — October 7, 2026
 

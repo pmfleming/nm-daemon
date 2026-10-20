@@ -143,7 +143,7 @@ fn capture(request: &PendingSecretRequest, supplied: &ConnectionSettings) -> Res
     let root = proxy(request, ROOT, NM)?;
     let running: String = bounded(root.get_property("Version"))?;
     ensure!(
-        matches!(running.as_str(), "1.56.0" | "1.58.1" | "1.59.2-dev"),
+        crate::networkmanager_compatibility::validated_storage_version(&running),
         "unvalidated NetworkManager storage semantics"
     );
     let paths: Vec<OwnedObjectPath> = bounded(root.get_property("ActiveConnections"))?;

@@ -35,9 +35,9 @@ pub(super) fn stage(owner: &str, path: &str, connection: &ConnectionSettings) {
     let mut values = HashMap::<String, Vec<_>>::new();
     for (setting, key, password) in connection_secret_values(connection) {
         values
-            .entry(setting.into())
+            .entry(setting)
             .or_default()
-            .push((key.into(), password.into()));
+            .push((key, password));
     }
     access(|cache| {
         cache.entries.retain(|(_, p, _), _| p != path);

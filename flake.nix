@@ -1,7 +1,8 @@
 {
   description = "NetworkManager JSON/JSONL adapter and user D-Bus daemon";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # Match the approved lock and shared framework Rust toolchain.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   # Co-development: one live sibling framework; no per-daemon revision pins.
   # Use ../daemon-framework/tools/local-build for Nix builds/checks.
   inputs.daemonFramework = {

@@ -8,7 +8,7 @@ let
   version = if development then "1.59.2-dev" else "1.58.1";
   revision =
     if development then
-      "ed1f38cd449b32e935d994eed61600230cf4004b"
+      "ed279d788f3b1443254f8ba5a8a3217cf1cf9596"
     else
       "7406dfbcc35beed79bf2734e3e7376ead320bd99";
   fixes =
@@ -25,6 +25,26 @@ let
           revision = "cca7761701c6c727bcfdf2e7517a73220ba6df4c";
           hash = "sha256-NQcPQKBZEW86+bwSnieUU/ln9Hp/GR65k7CvbyGcds8=";
           purpose = "Accept peaplabel=0 in supplicant configuration verification";
+        }
+        {
+          revision = "f772ae0108d80741c485a3847793cf1a5d6c4e1a";
+          hash = "sha256-WILKnk2oHNu4Yg1TPeHqEQky1r55xF94gEJyJdJi0Eg=";
+          purpose = "Keep devices alive throughout queued state transitions";
+        }
+        {
+          revision = "38698689ccf33229e427bcfcf1041ddf31aa0430";
+          hash = "sha256-FFCzAX7Kg6afywO5HPAtjFqIOlxC2/+Qv/xSdbYXgqE=";
+          purpose = "Use the inner IPv6 pseudo-header for CLAT ICMP checksums";
+        }
+        {
+          revision = "03ab223b9da95e423ea3e236b368caf6308efb50";
+          hash = "sha256-ChOoqvRMChbJeyqdNll28Hf1SN+ZwYiDz+vcyTWHLUI=";
+          purpose = "Preserve CLAT ICMP checksums with truncated inner L4 headers";
+        }
+        {
+          revision = "ab4c4c62762ec1b92aae7c2c5f4128858be448f5";
+          hash = "sha256-8roerGBS23Yd8RFmdZ8Nq359uvNHzCaWwEBck6sTZfE=";
+          purpose = "Handle zero-checksum UDP packets quoted inside CLAT ICMP";
         }
       ];
   # BPF cannot accept the host compiler wrapper's stack/zero-register hardening
@@ -46,7 +66,7 @@ pkgs.networkmanager.overrideAttrs (old: {
     url = "https://codeload.github.com/NetworkManager/NetworkManager/tar.gz/${revision}";
     hash =
       if development then
-        "sha256-KF4atwJMobKqjJwfy89HTVA6rAtAcB5ojDaTSc1kMdM="
+        "sha256-0KnO1cFXDFZEPht1dczHdIz1AuKpukQcla6UyWS4bbU="
       else
         "sha256-hDMGrVSjAG73pgumKTKjogFcyH1GvUOP1ayQbZUsiNY=";
   };
@@ -68,8 +88,8 @@ pkgs.networkmanager.overrideAttrs (old: {
         inherit (fix) hash;
       }
     ) fixes;
-  # 1.58 enables CLAT by default; retain it rather than disabling new features
-  # just to reuse the older Nixpkgs recipe.
+  # 1.58 builds CLAT by default (runtime opt-in); retain it rather than disabling
+  # new features just to reuse the older Nixpkgs recipe.
   buildInputs = old.buildInputs ++ [
     pkgs.libbpf
     pkgs.slang
@@ -83,11 +103,11 @@ pkgs.networkmanager.overrideAttrs (old: {
     substituteInPlace src/core/bpf/meson.build \
       --replace-fail "find_program('clang'," "find_program('${bpfClang}',"
   '';
-  # Only this pure upstream suite: the full suite requires privileged networking.
+  # Pure upstream suites: the full suite requires privileged networking.
   doCheck = true;
   checkPhase = ''
     runHook preCheck
-    meson test --no-rebuild --print-errorlogs supplicant/test-supplicant-config
+    meson test --no-rebuild --print-errorlogs supplicant/test-supplicant-config test-devices-wifi
     runHook postCheck
   '';
   postInstall = (old.postInstall or "") + ''
