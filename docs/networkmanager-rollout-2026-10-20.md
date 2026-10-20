@@ -55,8 +55,33 @@ in `/etc/nixos/configuration.nix` must be preserved and excluded from our commit
   and full rerun passed without changed deadlines/retries/assertions.
 - Local logs: `/tmp/nm-upgrade-stage3-{packages,tests-rerun,clippy}.log`.
 
-## Remaining stages
+## Stage 4 — compatibility gates
 
-4. Full compatibility, enterprise, migration and credential-storage/writer gates.
+Full frozen-graph `nix flake check --no-update-lock-file --keep-going
+--max-jobs 2 --cores 8 --print-build-logs`: **all checks passed**.
+
+- All six minimum/stable/development × wpa_supplicant/IWD combinations passed,
+  including owner recovery, real activation, QR, editing and Cast enforcement.
+- All three native credential-storage VMs and all three actual writer/runtime
+  VMs passed, including full VM shutdown/start and cold read-back without agents.
+- Enterprise PEAP, ifcfg migration, Cast policy, discovery module, preflight and
+  parity-probe checks passed. The production Rust package passed **95 tests**,
+  with three existing ignored tests.
+- The first aggregate attempt failed on the existing 800-ms credential-retirement
+  fixture (`expected a live credential request`). Rebuilding the unchanged
+  package passed; rerunning the complete aggregate passed. No tests, deadlines
+  or assertions were disabled/relaxed. This remains a test-flakiness risk, not a
+  claimed fix. The VM Python Secret Service trap also logs a harmless destructor
+  warning when its private bus has already closed; its zero-call assertion passes.
+- Tested root: `/nix/store/qmsz27vnksidkg05yirnm1lc1kdh040j-source`.
+  Shared framework revision: `d80678cbf14c41803700fbb1b4a727f2a2b44764`;
+  snapshot: `/nix/store/la2gcifv48hbpg43x60cyfzv4bfpb84f-source`.
+- Daemon output: `/nix/store/iq6j0vbgsq3p0mhcndxqr01vaicfnpdb-nm-daemon-0.1.0`.
+- Logs: `/tmp/nm-upgrade-stage4-check.log` (first attempt),
+  `/tmp/nm-upgrade-stage4-package-rerun.log`,
+  `/tmp/nm-upgrade-stage4-check-rerun.log` (successful aggregate).
+
+## Remaining stage
+
 5. NixOS configuration/build/switch and verification of both running executables,
    with a recorded rollback generation. Deployment requires root authorization.
