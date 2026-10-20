@@ -81,6 +81,39 @@ Full frozen-graph `nix flake check --no-update-lock-file --keep-going
   `/tmp/nm-upgrade-stage4-package-rerun.log`,
   `/tmp/nm-upgrade-stage4-check-rerun.log` (successful aggregate).
 
+## Stage 4 follow-up — validation while deployment is blocked
+
+- Extended all six compatibility VMs with real NM IPv6 DNS reporting: two
+  servers through both direct CLI and persistent-daemon status, checked against
+  nmcli; repeat after NM restart, then clear/reapply IPv6 DNS and require an
+  empty live list with IPv4 DNS and the active connection preserved. These are
+  reporting checks, not DNS reachability tests.
+- Added a cheap client/export/fixture interface agreement gate with six negative
+  drift cases, plus an isolated NixOS module gate for stable selection, explicit
+  package override, no implicit service enablement and discovery coexistence.
+- Initial fixture development exposed a test-only parsing mistake: `nmcli -g`
+  joins multiple values with ` | `, not newlines. The adapter's reported lists
+  were already correct. Corrected the assertion and added failure diagnostics;
+  no production code or existing test deadlines/assertions were changed.
+- Final stable/wpa_supplicant smoke test and the full frozen-graph aggregate
+  passed: **all 21 checks**, including all six enhanced compatibility VMs and
+  the existing storage/writer/enterprise/migration/Cast gates. The rebuilt Rust
+  package passed **95 tests, 3 ignored** without a retry in this final run.
+- Shared framework work changed during preparation; this run uses its immutable
+  snapshot `/nix/store/nid9dizybj7mj6ffs217yrpmrp03zdy9-source`, including concurrent
+  edits, not merely the earlier clean framework revision. No framework files
+  were modified or committed by this task.
+- Tested root: `/nix/store/1xlnq1qchpvii8lmyghrinsxi4m6phkz-source`.
+  Daemon output: `/nix/store/gf34mqxiclhr3viwhr4j7zwsfsjj76bw-nm-daemon-0.1.0`.
+  The stable/development NM outputs remain those recorded above.
+- Logs: `/tmp/nm-upgrade-validation-dns-smoke.log` and
+  `/tmp/nm-upgrade-validation-dns-check.log`; both exit files contain **0**.
+- Added the [deployment/rollback checklist](networkmanager-deployment-checklist.md);
+  all seven shell blocks passed syntax-only validation. None was executed as a
+  deployment. Host services/profiles remain unchanged. The final host rebuild
+  must check its exact frozen graph and retest changed component outputs; this
+  result is not permission to reuse tests for later framework edits.
+
 ## Remaining stage
 
 5. NixOS configuration/build/switch and verification of both running executables,

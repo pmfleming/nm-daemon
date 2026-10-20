@@ -171,6 +171,8 @@
         }) (builtins.attrNames targets))
         // {
           package = self.packages.${system}.default;
+          compatibilityContract = import ./nix/tests/compatibility-contract.nix { inherit pkgs; };
+          networkManagerModule = import ./nix/tests/networkmanager-module.nix { inherit self pkgs nixpkgs; };
           discoveryModule = let
             evaluate = settings: (nixpkgs.lib.nixosSystem {
               inherit system;

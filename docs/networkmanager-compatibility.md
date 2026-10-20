@@ -32,6 +32,9 @@ of full historical reproducibility.
 # One combination (replace stable with minimum/development, backend with iwd):
 ../daemon-framework/tools/local-build build \
   --attr checks.x86_64-linux.compat-stable-wpa_supplicant . --no-link
+# Cheap source-interface and opt-in package/module contracts:
+../daemon-framework/tools/local-build build --attr checks.x86_64-linux.compatibilityContract . --no-link
+../daemon-framework/tools/local-build build --attr checks.x86_64-linux.networkManagerModule . --no-link
 # Additional focused checks:
 ../daemon-framework/tools/local-build build --attr checks.x86_64-linux.enterprise . --no-link
 ../daemon-framework/tools/local-build build --attr checks.x86_64-linux.migration . --no-link
@@ -45,7 +48,11 @@ or silently skipped integration gate.
 
 - All six combinations: strict scan, real WPA activation through nm-daemon,
   exact hex-only saved-profile QR output, signed profile edit/readback, version
-  diagnosis, and hotspot capability reporting. A startup scan timeout may be
+  diagnosis, and hotspot capability reporting. IPv4 and two IPv6 DNS servers are
+  checked against nmcli through both direct CLI and persistent-daemon status,
+  again after NM restart, and after clearing/reapplying IPv6 DNS without a
+  disconnect (IPv4 must remain unchanged). These are reporting tests, not DNS
+  server reachability tests. A startup scan timeout may be
   retried once (30 seconds each); successful cached/non-strict fallback is not
   accepted, and nmcli discovery polling does not trigger competing scans.
 - All six: leave nm-daemon running while NM stops/starts; observe SecretAgent

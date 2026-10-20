@@ -39,6 +39,10 @@ assignment takes precedence over the compatibility module's default, so inspect
 the evaluated host configuration before deployment. Updating this repository's
 lock file or rebuilding the user daemon does not upgrade the host service.
 
+Use the [coordinated deployment checklist](networkmanager-deployment-checklist.md)
+for frozen-source checks, actual-process verification and rollback. It is a
+runbook, not evidence that the host has been switched.
+
 Before switching:
 
 1. Record both `NetworkManager --version` and the running D-Bus `Version` property

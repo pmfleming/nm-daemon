@@ -121,14 +121,42 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed("stat -c '%u:%a' /var/lib/iwd/MirrorOnly.psk").strip() == "0:600"
         machine.succeed("nmcli connection delete mirror-only")
 
+    dns4 = ["192.0.2.53"]
+    dns6 = ["2001:db8:1::53", "2001:db8:1::54"]
+
+    def check_dns(expected6):
+        # Real NM IP6Config exposes Nameservers (aay), not NameserverData.
+        # Check the direct adapter AND the running daemon's status cache.
+        predicate = (
+            '.ok and .data.status.active and .data.status.device_iface == "wlan0"'
+            + ' and .data.status.ip4.dns == ' + json.dumps(dns4)
+            + ' and .data.status.ip6.dns == ' + json.dumps(expected6)
+        )
+        for command in [
+            "nm-daemon --direct wifi status",
+            call_command("wifi.status") + " | jq -r '.data[0]'",
+        ]:
+            machine.wait_until_succeeds(command + " | jq -e " + shlex.quote(predicate), timeout=15)
+        # Independently verify the effective backend data, not just our output.
+        # nmcli -g uses tabular output: arrays are joined by " | ", not newlines.
+        effective4 = machine.succeed("nmcli --escape no -g IP4.DNS device show wlan0").strip()
+        effective6 = machine.succeed("nmcli --escape no -g IP6.DNS device show wlan0").strip()
+        assert effective4 == " | ".join(dns4), (effective4, dns4)
+        assert effective6 == " | ".join(expected6), (effective6, expected6)
+
     request = {
         "ssid": "CAFE", "ifname": "wlan0",
         "key_mgmt": "wpa-psk", "connection_name": "compatibility-test",
-        "profile": {"autoconnect": False, "ipv4": {"method": "manual", "addresses": [{"address": "192.0.2.2", "prefix": 24}]}, "ipv6": {"method": "disabled"}},
+        "profile": {
+            "autoconnect": False,
+            "ipv4": {"method": "manual", "addresses": [{"address": "192.0.2.2", "prefix": 24}], "dns": dns4, "ignore_auto_dns": True},
+            "ipv6": {"method": "manual", "addresses": [{"address": "2001:db8:1::2", "prefix": 64}], "dns": dns6, "ignore_auto_dns": True},
+        },
     }
     machine.succeed("install -d -m700 /run/nm-test; printf %s " + shlex.quote(json.dumps({"target": request, "password": "ABCD1234"})) + " > /run/nm-test/request.json; chmod 600 /run/nm-test/request.json")
     machine.succeed("nm-daemon --direct wifi connect-target < /run/nm-test/request.json", timeout=90)
     machine.succeed("nmcli -g GENERAL.STATE device show wlan0 | grep -q '^100 '")
+    check_dns(dns6)
     profile = machine.succeed("nmcli -g GENERAL.CON-PATH connection show compatibility-test").strip()
     payload = json.loads(machine.succeed("nm-daemon --direct wifi profile share " + profile))["data"]["payload"]
     assert payload["qr_payload"] == "WIFI:T:WPA;S:CAFE;P:ABCD1234;;", payload
@@ -156,9 +184,15 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds(registered)
     assert machine.succeed("systemctl show -p MainPID --value compat-test-daemon").strip() == daemon_pid
     machine.succeed("nmcli --wait 30 connection up compatibility-test")
+    check_dns(dns6)
     profile = machine.succeed("nmcli -g GENERAL.CON-PATH connection show compatibility-test").strip()
     machine.succeed("nm-daemon --direct wifi profile casting " + profile + " false")
     machine.fail("nft list set inet nm_cast_policy enabled | grep -q wlan0")
+    # Clearing DNS must invalidate both live status paths without disconnecting
+    # Wi-Fi or resurrecting stale IPv6 servers. IPv4 DNS must remain intact.
+    machine.succeed('nmcli connection modify compatibility-test ipv6.dns ""')
+    machine.succeed("nmcli device reapply wlan0")
+    check_dns([])
     if "${backend}" == "wpa_supplicant":
         # Pending generic activation interruption, fresh prompt and deactivation.
         # IWD retains its own known-network secrets: do not pretend this fixture
