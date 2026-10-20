@@ -121,6 +121,8 @@ const DEVICE_REASONS: &[ReasonSpec] = &[
     ("unmanaged-user-explicit", C::Lifecycle),
     ("unmanaged-user-settings", C::Lifecycle),
     ("unmanaged-user-udev", C::Lifecycle),
+    ("networking-off", C::Lifecycle),
+    ("modem-no-operator-code", C::Service),
 ];
 
 // VPN reasons 0..=11 intentionally share NetworkManager's active-connection
@@ -192,5 +194,30 @@ impl TypedReason {
     /// True when the transition was expected rather than a failure.
     pub(crate) fn expected(self) -> bool {
         matches!(self.category, C::None | C::UserRequested)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_device_reasons_preserve_numeric_identity_and_unknown_fallback() {
+        for (code, name, category) in [
+            (77, "unmanaged-user-udev", C::Lifecycle),
+            (78, "networking-off", C::Lifecycle),
+            (79, "modem-no-operator-code", C::Service),
+            (80, "unknown", C::Unknown),
+            (u32::MAX, "unknown", C::Unknown),
+        ] {
+            assert_eq!(
+                device_state_reason(code),
+                TypedReason {
+                    code,
+                    name,
+                    category
+                }
+            );
+        }
     }
 }

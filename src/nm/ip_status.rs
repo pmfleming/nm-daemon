@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Context, Result};
 use zbus::blocking::Proxy;
@@ -37,13 +37,22 @@ impl Nm {
         let addresses = address_entries(&config);
         let gateway =
             nonempty_string(&config, "Gateway").or_else(|| default_route_next_hop(&routes));
-        let dns = nameserver_entries(&config).unwrap_or_else(|| match family {
-            IpFamily::V4 => config
-                .get_property::<Vec<u32>>("Nameservers")
-                .map(|values| values.into_iter().map(legacy_ipv4).collect())
-                .unwrap_or_default(),
-            IpFamily::V6 => Vec::new(),
-        });
+        let dns = match family {
+            IpFamily::V4 => nameserver_entries(&config).unwrap_or_else(|| {
+                config
+                    .get_property::<Vec<u32>>("Nameservers")
+                    .map(|values| values.into_iter().map(legacy_ipv4).collect())
+                    .unwrap_or_default()
+            }),
+            // IP6Config has no NameserverData property: its ABI is aay.
+            IpFamily::V6 => config
+                .get_property::<Vec<Vec<u8>>>("Nameservers")
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|bytes| <[u8; 16]>::try_from(bytes).ok())
+                .map(|bytes| Ipv6Addr::from(bytes).to_string())
+                .collect(),
+        };
         Ok(Some(IpStatus {
             address: addresses.first().map(|entry| entry.address.clone()),
             prefix: addresses.first().map(|entry| entry.prefix),
@@ -170,3 +179,6 @@ fn string_list(config: &Proxy<'_>, name: &str) -> Vec<String> {
 fn legacy_ipv4(value: u32) -> String {
     Ipv4Addr::from(u32::from_be(value)).to_string()
 }
+
+#[cfg(test)]
+mod tests;

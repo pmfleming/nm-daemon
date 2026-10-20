@@ -487,6 +487,8 @@ fn device_type_name(value: u32) -> &'static str {
         31 => "vrf",
         32 => "loopback",
         33 => "hsr",
+        34 => "ipvlan",
+        35 => "geneve",
         _ => "unknown",
     }
 }
@@ -553,7 +555,8 @@ pub(super) fn active_connection_state_name(value: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveConnectionSelector, ProfileSelector, select_active_connection, select_profile,
+        ActiveConnectionSelector, ProfileSelector, device_type_name, select_active_connection,
+        select_profile,
     };
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::{ActiveConnectionSummary, NetworkConnectionSummary};
@@ -592,6 +595,13 @@ mod tests {
             devices: vec!["/devices/1".to_string()],
         }
     }
+    #[test]
+    fn current_device_types_keep_unknown_fallback() {
+        for (code, name) in [(33, "hsr"), (34, "ipvlan"), (35, "geneve"), (36, "unknown")] {
+            assert_eq!(device_type_name(code), name);
+        }
+    }
+
     #[test]
     fn profile_selection_reports_typed_validation_and_not_found_errors() {
         for (path, uuid, exists) in [
