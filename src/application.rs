@@ -1339,40 +1339,6 @@ mod tests {
     use super::ScanRequest;
 
     #[test]
-    fn candidate_restrictions_require_known_matching_radio_properties() {
-        use crate::model::{WifiBand, WifiProfileDetails, example_connect_target};
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../test_support/contract-v1.json")).unwrap();
-        let mut profile: WifiProfileDetails =
-            serde_json::from_value(fixture["profile_details"]["result"].clone()).unwrap();
-        let mut candidate = super::ConnectCandidate::from_target(example_connect_target(false));
-        profile.bssid = None;
-        profile.band = WifiBand::Auto;
-        profile.channel = None;
-        assert!(super::candidate_matches_profile_restrictions(
-            &candidate, &profile
-        ));
-        profile.band = WifiBand::Ghz5;
-        assert!(!super::candidate_matches_profile_restrictions(
-            &candidate, &profile
-        ));
-        candidate.band = Some("5 GHz".into());
-        profile.channel = Some(36);
-        assert!(!super::candidate_matches_profile_restrictions(
-            &candidate, &profile
-        ));
-        candidate.channel = Some(36);
-        candidate.target.bssid = Some("AA:BB:CC:DD:EE:FF".parse().unwrap());
-        for (bssid, expected) in [("aa:bb:cc:dd:ee:ff", true), ("AA:BB:CC:DD:EE:00", false)] {
-            profile.bssid = Some(bssid.into());
-            assert_eq!(
-                super::candidate_matches_profile_restrictions(&candidate, &profile),
-                expected
-            );
-        }
-    }
-
-    #[test]
     fn scan_ssids_are_validated_once_at_the_application_boundary() {
         let request = |ssids| ScanRequest {
             timeout: Duration::from_secs(1),

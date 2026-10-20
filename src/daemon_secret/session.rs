@@ -34,10 +34,7 @@ pub(super) fn stage(owner: &str, path: &str, connection: &ConnectionSettings) {
     let Some(uuid) = uuid(connection) else { return };
     let mut values = HashMap::<String, Vec<_>>::new();
     for (setting, key, password) in connection_secret_values(connection) {
-        values
-            .entry(setting)
-            .or_default()
-            .push((key, password));
+        values.entry(setting).or_default().push((key, password));
     }
     access(|cache| {
         cache.entries.retain(|(_, p, _), _| p != path);

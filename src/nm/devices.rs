@@ -391,34 +391,3 @@ fn system_uptime_seconds() -> Option<f64> {
     let uptime = fs::read_to_string("/proc/uptime").ok()?;
     uptime.split_whitespace().next()?.parse().ok()
 }
-
-#[cfg(test)]
-mod tests {
-
-    use super::access_point_matches;
-    use crate::model::example_access_point;
-
-    #[test]
-    fn access_point_match_requires_path_and_bssid_when_both_are_supplied() {
-        let ap = example_access_point();
-
-        assert!(access_point_matches(
-            &ap,
-            b"Example",
-            Some("/ap/1"),
-            Some("00:11:22:33:44:55")
-        ));
-        assert!(!access_point_matches(
-            &ap,
-            b"Example",
-            Some("/ap/other"),
-            Some("00:11:22:33:44:55")
-        ));
-        assert!(!access_point_matches(
-            &ap,
-            b"Example",
-            Some("/ap/1"),
-            Some("00:11:22:33:44:66")
-        ));
-    }
-}

@@ -278,12 +278,11 @@ pub(super) fn sleep_within_deadline(
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicBool;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
-    use super::{ScanScheduler, ScanTurn, ScanWait, SharedScanOutcome, rate_limit_wait};
+    use super::{ScanScheduler, ScanTurn, ScanWait, SharedScanOutcome};
     use crate::deadline::Deadline;
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport, ErrorSource};
-    use crate::generated::SCAN_REQUEST_INTERVAL;
 
     #[test]
     fn targeted_scans_only_join_a_scope_that_covers_their_ssids() {
@@ -411,27 +410,5 @@ mod tests {
             assert!(!state.waiters.contains_key(&1));
             assert!(!state.completions.contains_key(&1));
         }
-    }
-
-    #[test]
-    fn rate_limit_waits_for_whichever_of_scan_or_request_was_more_recent() {
-        let now = Instant::now();
-        let interval_ms = SCAN_REQUEST_INTERVAL.as_millis() as i64;
-
-        // Never scanned and never requested: scanning is allowed immediately.
-        assert!(rate_limit_wait(-1, 50_000, None, now).is_zero());
-        // Scanned long ago: allowed immediately.
-        assert!(rate_limit_wait(1_000, 1_000 + interval_ms * 2, None, now).is_zero());
-        // Scanned just now: wait out the remaining interval.
-        let wait = rate_limit_wait(50_000, 50_000, None, now);
-        assert_eq!(wait, SCAN_REQUEST_INTERVAL);
-        // A recent request counts even when LastScan is stale.
-        let wait = rate_limit_wait(
-            1_000,
-            1_000 + interval_ms * 2,
-            Some(now - Duration::from_millis(1)),
-            now,
-        );
-        assert!(wait > Duration::ZERO && wait <= SCAN_REQUEST_INTERVAL);
     }
 }

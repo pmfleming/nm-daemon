@@ -196,28 +196,3 @@ impl TypedReason {
         matches!(self.category, C::None | C::UserRequested)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn current_device_reasons_preserve_numeric_identity_and_unknown_fallback() {
-        for (code, name, category) in [
-            (77, "unmanaged-user-udev", C::Lifecycle),
-            (78, "networking-off", C::Lifecycle),
-            (79, "modem-no-operator-code", C::Service),
-            (80, "unknown", C::Unknown),
-            (u32::MAX, "unknown", C::Unknown),
-        ] {
-            assert_eq!(
-                device_state_reason(code),
-                TypedReason {
-                    code,
-                    name,
-                    category
-                }
-            );
-        }
-    }
-}

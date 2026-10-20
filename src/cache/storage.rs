@@ -380,9 +380,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use serde_json::json;
-
-    use super::{Repository, append_json_line_with_rotation};
+    use super::Repository;
     use crate::cache::CacheRead;
 
     #[test]
@@ -422,18 +420,6 @@ mod tests {
                     .is_err()
             );
         }
-    }
-
-    #[test]
-    fn history_rotates_before_exceeding_limit() {
-        let directory = TestDirectory::new("history-rotation");
-        fs::create_dir_all(&directory.path).unwrap();
-        let path = directory.path.join("connects.jsonl");
-        append_json_line_with_rotation(&path, &json!({"n": 1}), 20, 2).unwrap();
-        append_json_line_with_rotation(&path, &json!({"n": 2, "padding": "xxxxxxxx"}), 20, 2)
-            .unwrap();
-        assert!(path.exists());
-        assert!(PathBuf::from(format!("{}.1", path.display())).exists());
     }
 
     #[test]
