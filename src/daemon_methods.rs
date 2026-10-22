@@ -202,6 +202,9 @@ pub(crate) fn call_profile_operation(
             let result = crate::forget::execute(runtime, request_id, target)?;
             return serialize_forget_result(&result);
         }
+        ProfileOperationParams::SetRemember { path, enabled } => {
+            ProfileOperation::SetRemember { path, enabled }
+        }
         ProfileOperationParams::SetAutoconnect { path, enabled } => {
             ProfileOperation::SetAutoconnect { path, enabled }
         }
@@ -294,6 +297,10 @@ pub(crate) enum ProfileOperationParams {
         key: Option<String>,
         #[serde(default)]
         target: Option<Box<WifiConnectTarget>>,
+    },
+    SetRemember {
+        path: NmObjectPath,
+        enabled: bool,
     },
     SetAutoconnect {
         path: NmObjectPath,

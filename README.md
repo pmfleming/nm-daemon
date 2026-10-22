@@ -103,7 +103,7 @@ Forwarded today:
 - `nm-daemon wifi disconnect`
 - `nm-daemon wifi profile delete|autoconnect|casting|mac-randomization|share|send-hostname ...`
 
-The D-Bus/JSONL profile-operation API additionally exposes advanced profile details, updates, and secret reveal for frontends; these are intentionally not argv-oriented CLI commands.
+The D-Bus/JSONL profile-operation API additionally exposes advanced profile details, updates, secret reveal and `set-remember` for frontends; these are intentionally not argv-oriented CLI commands. [Profile retention](docs/profile-retention.md) documents native deletion on disconnect, explicit opt-in, acknowledgement and safety boundaries.
 
 Current Wi-Fi commands:
 

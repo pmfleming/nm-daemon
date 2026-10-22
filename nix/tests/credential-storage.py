@@ -278,6 +278,34 @@ def native(agent):
     wait(lambda: once_path not in settings_service.ListConnections())
     assert not any("use-once" in p.name for p in KEYFILES.iterdir())
 
+    # Remember off is a lifetime change of the actual profile, not a clone.
+    # NM owns deletion even after the requesting client exits. On before
+    # disconnect cancels retirement and preserves its credentials.
+    retained = add(profile("storage-retention"))
+    active = activate(retained)
+    original_file = pathlib.Path(str(properties(retained).Get(CI, "Filename")))
+    empty = dbus.Dictionary({}, signature="sa{sv}")
+    update(retained, empty, flags=0x2 | 0x10 | 0x20 | 0x40)
+    assert int(properties(retained).Get(CI, "Flags")) & 4
+    assert properties(active).Get(NM + ".Connection.Active", "State") == 2
+    assert original_file.exists(), "disk backing stays until disconnect"
+    update(retained, empty, flags=1)
+    assert not int(properties(retained).Get(CI, "Flags")) & 4
+    assert disk(retained)["wifi-security"]["psk"] == SECRET
+    manager.DeactivateConnection(active)
+    wait(lambda: active not in properties(ROOT).Get(NM, "ActiveConnections"))
+    assert retained in settings_service.ListConnections()
+    active = activate(retained)
+    update(retained, empty, flags=0x2 | 0x10 | 0x20 | 0x40)
+    manager.DeactivateConnection(active)
+    wait(lambda: retained not in settings_service.ListConnections())
+    assert not original_file.exists(), "native retirement must remove the original disk backing too"
+    inactive = add(profile("storage-retention-inactive"))
+    inactive_file = pathlib.Path(str(properties(inactive).Get(CI, "Filename")))
+    update(inactive, empty, flags=0x2 | 0x10 | 0x20 | 0x40)
+    wait(lambda: inactive not in settings_service.ListConnections())
+    assert not inactive_file.exists()
+
     # Native activation can succeed while its disk write fails. Explicit
     # TO_DISK acknowledgment must therefore be part of any 'stored' outcome.
     readonly = add(profile("storage-readonly"))
@@ -302,6 +330,8 @@ def native(agent):
 def verify_cold():
     paths = {str(connection(p).GetSettings()["connection"]["id"]): p for p in settings_service.ListConnections()}
     assert "storage-use-once" not in paths
+    assert "storage-retention" not in paths
+    assert "storage-retention-inactive" not in paths
     assert secrets(paths["storage-persistent"], SEC)[SEC]["psk"] == SECRET
     assert no_disk_psk(paths["storage-not-saved"])
     assert no_disk_psk(paths["storage-readonly"])

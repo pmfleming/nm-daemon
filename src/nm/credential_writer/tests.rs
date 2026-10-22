@@ -8,6 +8,9 @@ use super::*;
 use crate::test_support::{TestPeer, workflows::isolated};
 use crate::variant::value_map;
 
+#[path = "retention_tests.rs"]
+mod retention_tests;
+
 const PATH: &str = "/test/profile";
 struct State {
     public: ConnectionSettings,
@@ -22,6 +25,10 @@ struct State {
     reads: usize,
     writes: usize,
     written: Option<ConnectionSettings>,
+    retention_flags: u32,
+    active: bool,
+    deleted: bool,
+    update_flags: u32,
 }
 struct Manager(Arc<Mutex<State>>);
 #[zbus::interface(name = "org.freedesktop.NetworkManager")]
@@ -29,6 +36,17 @@ impl Manager {
     #[zbus(property)]
     fn version(&self) -> String {
         self.0.lock().unwrap().nm_version.clone()
+    }
+}
+struct Settings(Arc<Mutex<State>>);
+#[zbus::interface(name = "org.freedesktop.NetworkManager.Settings")]
+impl Settings {
+    fn list_connections(&self) -> Vec<OwnedObjectPath> {
+        if self.0.lock().unwrap().deleted {
+            vec![]
+        } else {
+            vec![PATH.try_into().unwrap()]
+        }
     }
 }
 struct Profile(Arc<Mutex<State>>);
@@ -48,6 +66,10 @@ impl Profile {
     #[zbus(property(emits_changed_signal = "false"))]
     fn filename(&self) -> String {
         self.0.lock().unwrap().filename.clone()
+    }
+    #[zbus(property(emits_changed_signal = "false"))]
+    fn flags(&self) -> u32 {
+        self.0.lock().unwrap().retention_flags
     }
     fn get_secrets(&self, _section: &str) -> zbus::fdo::Result<ConnectionSettings> {
         let mut s = self.0.lock().unwrap();
@@ -71,13 +93,32 @@ impl Profile {
     ) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {
         let mut s = self.0.lock().unwrap();
         s.writes += 1;
-        assert!(flags == 1 || flags == 33, "explicit TO_DISK required");
+        assert!(
+            flags == 1 || flags == 33 || flags == 114,
+            "explicit persistence mode required"
+        );
         assert_eq!(u64::try_from(&args["version-id"]).unwrap(), s.version);
         assert_ne!(s.version, 0);
         if s.fail_write {
             return Err(zbus::fdo::Error::Failed(
                 "do-not-log-synthetic-value".into(),
             ));
+        }
+        s.update_flags = flags;
+        if flags & 16 != 0 {
+            assert!(
+                settings.is_empty(),
+                "retention must preserve NM's credential cache natively"
+            );
+            s.retention_flags = 5;
+            s.dirty = true;
+            s.filename = "/run/NetworkManager/system-connections/fixture.nmconnection".into();
+            s.deleted = !s.active;
+        } else {
+            s.retention_flags = 0;
+            s.dirty = false;
+            s.filename = "/etc/NetworkManager/system-connections/fixture.nmconnection".into();
+            s.public = crate::network_credentials::public_settings(&settings).unwrap();
         }
         s.written = Some(settings);
         s.version += 1;
@@ -101,6 +142,10 @@ impl Harness {
                         ("id", "fixture".into()),
                         ("type", "802-11-wireless".into()),
                     ])?,
+                ),
+                (
+                    "802-11-wireless".into(),
+                    HashMap::from([("ssid".into(), owned_value(b"fixture".to_vec())?)]),
                 ),
                 (
                     "802-1x".into(),
@@ -128,6 +173,10 @@ impl Harness {
             reads: 0,
             writes: 0,
             written: None,
+            retention_flags: 0,
+            active: true,
+            deleted: false,
+            update_flags: 0,
         }));
         let peer = TestPeer::new(":1.0", ":1.1");
         peer.server
@@ -136,6 +185,9 @@ impl Harness {
         peer.server
             .object_server()
             .at(PATH, Profile(state.clone()))?;
+        peer.server
+            .object_server()
+            .at(crate::nm::SETTINGS_PATH, Settings(state.clone()))?;
         let nm = Nm::with_connection_runner_destination_and_telemetry(
             peer.client.clone(),
             crate::command::default_runner(),

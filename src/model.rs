@@ -516,6 +516,9 @@ pub(crate) struct SavedWifiConnection {
     pub(crate) ssid: String,
     /// Exact SSID bytes used for identity/matching.
     pub(crate) ssid_bytes: Vec<u8>,
+    /// Native retention state; absent when the backend cannot verify it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) remember: Option<bool>,
     pub(crate) autoconnect: bool,
     /// Whether this profile explicitly permits mDNS discovery used by casting devices.
     /// Inherited policy is reported as disabled, matching the required host mdns=0
@@ -1441,6 +1444,8 @@ fn profiles_for_access_point_group(
     let mut seen_paths = std::collections::BTreeSet::new();
     access_points
         .iter()
+        .filter(|ap| ap.active)
+        .chain(access_points.iter().filter(|ap| !ap.active))
         .filter_map(|access_point| profile_matches_by_ap_path.get(&access_point.path))
         .flatten()
         .filter(|profile| seen_paths.insert(profile.path.as_str()))

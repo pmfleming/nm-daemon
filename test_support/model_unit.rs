@@ -6,6 +6,38 @@ use super::{
 };
 
 #[test]
+fn active_profile_precedes_compatible_profiles_from_other_bssids() {
+    let mut inactive = test_ap(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_PSK);
+    inactive.path = "/ap/1".into();
+    inactive.active = false;
+    let mut active = inactive.clone();
+    active.path = "/ap/2".into();
+    active.active = true;
+    let saved = SavedWifiConnection {
+        path: "/profile/saved".into(),
+        id: "Example".into(),
+        ssid: "Example".into(),
+        ssid_bytes: b"Example".to_vec(),
+        remember: Some(true),
+        autoconnect: true,
+        casting_enabled: false,
+        privacy: ProfilePrivacy::default(),
+    };
+    let mut temporary = saved.clone();
+    temporary.path = "/profile/active".into();
+    temporary.remember = Some(false);
+    let matches = std::collections::BTreeMap::from([
+        (inactive.path.clone(), vec![saved.clone()]),
+        (active.path.clone(), vec![temporary, saved]),
+    ]);
+    let entries = network_entries_with_profile_matches(vec![inactive, active], &matches);
+    assert_eq!(entries.len(), 1);
+    let profile = entries[0].primary_profile.as_ref().unwrap();
+    assert_eq!(profile.path, "/profile/active");
+    assert_eq!(profile.remember, Some(false));
+}
+
+#[test]
 fn network_groups_preserve_device_security_and_compatible_profile_boundaries() {
     let mut primary = test_ap(NM_AP_FLAGS_PRIVACY, 0, NM_AP_SEC_KEY_MGMT_PSK);
     primary.path = "/ap/1".into();
@@ -21,6 +53,7 @@ fn network_groups_preserve_device_security_and_compatible_profile_boundaries() {
         id: "Example".into(),
         ssid: "Example".into(),
         ssid_bytes: b"Example".to_vec(),
+        remember: Some(true),
         autoconnect: true,
         casting_enabled: false,
         privacy: ProfilePrivacy::default(),

@@ -553,6 +553,9 @@ impl<'a> Application<'a> {
                 );
                 "Saved Wi-Fi profile deleted"
             }
+            ProfileOperation::SetRemember { path, enabled } => self
+                .nm
+                .set_connection_remember_by_path(path.as_str(), enabled)?,
             ProfileOperation::SetAutoconnect { path, enabled } => {
                 self.nm
                     .set_connection_autoconnect_by_path(path.as_str(), enabled)?;
@@ -913,6 +916,10 @@ pub(crate) enum ProfileOperation {
     },
     Delete {
         path: NmObjectPath,
+    },
+    SetRemember {
+        path: NmObjectPath,
+        enabled: bool,
     },
     SetAutoconnect {
         path: NmObjectPath,

@@ -1349,6 +1349,7 @@ fn contract_profile() -> SavedWifiConnection {
         id: "Example".to_string(),
         ssid: "Example".to_string(),
         ssid_bytes: b"Example".to_vec(),
+        remember: Some(true),
         autoconnect: true,
         casting_enabled: false,
         privacy: ProfilePrivacy {

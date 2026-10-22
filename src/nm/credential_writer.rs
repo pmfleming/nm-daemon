@@ -19,10 +19,23 @@ pub(super) struct ProfileEdit {
     uuid: String,
     owner: String,
     path: OwnedObjectPath,
+    explicit_remember: bool,
 }
 
 impl Nm {
     pub(super) fn begin_credential_edit(&self, path: &OwnedObjectPath) -> Result<ProfileEdit> {
+        self.begin_profile_edit(path, false)
+    }
+
+    pub(super) fn begin_remember_edit(&self, path: &OwnedObjectPath) -> Result<ProfileEdit> {
+        self.begin_profile_edit(path, true)
+    }
+
+    fn begin_profile_edit(
+        &self,
+        path: &OwnedObjectPath,
+        explicit_remember: bool,
+    ) -> Result<ProfileEdit> {
         let owner = self.current_owner()?;
         ensure!(
             self.destination() == owner,
@@ -44,7 +57,11 @@ impl Nm {
         let unsaved: bool = proxy.get_property("Unsaved")?;
         let filename: String = proxy.get_property("Filename")?;
         ensure!(
-            !unsaved && filename.starts_with("/etc/NetworkManager/system-connections/"),
+            (!unsaved && filename.starts_with("/etc/NetworkManager/system-connections/"))
+                || (explicit_remember
+                    && proxy.get_property::<u32>("Flags")? & 4 != 0
+                    && (filename.is_empty()
+                        || filename.starts_with("/run/NetworkManager/system-connections/"))),
             "refusing implicit persistence of temporary, staged or unsupported-location profiles"
         );
         ensure!(
@@ -58,6 +75,7 @@ impl Nm {
             uuid,
             owner,
             path: path.clone(),
+            explicit_remember,
         })
     }
 
@@ -83,7 +101,7 @@ impl Nm {
             "profile identity changed; edit cancelled"
         );
         validate_policy_changes(&edit.original, &edit.settings)?;
-        if has_secrets(&edit.settings) {
+        if has_secrets(&edit.settings) || edit.explicit_remember {
             let running: String = self.root_proxy().get_property("Version")?;
             ensure!(
                 crate::networkmanager_compatibility::validated_storage_version(&running),
@@ -134,13 +152,28 @@ impl Nm {
             // public/nested peer settings. Unknown structures fail closed.
             merge_secrets(&mut edit.settings, &patch)?;
         }
+        if edit.explicit_remember {
+            // Explicit opt-in may retain cached one-time credentials. Never change
+            // ownership or NOT_REQUIRED, nor invent a missing optional credential.
+            for (section, key, _) in crate::network_credentials::values(&edit.settings)? {
+                let old = flags(&edit.settings, &section, &key)?;
+                ensure!(
+                    old & AGENT_OWNED == 0,
+                    "agent-owned credentials require explicit migration"
+                );
+                edit.settings.get_mut(&section).unwrap().insert(
+                    crate::network_credentials::flags_key(&key),
+                    owned_value(old & !NOT_SAVED)?,
+                );
+            }
+        }
         ensure!(
             self.current_owner()? == edit.owner
                 && proxy.get_property::<u64>("VersionId")? == edit.version,
             "profile changed while preserving credentials; no update attempted"
         );
         ensure!(
-            !proxy.get_property::<bool>("Unsaved")?,
+            edit.explicit_remember || !proxy.get_property::<bool>("Unsaved")?,
             "profile has staged edits; no update attempted"
         );
         let flags = 1u32 | if block_autoconnect { 0x20 } else { 0 }; // TO_DISK

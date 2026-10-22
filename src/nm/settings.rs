@@ -10,6 +10,7 @@ mod profile_advanced;
 #[cfg(test)]
 mod profile_listing_tests;
 pub(crate) mod profile_secrets;
+mod retention;
 
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
 use crate::model::{
@@ -280,7 +281,8 @@ impl Nm {
             let Some(settings) = self.connection_settings_if_present(&path)? else {
                 continue;
             };
-            if let Some(connection) = saved_wifi_connection_from_settings(&path, &settings) {
+            if let Some(mut connection) = saved_wifi_connection_from_settings(&path, &settings) {
+                connection.remember = self.connection_remembered(&path).ok();
                 connections.push(connection);
             }
         }
@@ -351,7 +353,10 @@ impl Nm {
             let Some(settings) = self.connection_settings_if_present(&path)? else {
                 continue;
             };
-            if let Some(candidate) = saved_wifi_profile_candidate_from_settings(&path, &settings) {
+            if let Some(mut candidate) =
+                saved_wifi_profile_candidate_from_settings(&path, &settings)
+            {
+                candidate.profile.remember = self.connection_remembered(&path).ok();
                 candidates.insert(candidate.profile.path.clone(), candidate);
             }
         }
@@ -379,10 +384,33 @@ impl Nm {
                 .filter(|candidate| candidate.matcher.matches_access_point(access_point))
                 .map(|candidate| candidate.profile.clone())
         });
-        matches
-            .entry(access_point.path.clone())
-            .or_default()
-            .extend(compatible);
+        let profiles = matches.entry(access_point.path.clone()).or_default();
+        profiles.extend(compatible);
+        if access_point.active {
+            // A network may have several compatible profiles. Retention and
+            // other profile controls must target the one actually in use.
+            let active_profile = (|| -> Result<OwnedObjectPath> {
+                let active: OwnedObjectPath = self
+                    .proxy_path(&device.path, DEVICE_IFACE)?
+                    .get_property("ActiveConnection")?;
+                Ok(self
+                    .proxy_path(&active, super::ACTIVE_CONNECTION_IFACE)?
+                    .get_property("Connection")?)
+            })();
+            if let Ok(path) = active_profile
+                && let Some(candidate) = profiles_by_path.get(path.as_str())
+                && candidate.matcher.matches_access_point(access_point)
+            {
+                // Volatile active profiles need not be offered for activation.
+                profiles.retain(|profile| profile.path != path.as_str());
+                profiles.insert(0, candidate.profile.clone());
+            } else {
+                // Never offer destructive retention on a guessed active identity.
+                for profile in profiles {
+                    profile.remember = None;
+                }
+            }
+        }
     }
 
     fn available_connections_cached<'a>(
@@ -640,6 +668,7 @@ fn saved_wifi_connection_from_settings(
         id,
         ssid,
         ssid_bytes,
+        remember: None,
         autoconnect,
         casting_enabled: casting_enabled_from_settings(settings),
         privacy,
