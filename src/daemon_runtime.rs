@@ -18,6 +18,7 @@ use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
 
 mod admission;
+mod health_feedback;
 mod lanes;
 mod subscriptions;
 use admission::ConnectAttempts;
@@ -342,6 +343,12 @@ impl DaemonRuntime {
             "request_id": request_id,
             "status": "unknown",
         })
+    }
+
+    fn owner_is_connecting(&self, owner: &str) -> bool {
+        recover_lock(&self.tasks, "daemon task map")
+            .values()
+            .any(|task| task.kind == TaskKind::Connect && task.owner.as_deref() == Some(owner))
     }
 
     pub(crate) fn store_connect_progress(

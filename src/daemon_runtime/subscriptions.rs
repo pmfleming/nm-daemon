@@ -69,6 +69,7 @@ pub(super) fn start(
 async fn run_event_loop(runtime: Weak<DaemonRuntime>, mut receiver: mpsc::Receiver<Control>) {
     let mut subscriptions = HashMap::<String, SubscriptionState>::new();
     let mut refresh = RefreshGate::default();
+    let mut health_feedback = super::health_feedback::HealthFeedback::default();
     let mut network_change_deadline = None;
     loop {
         tokio::select! {
@@ -87,7 +88,7 @@ async fn run_event_loop(runtime: Weak<DaemonRuntime>, mut receiver: mpsc::Receiv
                     continue;
                 }
                 let Some(runtime) = runtime.upgrade() else { return };
-                handle_control(control, &runtime, &mut subscriptions, &mut refresh);
+                handle_control(control, &runtime, &mut subscriptions, &mut refresh, &mut health_feedback);
             }
             () = wait_for_deadline(network_change_deadline), if network_change_deadline.is_some() => {
                 network_change_deadline = None;
@@ -111,6 +112,7 @@ fn handle_control(
     runtime: &Arc<DaemonRuntime>,
     subscriptions: &mut HashMap<String, SubscriptionState>,
     refresh: &mut RefreshGate,
+    health_feedback: &mut super::health_feedback::HealthFeedback,
 ) {
     match control {
         Control::Subscribe {
@@ -146,8 +148,19 @@ fn handle_control(
             request_id,
             event,
             data,
-        } => emit_external_to_subscribers(subscriptions, stream, &request_id, event, &data),
-        Control::DropOwner(owner) => drop_subscriptions_for_owner(&owner, subscriptions),
+        } => emit_external_to_subscribers(
+            subscriptions,
+            stream,
+            &request_id,
+            event,
+            &data,
+            runtime,
+            health_feedback,
+        ),
+        Control::DropOwner(owner) => {
+            health_feedback.drop_owner(&owner);
+            drop_subscriptions_for_owner(&owner, subscriptions);
+        }
         Control::HealthSignal(signal) => publish_health_signal(signal, runtime, subscriptions),
         Control::NetworkChanged => {
             unreachable!("network changes are debounced by the control actor")
@@ -235,6 +248,8 @@ fn emit_external_to_subscribers(
     request_id: &str,
     event: &str,
     data: &Value,
+    runtime: &DaemonRuntime,
+    health_feedback: &mut super::health_feedback::HealthFeedback,
 ) {
     let mut emitted_owners = HashSet::new();
     subscriptions
@@ -246,7 +261,18 @@ fn emit_external_to_subscribers(
                 .is_some_and(|owner| emitted_owners.insert(owner))
         })
         .for_each(|subscription| {
-            subscription.emit_external(stream, request_id, event, data.clone())
+            let projected = if stream == Stream::NetworkHealth {
+                let owner = subscription.owner().expect("filtered owned subscription");
+                health_feedback.project(
+                    owner,
+                    data,
+                    runtime.owner_is_connecting(owner),
+                    std::time::Instant::now(),
+                )
+            } else {
+                data.clone()
+            };
+            subscription.emit_external(stream, request_id, event, projected)
         });
 }
 
