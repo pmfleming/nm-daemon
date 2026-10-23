@@ -6,6 +6,7 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(test, derive(serde::Deserialize))]
 pub(crate) enum ReasonCategory {
     /// No failure: an ordinary or successful transition.
     None,
@@ -33,6 +34,7 @@ pub(crate) enum ReasonCategory {
 
 /// Stable name and category for one NetworkManager reason code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 pub(crate) struct TypedReason {
     pub(crate) code: u32,
     pub(crate) name: &'static str,

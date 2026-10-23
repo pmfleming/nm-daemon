@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::{RadioStatus, TypedReason, WifiBand};
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize), serde(bound(deserialize = "'de: 'static")))]
 pub(crate) struct NetworkInventory {
     pub(crate) networking_enabled: bool,
     pub(crate) primary_connection: Option<String>,
@@ -15,6 +16,7 @@ pub(crate) struct NetworkInventory {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct NetworkDeviceSummary {
     pub(crate) path: String,
     pub(crate) interface: String,
@@ -39,6 +41,7 @@ pub(crate) struct NetworkDeviceSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct NetworkConnectionSummary {
     pub(crate) path: String,
     pub(crate) id: String,
@@ -55,6 +58,7 @@ pub(crate) struct NetworkConnectionSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct ActiveConnectionSummary {
     pub(crate) path: String,
     pub(crate) id: String,
@@ -72,6 +76,7 @@ pub(crate) struct ActiveConnectionSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct VpnProfileSummary {
     pub(crate) path: String,
     pub(crate) id: String,
@@ -95,6 +100,7 @@ pub(crate) struct VpnProfileSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct VpnActiveStatus {
     pub(crate) path: String,
     pub(crate) id: String,
@@ -121,6 +127,7 @@ pub(crate) struct VpnActiveStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize), serde(bound(deserialize = "'de: 'static")))]
 pub(crate) struct VpnStatus {
     pub(crate) active: Vec<VpnActiveStatus>,
 }
@@ -143,6 +150,7 @@ pub(crate) struct VpnDisconnectResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) enum HotspotUnavailableReason {
     NoWifiDevice,
     ApModeUnsupported,
@@ -184,6 +192,7 @@ impl HotspotSecurity {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(Deserialize), serde(bound(deserialize = "'de: 'static")))]
 pub(crate) struct HotspotCapabilities {
     pub(crate) supported: bool,
     pub(crate) unsupported_reason: Option<HotspotUnavailableReason>,
@@ -195,6 +204,7 @@ pub(crate) struct HotspotCapabilities {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct HotspotDevice {
     pub(crate) path: String,
     pub(crate) interface: String,
@@ -209,6 +219,7 @@ pub(crate) struct HotspotDevice {
 }
 
 #[derive(Debug, Default, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct HotspotStatus {
     pub(crate) active: bool,
     pub(crate) device_path: Option<String>,
@@ -229,6 +240,7 @@ pub(crate) struct HotspotStatus {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct HotspotShare {
     pub(crate) ssid: String,
     pub(crate) auth_type: &'static str,
@@ -237,6 +249,7 @@ pub(crate) struct HotspotShare {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct HotspotStartResult {
     pub(crate) status: &'static str,
     pub(crate) message: String,
@@ -270,6 +283,7 @@ pub(crate) struct DeviceStatisticsSample {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct NetworkStateSummary {
     pub(crate) state: u32,
     pub(crate) state_name: &'static str,
@@ -286,6 +300,7 @@ pub(crate) struct NetworkStateSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct ProfileActivationResult {
     pub(crate) status: &'static str,
     pub(crate) profile_path: String,
@@ -301,6 +316,7 @@ pub(crate) struct ProfileActivationResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct NetworkDeactivateResult {
     pub(crate) status: &'static str,
     pub(crate) path: String,
@@ -311,6 +327,7 @@ pub(crate) struct NetworkDeactivateResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct ConnectivityStatus {
     pub(crate) code: u32,
     pub(crate) state: &'static str,
@@ -327,6 +344,7 @@ pub(crate) struct ConnectivityStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct PrimaryConnectionIdentity {
     pub(crate) path: String,
     pub(crate) id: String,

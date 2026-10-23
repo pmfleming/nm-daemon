@@ -4,6 +4,7 @@ use super::{ConnectFailureReason, NetworkConnectPrompt, PromptKind, Security, We
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 pub(crate) struct Field {
     key: &'static str,
     required: bool,
@@ -11,18 +12,34 @@ pub(crate) struct Field {
     value: &'static str,
 }
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 pub(crate) struct SecurityChoice {
     id: &'static str,
     security: Security,
     key_mgmt: &'static str,
     wep_key_type: Option<WepKeyType>,
     enterprise: bool,
+    #[cfg_attr(test, serde(deserialize_with = "static_fields"))]
     required_fields: &'static [&'static str],
 }
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(
+    test,
+    derive(serde::Deserialize),
+    serde(bound(deserialize = "'de: 'static"))
+)]
 pub(crate) struct HiddenPrompt {
     fields: Vec<Field>,
     security_modes: Vec<SecurityChoice>,
+}
+// Test-only decoding of the producer's static descriptor table. The input
+// fixture is retained for the unit-test process; production never deserializes it.
+#[cfg(test)]
+fn static_fields<D: serde::Deserializer<'static>>(
+    d: D,
+) -> Result<&'static [&'static str], D::Error> {
+    use serde::Deserialize;
+    Ok(Vec::<&'static str>::deserialize(d)?.leak())
 }
 impl Default for HiddenPrompt {
     fn default() -> Self {

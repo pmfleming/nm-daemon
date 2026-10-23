@@ -54,6 +54,7 @@ pub(crate) struct ScanRequestOptions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) enum ConnectFailureReason {
     SecretRequired,
     WrongPassword,
@@ -70,6 +71,7 @@ pub(crate) enum ConnectFailureReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) enum ConnectEnginePath {
     AlreadyActive,
     Dbus,
@@ -106,6 +108,7 @@ pub(crate) struct ConnectCandidateInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct ConnectAttemptSummary {
     pub(crate) attempt: usize,
     pub(crate) status: &'static str,
@@ -167,6 +170,7 @@ impl ConnectTargetIdentity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) enum NetworkSnapshotSource {
     Cache,
     NetworkManager,
@@ -174,6 +178,7 @@ pub(crate) enum NetworkSnapshotSource {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct NetworkSnapshotMetadata {
     pub(crate) source: NetworkSnapshotSource,
     pub(crate) updated_at_ms: u128,
@@ -197,6 +202,7 @@ impl NetworkSnapshotMetadata {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct ConnectResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) recovery_prompt: Option<NetworkConnectPrompt>,
@@ -266,12 +272,14 @@ pub(crate) struct DisconnectResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct WifiPowerResult {
     pub(crate) enabled: bool,
     pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct RadioStatus {
     pub(crate) wireless_enabled: bool,
     pub(crate) wireless_hardware_enabled: bool,
@@ -283,12 +291,14 @@ pub(crate) struct RadioStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct RadioPowerResult {
     pub(crate) radios: RadioStatus,
     pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize), serde(bound(deserialize = "'de: 'static")))]
 pub(crate) struct WifiStatus {
     pub(crate) hidden_prompt: prompts::HiddenPrompt,
     pub(crate) enabled: bool,
@@ -311,6 +321,7 @@ pub(crate) struct WifiStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct LinkStateStatus {
     pub(crate) device_state: u32,
     pub(crate) device_state_name: &'static str,
@@ -594,6 +605,7 @@ impl WifiBand {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct WifiBandStatus {
     pub(crate) path: String,
     pub(crate) id: String,

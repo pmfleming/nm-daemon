@@ -24,6 +24,11 @@ use crate::model::{
 use crate::protocol::{Method, Stream};
 
 #[derive(Serialize)]
+#[cfg_attr(
+    test,
+    derive(serde::Deserialize),
+    serde(bound(deserialize = "'de: 'static"))
+)]
 struct ShelllistContractFixture {
     network: NetworkEntry,
     status: WifiStatus,
@@ -1520,6 +1525,9 @@ fn serialized_boundary_snapshot() -> Value {
         "secret_stream": methods["wifi-secret.stream"],
     })
 }
+
+#[cfg(test)]
+mod frontend_contract;
 
 #[cfg(test)]
 mod tests {
