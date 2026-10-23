@@ -8,15 +8,14 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::Result;
 use zvariant::OwnedValue;
 
-use super::super::{ConnectionSettings, owned_value};
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     ProfileEnterpriseSettings, ProfileEnterpriseUpdate, SecretFlags, WifiBand,
     WifiProfileAdvancedUpdate,
 };
 use crate::variant::{
-    insert_optional_value, insert_optional_values, setting, setting_strings as strings,
-    setting_text,
+    ConnectionSettings, insert_optional_value, insert_optional_values, owned_value, setting,
+    setting_strings as strings, setting_text,
 };
 
 const WIRELESS: &str = "802-11-wireless";
@@ -203,7 +202,7 @@ fn apply_band(wireless: &mut HashMap<String, OwnedValue>, band: Option<WifiBand>
         return Ok(());
     };
     if let Some(value) = band.nm_value() {
-        wireless.insert("band".to_string(), owned_value(value.to_string())?);
+        wireless.insert("band".to_string(), owned_value(value)?);
     } else {
         wireless.remove("band");
         wireless.remove("channel");
@@ -404,7 +403,7 @@ fn set_clearable_text(
     if value.is_empty() {
         section.remove(key);
     } else {
-        section.insert(key.to_string(), owned_value(value.to_string())?);
+        section.insert(key.to_string(), owned_value(value)?);
     }
     Ok(())
 }
@@ -420,7 +419,7 @@ fn set_list(
     if value.is_empty() {
         section.remove(key);
     } else {
-        section.insert(key.to_string(), owned_value(value.to_vec())?);
+        section.insert(key.to_string(), owned_value(value)?);
     }
     Ok(())
 }
@@ -456,10 +455,10 @@ fn secret_flags(section: &HashMap<String, OwnedValue>, key: &str) -> SecretFlags
 mod tests {
     use std::collections::HashMap;
 
-    use super::super::super::{ConnectionSettings, owned_value};
     use super::{apply_advanced, check_expected_version, profile_version, validate_mode};
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::{ProfileEnterpriseUpdate, WifiBand, WifiProfileAdvancedUpdate};
+    use crate::variant::{ConnectionSettings, owned_value};
 
     fn settings() -> ConnectionSettings {
         ConnectionSettings::from([(

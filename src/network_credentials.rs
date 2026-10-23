@@ -1,11 +1,10 @@
 //! NetworkManager secret schema. No storage backend or keyring access.
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use zvariant::OwnedValue;
 
-use crate::nm::ConnectionSettings;
-use crate::variant::{owned_value, setting, value_string_map};
+use crate::variant::{ConnectionSettings, owned_value, setting, setting_text, value_string_map};
 
 pub(crate) const AGENT_OWNED: u32 = 1;
 pub(crate) const NOT_SAVED: u32 = 2;
@@ -20,27 +19,33 @@ pub(crate) struct SecretValue {
 pub(crate) fn values(settings: &ConnectionSettings) -> Result<Vec<(String, String, String)>> {
     let mut result = Vec::new();
     for (section, data) in settings {
-        let mut keys = known_keys(section)
+        let mut secrets: Vec<(String, String)> = known_keys(section)
             .iter()
-            .map(|k| (*k).to_string())
-            .collect::<Vec<_>>();
-        if section == "vpn"
-            && let Some(secrets) = data.get("secrets").and_then(value_string_map)
-        {
-            keys.extend(secrets.keys().map(|k| (*k).to_string()));
+            .filter_map(|key| Some(((*key).into(), setting_text(data, key)?)))
+            .collect();
+        match section.as_str() {
+            "vpn" => secrets.extend(
+                data.get("secrets")
+                    .and_then(value_string_map)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(key, value)| (key.into(), value.into())),
+            ),
+            "wireguard" => secrets.extend(peers(data)?.iter().filter_map(|peer| {
+                let public = setting::<&str>(peer, "public-key")?;
+                Some((
+                    format!("peers.{public}.preshared-key"),
+                    setting::<&str>(peer, "preshared-key")?.into(),
+                ))
+            })),
+            _ => {}
         }
-        if section == "wireguard" {
-            for peer in peers(data)? {
-                if let Some(public) = setting::<&str>(&peer, "public-key") {
-                    keys.push(format!("peers.{public}.preshared-key"));
-                }
-            }
-        }
-        for key in keys {
-            if let Some(value) = text(settings, section, &key).filter(|v| !v.is_empty()) {
-                result.push((section.clone(), key, value));
-            }
-        }
+        result.extend(
+            secrets
+                .into_iter()
+                .filter(|(_, value)| !value.is_empty())
+                .map(|(key, value)| (section.clone(), key, value)),
+        );
     }
     Ok(result)
 }
@@ -53,21 +58,24 @@ pub(crate) fn public_settings(settings: &ConnectionSettings) -> Result<Connectio
         for key in known_keys(section) {
             data.remove(*key);
         }
-        if section == "vpn" {
-            data.remove("secrets");
-        }
-        if section == "wireguard" && data.contains_key("peers") {
-            let mut peers = peers(data)?;
-            for peer in &mut peers {
-                peer.remove("preshared-key");
+        match section.as_str() {
+            "wireguard" if data.contains_key("peers") => {
+                let mut peers = peers(data)?;
+                for peer in &mut peers {
+                    peer.remove("preshared-key");
+                }
+                data.insert("peers".into(), owned_value(peers)?);
             }
-            data.insert("peers".into(), owned_value(peers)?);
-        }
-        if section == "connection" {
-            data.remove("timestamp");
-        }
-        if section == "802-11-wireless" {
-            data.remove("seen-bssids");
+            "vpn" => {
+                data.remove("secrets");
+            }
+            "connection" => {
+                data.remove("timestamp");
+            }
+            "802-11-wireless" => {
+                data.remove("seen-bssids");
+            }
+            _ => {}
         }
     }
     Ok(public)
@@ -102,6 +110,58 @@ pub(crate) fn known_keys(section: &str) -> &'static [&'static str] {
     }
 }
 
+/// Settings whose credentials must be preserved before a durable profile edit.
+pub(crate) fn requires_secrets(section: &str, data: &HashMap<String, OwnedValue>) -> bool {
+    if section == "802-11-wireless-security" {
+        matches!(
+            setting::<&str>(data, "key-mgmt"),
+            Some("wpa-psk" | "sae" | "none")
+        ) || setting::<&str>(data, "auth-alg") == Some("leap")
+    } else {
+        !known_keys(section).is_empty() || section == "vpn"
+    }
+}
+
+/// Serialize only policy flags, never credentials or arbitrary plugin data.
+pub(crate) fn flag_inventory(settings: &ConnectionSettings) -> Result<BTreeMap<String, u32>> {
+    let mut flags = BTreeMap::new();
+    for (name, section) in settings {
+        flags.extend(
+            section
+                .iter()
+                .filter(|(key, _)| key.ends_with("-flags"))
+                .filter_map(|(key, value)| {
+                    Some((format!("{name}.{key}"), u32::try_from(value).ok()?))
+                }),
+        );
+    }
+    if let Some(data) = settings
+        .get("vpn")
+        .and_then(|s| s.get("data"))
+        .and_then(value_string_map)
+    {
+        flags.extend(
+            data.into_iter()
+                .filter(|(key, _)| key.ends_with("-flags"))
+                .filter_map(|(key, value)| Some((format!("vpn.data.{key}"), value.parse().ok()?))),
+        );
+    }
+    if let Some(section) = settings.get("wireguard") {
+        flags.extend(
+            peers(section)?
+                .iter()
+                .enumerate()
+                .filter_map(|(index, peer)| {
+                    Some((
+                        format!("wireguard.peers[{index}].preshared-key-flags"),
+                        setting::<u32>(peer, "preshared-key-flags")?,
+                    ))
+                }),
+        );
+    }
+    Ok(flags)
+}
+
 pub(crate) fn flags_key(key: &str) -> String {
     if matches!(key, "wep-key0" | "wep-key1" | "wep-key2" | "wep-key3") {
         "wep-key-flags".into()
@@ -121,6 +181,41 @@ fn peers(section: &HashMap<String, OwnedValue>) -> Result<Vec<HashMap<String, Ow
     }
 }
 
+/// Resolve once and reject both missing and duplicate identities before mutation.
+fn unique_peer<'a>(
+    peers: &'a mut [HashMap<String, OwnedValue>],
+    public: &str,
+) -> Result<&'a mut HashMap<String, OwnedValue>> {
+    let mut matches = peers
+        .iter_mut()
+        .filter(|p| setting::<&str>(p, "public-key") == Some(public));
+    let peer = matches
+        .next()
+        .context("WireGuard peer missing or ambiguous")?;
+    ensure!(
+        matches.next().is_none(),
+        "WireGuard peer missing or ambiguous"
+    );
+    Ok(peer)
+}
+
+fn extend_vpn_map<'a>(
+    values: &mut HashMap<String, OwnedValue>,
+    key: &str,
+    entries: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<()> {
+    let mut map = values
+        .get(key)
+        .and_then(value_string_map)
+        .unwrap_or_default();
+    for (key, value) in entries {
+        map.insert(key, value);
+    }
+    let encoded = owned_value(map)?;
+    values.insert(key.into(), encoded);
+    Ok(())
+}
+
 pub(crate) fn flags(settings: &ConnectionSettings, section: &str, key: &str) -> Result<u32> {
     let values = settings
         .get(section)
@@ -137,13 +232,10 @@ pub(crate) fn flags(settings: &ConnectionSettings, section: &str, key: &str) -> 
     } else if section == "wireguard"
         && let Some(public_key) = peer_key(key)
     {
-        let peers = peers(values)?;
-        let matches = peers
-            .iter()
-            .filter(|p| setting::<&str>(p, "public-key") == Some(public_key))
-            .collect::<Vec<_>>();
-        ensure!(matches.len() == 1, "WireGuard peer missing or ambiguous");
-        flag_value(matches[0], "preshared-key-flags")?
+        flag_value(
+            unique_peer(&mut peers(values)?, public_key)?,
+            "preshared-key-flags",
+        )?
     } else {
         ensure!(
             known_keys(section).contains(&key),
@@ -156,12 +248,7 @@ pub(crate) fn flags(settings: &ConnectionSettings, section: &str, key: &str) -> 
 }
 
 fn flag_value(values: &HashMap<String, OwnedValue>, key: &str) -> Result<u32> {
-    values
-        .get(key)
-        .map(u32::try_from)
-        .transpose()
-        .map(|v| v.unwrap_or(0))
-        .map_err(Into::into)
+    Ok(values.get(key).map(u32::try_from).transpose()?.unwrap_or(0))
 }
 
 pub(crate) fn set_system_owned(
@@ -176,26 +263,21 @@ pub(crate) fn set_system_owned(
     );
     ensure!(section != "wifi-p2p", "WPS credentials are temporary");
     let flags = flags & !AGENT_OWNED;
-    let values = settings.get_mut(section).unwrap();
+    let values = settings
+        .get_mut(section)
+        .context("secret setting missing")?;
     if section == "vpn" {
-        let mut data: HashMap<String, String> = values
-            .get("data")
-            .and_then(value_string_map)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-        data.insert(flags_key(key), flags.to_string());
-        values.insert("data".into(), owned_value(data)?);
+        extend_vpn_map(
+            values,
+            "data",
+            [(flags_key(key).as_str(), flags.to_string().as_str())],
+        )?;
     } else if section == "wireguard"
         && let Some(public_key) = peer_key(key)
     {
         let mut peers = peers(values)?;
-        let peer = peers
-            .iter_mut()
-            .find(|p| setting::<&str>(p, "public-key") == Some(public_key))
-            .unwrap();
-        peer.insert("preshared-key-flags".into(), owned_value(flags)?);
+        unique_peer(&mut peers, public_key)?
+            .insert("preshared-key-flags".into(), owned_value(flags)?);
         values.insert("peers".into(), owned_value(peers)?);
     } else {
         values.insert(flags_key(key), owned_value(flags)?);
@@ -210,16 +292,11 @@ pub(crate) fn set_text(
     value: String,
 ) -> Result<()> {
     if section == "vpn" {
-        let values = settings.entry(section.into()).or_default();
-        let mut secrets: HashMap<String, String> = values
-            .get("secrets")
-            .and_then(value_string_map)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-        secrets.insert(key.into(), value);
-        values.insert("secrets".into(), owned_value(secrets)?);
+        extend_vpn_map(
+            settings.entry(section.into()).or_default(),
+            "secrets",
+            [(key, value.as_str())],
+        )?;
     } else if section == "wireguard"
         && let Some(public_key) = peer_key(key)
     {
@@ -227,19 +304,7 @@ pub(crate) fn set_text(
             .get_mut(section)
             .ok_or_else(|| anyhow::anyhow!("WireGuard setting missing"))?;
         let mut peers = peers(values)?;
-        ensure!(
-            peers
-                .iter()
-                .filter(|p| setting::<&str>(p, "public-key") == Some(public_key))
-                .count()
-                == 1,
-            "WireGuard peer missing or ambiguous"
-        );
-        let peer = peers
-            .iter_mut()
-            .find(|p| setting::<&str>(p, "public-key") == Some(public_key))
-            .unwrap();
-        peer.insert("preshared-key".into(), owned_value(value)?);
+        unique_peer(&mut peers, public_key)?.insert("preshared-key".into(), owned_value(value)?);
         values.insert("peers".into(), owned_value(peers)?);
     } else {
         ensure!(
@@ -301,15 +366,7 @@ pub(crate) fn merge_secrets(
         {
             let incoming =
                 value_string_map(value).ok_or_else(|| anyhow::anyhow!("invalid VPN secrets"))?;
-            let mut map: HashMap<String, String> = dest
-                .get("secrets")
-                .and_then(value_string_map)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect();
-            map.extend(incoming.into_iter().map(|(k, v)| (k.into(), v.into())));
-            dest.insert("secrets".into(), owned_value(map)?);
+            extend_vpn_map(dest, "secrets", incoming)?;
         }
         if section == "wireguard" && values.contains_key("peers") {
             let mut target_peers = peers(dest)?;
@@ -319,17 +376,7 @@ pub(crate) fn merge_secrets(
                 };
                 let public = setting::<&str>(&peer, "public-key")
                     .ok_or_else(|| anyhow::anyhow!("peer identity missing"))?;
-                let matches = target_peers
-                    .iter()
-                    .filter(|p| setting::<&str>(p, "public-key") == Some(public))
-                    .count();
-                if matches != 1 {
-                    bail!("cannot preserve ambiguous WireGuard peer secret");
-                }
-                let dest = target_peers
-                    .iter_mut()
-                    .find(|p| setting::<&str>(p, "public-key") == Some(public))
-                    .unwrap();
+                let dest = unique_peer(&mut target_peers, public)?;
                 dest.insert("preshared-key".into(), secret.try_clone()?);
             }
             dest.insert("peers".into(), owned_value(target_peers)?);
@@ -353,8 +400,13 @@ pub(crate) fn has_secrets(settings: &ConnectionSettings) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        flag_inventory, flags, merge_secrets, peers, set_system_owned, set_text, text, values,
+    };
     use crate::variant::value_map;
+    use crate::variant::{ConnectionSettings, owned_value, setting};
+    use anyhow::Result;
+    use std::collections::HashMap;
 
     #[test]
     fn schema_handles_shared_nested_and_temporary_flags() -> Result<()> {
@@ -395,6 +447,17 @@ mod tests {
         assert!(set_system_owned(&mut s, "vpn", "otp").is_err());
         assert!(flags(&s, "vpn", "unspecified").is_err());
         assert!(!s["802-11-wireless-security"].contains_key("wep-key2-flags"));
+        assert_eq!(values(&s)?.len(), 3);
+        let inventory = flag_inventory(&s)?;
+        assert_eq!(inventory["wireguard.peers[0].preshared-key-flags"], 0);
+        assert_eq!(inventory["vpn.data.otp-flags"], 2);
+        set_text(&mut s, "vpn", "other", "keep".into())?;
+        let mut incoming = ConnectionSettings::new();
+        set_text(&mut incoming, "vpn", "password", "replacement".into())?;
+        merge_secrets(&mut s, &incoming)?;
+        assert_eq!(text(&s, "vpn", "password").as_deref(), Some("replacement"));
+        assert_eq!(text(&s, "vpn", "other").as_deref(), Some("keep"));
+        assert_eq!(flags(&s, "vpn", "otp")?, 2);
         Ok(())
     }
 
@@ -435,6 +498,22 @@ mod tests {
             text(&target, "wireguard", "peers.peer.preshared-key").as_deref(),
             Some("incoming")
         );
+        let key = "peers.peer.preshared-key";
+        for invalid in [Vec::new(), vec![p[0].clone(), p[0].clone()]] {
+            target
+                .get_mut("wireguard")
+                .unwrap()
+                .insert("peers".into(), owned_value(invalid)?);
+            let before = target.clone();
+            assert!(flags(&target, "wireguard", key).is_err());
+            assert!(set_system_owned(&mut target, "wireguard", key).is_err());
+            assert!(set_text(&mut target, "wireguard", key, "no".into()).is_err());
+            assert!(merge_secrets(&mut target, &source).is_err());
+            assert_eq!(
+                target, before,
+                "invalid peer identity must not mutate settings"
+            );
+        }
         Ok(())
     }
 }

@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use zvariant::{DynamicType, OwnedValue, Value};
 
-pub(crate) fn owned_value<T>(value: T) -> Result<OwnedValue>
+pub(crate) type ConnectionSettings = HashMap<String, HashMap<String, OwnedValue>>;
+
+pub(crate) fn owned_value<'a, T>(value: T) -> Result<OwnedValue>
 where
-    T: Into<Value<'static>> + DynamicType,
+    T: Into<Value<'a>> + DynamicType,
 {
     OwnedValue::try_from(Value::new(value)).context("create D-Bus variant value")
 }
@@ -97,7 +99,7 @@ pub(crate) fn insert_string(
     key: &str,
     value: &str,
 ) -> Result<()> {
-    section.insert(key.to_string(), owned_value(value.to_string())?);
+    section.insert(key.to_string(), owned_value(value)?);
     Ok(())
 }
 
@@ -106,10 +108,7 @@ pub(crate) fn insert_optional_string(
     key: &str,
     value: Option<&str>,
 ) -> Result<()> {
-    if let Some(value) = value.filter(|value| !value.is_empty()) {
-        insert_string(section, key, value)?;
-    }
-    Ok(())
+    insert_optional_value(section, key, value.filter(|value| !value.is_empty()))
 }
 
 pub(crate) fn insert_optional_strings(
@@ -121,13 +120,13 @@ pub(crate) fn insert_optional_strings(
         .try_for_each(|(key, value)| insert_optional_string(section, key, *value))
 }
 
-pub(crate) fn insert_optional_value<T>(
+pub(crate) fn insert_optional_value<'a, T>(
     section: &mut HashMap<String, OwnedValue>,
     key: &str,
     value: Option<T>,
 ) -> Result<()>
 where
-    T: Into<Value<'static>> + DynamicType,
+    T: Into<Value<'a>> + DynamicType,
 {
     if let Some(value) = value {
         section.insert(key.to_string(), owned_value(value)?);

@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use zbus::blocking::{Connection, Proxy};
-use zvariant::{OwnedObjectPath, OwnedValue};
+use zvariant::OwnedObjectPath;
 
-use crate::nm::ConnectionSettings;
-use crate::variant::{setting, setting_strings, value_string_map};
+use crate::network_credentials::flag_inventory;
+use crate::variant::{ConnectionSettings, setting, setting_strings};
 
 const NM: &str = "org.freedesktop.NetworkManager";
 const PROFILE: &str = "org.freedesktop.NetworkManager.Settings.Connection";
@@ -106,7 +106,7 @@ fn discard_on(
     ]);
     let search = || -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
         service
-            .call("SearchItems", &(expected.clone(),))
+            .call("SearchItems", &(&expected,))
             .map_err(|_| anyhow::anyhow!("legacy metadata search failed"))
     };
     let (unlocked, locked) = search()?;
@@ -289,50 +289,12 @@ fn legacy_inventory(profiles: &mut [Profile]) -> Result<Legacy> {
     })
 }
 
-fn flag_inventory(settings: &ConnectionSettings) -> Result<BTreeMap<String, u32>> {
-    let mut flags = BTreeMap::new();
-    for (name, section) in settings {
-        // GetSettings contains no secrets. Still serialize only flag values,
-        // never arbitrary settings, VPN data, peer dictionaries or attributes.
-        for (key, value) in section {
-            if key.ends_with("-flags")
-                && let Ok(value) = u32::try_from(value)
-            {
-                flags.insert(format!("{name}.{key}"), value);
-            }
-        }
-        if name == "vpn"
-            && let Some(data) = section.get("data").and_then(value_string_map)
-        {
-            for (key, value) in data {
-                if key.ends_with("-flags")
-                    && let Ok(value) = value.parse()
-                {
-                    flags.insert(format!("vpn.data.{key}"), value);
-                }
-            }
-        }
-        if name == "wireguard"
-            && let Some(peers) = section.get("peers")
-        {
-            let peers: Vec<HashMap<String, OwnedValue>> = peers.try_clone()?.try_into()?;
-            for (index, peer) in peers.iter().enumerate() {
-                if let Some(value) = setting::<u32>(peer, "preshared-key-flags") {
-                    flags.insert(
-                        format!("wireguard.peers[{index}].preshared-key-flags"),
-                        value,
-                    );
-                }
-            }
-        }
-    }
-    Ok(flags)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::variant::{owned_value, value_map};
+    use super::flag_inventory;
+    use crate::variant::{ConnectionSettings, owned_value, value_map};
+    use anyhow::Result;
+    use std::collections::HashMap;
 
     #[test]
     fn inventory_only_serializes_flag_values_not_passwords_or_plugin_data() -> Result<()> {
@@ -347,6 +309,8 @@ mod tests {
                     "data".into(),
                     owned_value(HashMap::from([
                         ("password-flags".to_string(), "1".to_string()),
+                        ("invalid-flags".into(), "no".into()),
+                        ("negative-flags".into(), "-1".into()),
                         ("cookie".into(), "do-not-print".into()),
                     ]))?,
                 )]),
@@ -356,6 +320,7 @@ mod tests {
         assert!(!encoded.contains("do-not-print"));
         assert!(!encoded.contains("cookie"));
         assert!(encoded.contains("vpn.data.password-flags"));
+        assert_eq!(flag_inventory(&settings)?.len(), 2);
         Ok(())
     }
 }

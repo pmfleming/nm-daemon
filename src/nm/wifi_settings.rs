@@ -5,13 +5,14 @@ mod profile;
 use anyhow::Result;
 use zvariant::OwnedValue;
 
-use super::{ConnectionSettings, owned_value};
 use crate::auth::WifiAuthentication;
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     AccessPoint, EnterpriseAuth, WepKeyType, WifiConnectTarget, enterprise_key_mgmt,
 };
-use crate::variant::{insert_optional_strings, insert_string, value_map};
+use crate::variant::{
+    ConnectionSettings, insert_optional_strings, insert_string, owned_value, value_map,
+};
 pub(super) use profile::{apply_target_connection_metadata, apply_target_profile_settings};
 
 pub(super) fn psk_wifi_connection_settings(
@@ -330,7 +331,7 @@ fn insert_enterprise_certificate_settings(
     if !enterprise.altsubject_matches.is_empty() {
         dot1x.insert(
             "altsubject-matches".to_string(),
-            owned_value(enterprise.altsubject_matches.clone())?,
+            owned_value(enterprise.altsubject_matches.as_slice())?,
         );
     }
     for (key, value) in [
@@ -401,10 +402,7 @@ fn sanitize_cloned_settings(settings: &mut ConnectionSettings) -> Result<()> {
     let connection = settings.entry("connection".to_string()).or_default();
     connection.remove("uuid");
     connection.remove("timestamp");
-    connection.insert(
-        "type".to_string(),
-        owned_value("802-11-wireless".to_string())?,
-    );
+    connection.insert("type".to_string(), owned_value("802-11-wireless")?);
     Ok(())
 }
 
@@ -416,20 +414,14 @@ fn ensure_wireless_settings(
     let connection = settings.entry("connection".to_string()).or_default();
     connection
         .entry("id".to_string())
-        .or_insert(owned_value(target.ssid.to_string())?);
+        .or_insert(owned_value(target.ssid.as_str())?);
     connection
         .entry("type".to_string())
-        .or_insert(owned_value("802-11-wireless".to_string())?);
+        .or_insert(owned_value("802-11-wireless")?);
 
     let wireless = settings.entry("802-11-wireless".to_string()).or_default();
-    wireless.insert(
-        "ssid".to_string(),
-        owned_value(target.ssid_bytes().to_vec())?,
-    );
-    wireless.insert(
-        "mode".to_string(),
-        owned_value("infrastructure".to_string())?,
-    );
+    wireless.insert("ssid".to_string(), owned_value(target.ssid_bytes())?);
+    wireless.insert("mode".to_string(), owned_value("infrastructure")?);
     wireless.insert("hidden".to_string(), owned_value(hidden)?);
     Ok(())
 }

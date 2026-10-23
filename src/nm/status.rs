@@ -182,23 +182,6 @@ impl Nm {
         let Some(active_connection_path) = self.device_active_connection_path(&device.path)? else {
             return Ok(None);
         };
-        self.active_wifi_status(
-            device,
-            active_connection_path,
-            profiles,
-            connectivity,
-            radios,
-        )
-    }
-
-    fn active_wifi_status(
-        &self,
-        device: &WifiDevice,
-        active_connection_path: OwnedObjectPath,
-        profiles: &[SavedWifiConnection],
-        connectivity: &Option<crate::model::ConnectivityStatus>,
-        radios: &RadioStatus,
-    ) -> Result<Option<WifiStatus>> {
         let Some(active_ap_path) = self.active_access_point(device)? else {
             return Ok(None);
         };

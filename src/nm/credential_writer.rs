@@ -2,12 +2,13 @@
 //! SecretAgent callback: GetSecrets can consult agents.
 use std::collections::HashMap;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
+use zbus::blocking::Proxy;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::{ConnectionSettings, Nm, SETTINGS_CONNECTION_IFACE};
 use crate::network_credentials::{
-    AGENT_OWNED, NOT_SAVED, flags, has_secrets, known_keys, merge_secrets, text,
+    AGENT_OWNED, NOT_SAVED, flags, has_secrets, known_keys, merge_secrets, requires_secrets, text,
 };
 use crate::variant::{owned_value, setting};
 
@@ -107,50 +108,7 @@ impl Nm {
                 crate::networkmanager_compatibility::validated_storage_version(&running),
                 "credential writes require a validated NetworkManager version"
             );
-            // Save the intended secret patch separately. Read *every* supported
-            // secret-bearing setting; any authorization/lookup error aborts.
-            // Do not reinterpret an error as an empty destination.
-            let patch = edit.settings.clone();
-            let sections = edit
-                .settings
-                .keys()
-                .filter(|s| {
-                    if s.as_str() == "802-11-wireless-security" {
-                        let security = &edit.settings[*s];
-                        matches!(
-                            setting::<&str>(security, "key-mgmt"),
-                            Some("wpa-psk" | "sae" | "none")
-                        ) || setting::<&str>(security, "auth-alg") == Some("leap")
-                    } else {
-                        !known_keys(s).is_empty() || s.as_str() == "vpn"
-                    }
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            for section in sections {
-                let secrets: ConnectionSettings =
-                    proxy.call("GetSecrets", &(section,)).map_err(|_| {
-                        anyhow::anyhow!("cannot preserve existing credentials; no update attempted")
-                    })?;
-                // Reviewed NM versions execute exactly one internal settings
-                // update for each successful GetSecrets, including cache hits.
-                // Never adopt an arbitrary new version: a concurrent external
-                // edit adds another increment and must abort this transaction.
-                let expected = edit
-                    .version
-                    .checked_add(1)
-                    .ok_or_else(|| anyhow::anyhow!("profile version exhausted"))?;
-                ensure!(
-                    proxy.get_property::<u64>("VersionId")? == expected,
-                    "profile changed during secret retrieval; no update attempted"
-                );
-                edit.version = expected;
-                validate_secret_reply(&secrets)?;
-                merge_secrets(&mut edit.settings, &secrets)?;
-            }
-            // Only secret fields from the original edit are overlaid, not its
-            // public/nested peer settings. Unknown structures fail closed.
-            merge_secrets(&mut edit.settings, &patch)?;
+            preserve_secrets(&mut edit.settings, &mut edit.version, &proxy)?;
         }
         if edit.explicit_remember {
             // Explicit opt-in may retain cached one-time credentials. Never change
@@ -161,10 +119,13 @@ impl Nm {
                     old & AGENT_OWNED == 0,
                     "agent-owned credentials require explicit migration"
                 );
-                edit.settings.get_mut(&section).unwrap().insert(
-                    crate::network_credentials::flags_key(&key),
-                    owned_value(old & !NOT_SAVED)?,
-                );
+                edit.settings
+                    .get_mut(&section)
+                    .context("secret setting missing")?
+                    .insert(
+                        crate::network_credentials::flags_key(&key),
+                        owned_value(old & !NOT_SAVED)?,
+                    );
             }
         }
         ensure!(
@@ -186,6 +147,39 @@ impl Nm {
         );
         Ok(())
     }
+}
+
+fn preserve_secrets(
+    settings: &mut ConnectionSettings,
+    version: &mut u64,
+    proxy: &Proxy<'_>,
+) -> Result<()> {
+    // Read every supported secret-bearing setting. Never reinterpret an
+    // authorization/lookup error as an empty destination.
+    let patch = settings.clone();
+    for (section, _) in patch
+        .iter()
+        .filter(|(name, data)| requires_secrets(name, data))
+    {
+        let secrets: ConnectionSettings = proxy.call("GetSecrets", &(section,)).map_err(|_| {
+            anyhow::anyhow!("cannot preserve existing credentials; no update attempted")
+        })?;
+        // Reviewed NM versions perform exactly one internal settings update
+        // per successful GetSecrets (even cache hits). An external edit adds
+        // another increment and must abort; never adopt an arbitrary version.
+        let expected = version
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("profile version exhausted"))?;
+        ensure!(
+            proxy.get_property::<u64>("VersionId")? == expected,
+            "profile changed during secret retrieval; no update attempted"
+        );
+        *version = expected;
+        validate_secret_reply(&secrets)?;
+        merge_secrets(settings, &secrets)?;
+    }
+    // Overlay only the intended secrets, never public/nested peer settings.
+    merge_secrets(settings, &patch)
 }
 
 fn validate_secret_reply(reply: &ConnectionSettings) -> Result<()> {

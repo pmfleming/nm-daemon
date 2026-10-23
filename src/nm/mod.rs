@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::Result;
 use zbus::blocking::{Connection, Proxy};
-use zvariant::{OwnedObjectPath, OwnedValue};
+use zvariant::OwnedObjectPath;
 
 use crate::command::{CommandRunner, default_runner};
 use crate::error::{ErrorOperation, ensure_domain};
@@ -55,7 +54,7 @@ pub(super) const NM_DEVICE_STATE_DISCONNECTED: u32 = 30;
 pub(super) const NM_DEVICE_STATE_ACTIVATED: u32 = 100;
 pub(super) const NM_ACTIVE_CONNECTION_STATE_ACTIVATED: u32 = 2;
 
-pub(crate) type ConnectionSettings = HashMap<String, HashMap<String, OwnedValue>>;
+pub(crate) use crate::variant::ConnectionSettings;
 pub(super) use crate::variant::owned_value;
 
 #[derive(Debug, Clone)]
