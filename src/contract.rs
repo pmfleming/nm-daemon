@@ -31,6 +31,7 @@ use crate::protocol::{Method, Stream};
 )]
 struct ShelllistContractFixture {
     network: NetworkEntry,
+    network_stream: Value,
     status: WifiStatus,
     connect_success: ConnectResult,
     connect_error: ConnectResult,
@@ -448,6 +449,58 @@ fn network_response_fixture(networks: Vec<NetworkEntry>) -> Value {
     })
 }
 
+fn network_stream_fixture() -> Value {
+    use crate::daemon_status::network_updates::NetworkUpdates;
+    let a = canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_PSK, false, false);
+    let b = canonical_network(0, false, false);
+    assert_ne!(a.key, b.key);
+    let payload = |networks: Vec<NetworkEntry>| {
+        json!({
+            "networks": networks,
+            "snapshot": NetworkSnapshotMetadata {
+                source: NetworkSnapshotSource::NetworkManager, age_ms: 0,
+                refresh_requested: false, ..contract_snapshot_metadata()
+            },
+        })
+    };
+    let event = |updates: &mut NetworkUpdates, value: Value, epoch: &str, subscription: &str| {
+        let mut data = updates.project(&value).expect("native network change");
+        data["epoch"] = json!(epoch); // normalize only the generated identity
+        crate::daemon_event::subscription_event_value(
+            Stream::WifiNetworks,
+            subscription,
+            "changed",
+            data,
+        )
+    };
+    let mut updates = NetworkUpdates::default();
+    let initial = event(
+        &mut updates,
+        payload(vec![a.clone()]),
+        "network-epoch-contract",
+        "networks-subscription",
+    );
+    let lost = event(
+        &mut updates,
+        payload(vec![a, b.clone()]),
+        "network-epoch-contract",
+        "networks-subscription",
+    );
+    let after_gap = event(
+        &mut updates,
+        payload(vec![b.clone()]),
+        "network-epoch-contract",
+        "networks-subscription",
+    );
+    let replacement = event(
+        &mut NetworkUpdates::default(),
+        payload(vec![b]),
+        "replacement-epoch-contract",
+        "networks-subscription-new",
+    );
+    json!({"initial":initial,"lost":lost,"after_gap":after_gap,"replacement":replacement})
+}
+
 fn contract_parsed_qr(payload: &str) -> crate::qr::ParsedWifiQr {
     crate::qr::parse_wifi_qr(payload).expect("contract QR payload parses")
 }
@@ -469,6 +522,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
     let network = network_from_production(access_point.clone(), vec![profile.clone()]);
     ShelllistContractFixture {
         network: network.clone(),
+        network_stream: network_stream_fixture(),
         status: WifiStatus {
             hidden_prompt: Default::default(),
             enabled: true,
@@ -1299,30 +1353,32 @@ fn continuous_stream_events() -> Vec<Value> {
             ("changed", json!({ "inventory": contract_inventory() })),
         ],
     ));
+    let mut networks = crate::daemon_status::network_updates::NetworkUpdates::default();
+    let mut network_baseline = networks
+        .project(&json!({
+            "networks": [canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_PSK, false, false)],
+            "snapshot": NetworkSnapshotMetadata {
+                source: NetworkSnapshotSource::NetworkManager,
+                updated_at_ms: 1_762_000_000_000,
+                age_ms: 0,
+                stale: false,
+                scanning: false,
+                refresh_requested: false,
+            },
+        }))
+        .expect("native network baseline");
+    // Normalize only the random identity; keep the live projection/cursor shape.
+    network_baseline["epoch"] = json!("network-epoch-contract");
     events.extend(stream_events(
         Stream::WifiNetworks,
-        "networks-contract",
-        vec![
-            subscribed_event("networks-subscription"),
-            (
-                "changed",
-                json!({
-                    "subscription_id": "networks-subscription",
-                    "initial": true,
-                    "added": [canonical_network(crate::model::NM_AP_SEC_KEY_MGMT_PSK, false, false)],
-                    "removed": [],
-                    "changed": [],
-                    "snapshot": NetworkSnapshotMetadata {
-                        source: NetworkSnapshotSource::NetworkManager,
-                        updated_at_ms: 1_762_000_000_000,
-                        age_ms: 0,
-                        stale: false,
-                        scanning: false,
-                        refresh_requested: false,
-                    },
-                }),
-            ),
-        ],
+        "networks-subscription",
+        vec![subscribed_event("networks-subscription")],
+    ));
+    events.push(crate::daemon_event::subscription_event_value(
+        Stream::WifiNetworks,
+        "networks-subscription",
+        "changed",
+        network_baseline,
     ));
     events
 }
@@ -1505,6 +1561,7 @@ fn serialized_boundary_snapshot() -> Value {
         "portal_complete": methods["portal.complete"],
         "connect_success": shell["connect_success"],
         "connect_error": shell["connect_error"],
+        "network_stream": shell["network_stream"],
         "connect_stream": methods["wifi-connect.stream"],
         "scan_stream": methods["wifi-scan.stream"],
         "saved_profiles": methods["wifi-saved.profiles"],

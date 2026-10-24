@@ -9,6 +9,9 @@ use crate::daemon_event::{emit_json_event_nonfatal, emit_subscription_event_nonf
 use crate::nm::Nm;
 use crate::protocol::{Method, Stream};
 
+pub(crate) mod network_updates;
+use network_updates::NetworkUpdates;
+
 #[derive(Default)]
 pub(crate) struct SharedPayloads {
     pub(crate) status: Option<Value>,
@@ -23,6 +26,7 @@ pub(crate) struct SubscriptionState {
     streams: Vec<Stream>,
     emitter: SignalEmitter<'static>,
     last: SharedPayloads,
+    networks: NetworkUpdates,
 }
 
 impl SubscriptionState {
@@ -38,6 +42,7 @@ impl SubscriptionState {
             streams,
             emitter,
             last: SharedPayloads::default(),
+            networks: NetworkUpdates::default(),
         }
     }
 
@@ -87,7 +92,7 @@ impl SubscriptionState {
         if self.watches(Stream::WifiNetworks)
             && let Some(value) = &payloads.networks
         {
-            emit_network_changes(&self.emitter, &self.id, &mut self.last.networks, value);
+            emit_network_changes(&self.emitter, &self.id, &mut self.networks, value);
         }
     }
 }
@@ -173,21 +178,18 @@ fn log_typed_refresh_error<T>(result: anyhow::Result<T>) -> Option<T> {
 fn emit_network_changes(
     emitter: &SignalEmitter<'static>,
     subscription_id: &str,
-    last: &mut Option<Value>,
+    updates: &mut NetworkUpdates,
     value: &Value,
 ) {
-    let initial = last.is_none();
-    let Some(mut payload) = network_delta(last.as_ref(), value) else {
+    let Some(payload) = updates.project(value) else {
         return;
     };
-    *last = Some(value.clone());
-    payload.insert("initial".to_string(), json!(initial));
     emit_subscription_event_nonfatal(
         emitter,
         Stream::WifiNetworks,
         subscription_id,
         "changed",
-        Value::Object(payload),
+        payload,
     );
 }
 

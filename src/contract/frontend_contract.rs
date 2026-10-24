@@ -65,6 +65,41 @@ fn frontend_contract_network_status_profiles_and_results_use_owned_types() {
     assert!(WifiStatus::deserialize(&*Box::leak(Box::new(bad))).is_err());
 }
 #[test]
+fn frontend_contract_network_delta_recovery_uses_live_projection_and_owned_rows() {
+    let stream = shelllist_contract_fixture().network_stream;
+    for name in ["initial", "lost", "after_gap", "replacement"] {
+        let event = &stream[name];
+        assert_eq!(event["stream"], "wifi.networks");
+        assert!(event["subscription_id"].is_string());
+        assert!(event.get("request_id").is_none());
+        let data = &event["data"];
+        for field in ["added", "changed", "removed"] {
+            let _: Vec<NetworkEntry> = decode(&data[field]);
+        }
+        let _: NetworkSnapshotMetadata = decode(&data["snapshot"]);
+        assert_eq!(
+            data["revision"].as_u64().unwrap(),
+            data["base_revision"].as_u64().unwrap() + 1
+        );
+    }
+    assert_eq!(stream["initial"]["data"]["revision"], 1);
+    assert_eq!(stream["after_gap"]["data"]["base_revision"], 2);
+    assert_eq!(
+        stream["initial"]["data"]["epoch"],
+        stream["after_gap"]["data"]["epoch"]
+    );
+    assert_ne!(
+        stream["replacement"]["data"]["epoch"],
+        stream["initial"]["data"]["epoch"]
+    );
+    assert_eq!(stream["replacement"]["data"]["initial"], true);
+    assert_eq!(
+        stream["replacement"]["data"]["added"],
+        stream["lost"]["data"]["added"]
+    );
+}
+
+#[test]
 fn frontend_contract_semantic_witnesses_and_checked_snapshot() {
     assert_eq!(
         serialized_boundary_snapshot(),

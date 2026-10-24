@@ -16,7 +16,7 @@ const NETWORK_CHANGE_DEBOUNCE: Duration = Duration::from_millis(75);
 
 pub(super) enum Control {
     Subscribe {
-        subscription: SubscriptionState,
+        subscription: Box<SubscriptionState>,
         reply: oneshot::Sender<()>,
     },
     CancelSubscription {
@@ -52,7 +52,7 @@ impl Control {
         reply: oneshot::Sender<()>,
     ) -> Self {
         Self::Subscribe {
-            subscription: SubscriptionState::new(id, owner, streams, emitter),
+            subscription: Box::new(SubscriptionState::new(id, owner, streams, emitter)),
             reply,
         }
     }
@@ -118,7 +118,7 @@ fn handle_control(
         Control::Subscribe {
             subscription,
             reply,
-        } => add_subscription(subscription, reply, runtime, subscriptions, refresh),
+        } => add_subscription(*subscription, reply, runtime, subscriptions, refresh),
         Control::CancelSubscription {
             id,
             owner,

@@ -580,6 +580,584 @@
     "stale": false,
     "updated_at_ms": 1762000000000
   },
+  "network_stream": {
+    "after_gap": {
+      "data": {
+        "added": [],
+        "base_revision": 2,
+        "changed": [],
+        "epoch": "network-epoch-contract",
+        "initial": false,
+        "removed": [
+          {
+            "access_points": [
+              {
+                "active": false,
+                "band": "5 GHz",
+                "bandwidth_mhz": 80,
+                "bssid": "00:11:22:33:44:55",
+                "channel": 36,
+                "device_iface": "wlan0",
+                "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+                "flags": 1,
+                "frequency": 5180,
+                "last_seen": 1234,
+                "last_seen_age_ms": 2500,
+                "max_bitrate_mbps": 866,
+                "mode": "Infra",
+                "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+                "rsn_flags": 256,
+                "rsn_flags_label": "psk",
+                "security": "WPA2/3",
+                "ssid": "Example",
+                "ssid_bytes": [
+                  69,
+                  120,
+                  97,
+                  109,
+                  112,
+                  108,
+                  101
+                ],
+                "ssid_hex": "4578616d706c65",
+                "strength": 82,
+                "wpa_flags": 0,
+                "wpa_flags_label": "(none)"
+              }
+            ],
+            "active": false,
+            "auth": {
+              "key_management": [
+                "wpa-psk"
+              ],
+              "kind": "wpa-personal",
+              "note": null,
+              "optional_fields": [],
+              "required_fields": [
+                "password"
+              ],
+              "supported": true
+            },
+            "band": "5 GHz",
+            "bandwidth_mhz": 80,
+            "bssid": "00:11:22:33:44:55",
+            "capabilities": {
+              "can_connect": true,
+              "can_connect_now": false,
+              "can_connect_with_credentials": false,
+              "can_connect_with_password": true,
+              "can_forget": false,
+              "can_set_mac_randomization": false,
+              "can_set_send_hostname": false,
+              "can_share_qr": false,
+              "can_toggle_autoconnect": false,
+              "can_toggle_casting": false,
+              "needs_credentials": false,
+              "needs_password": true,
+              "supported_auth": true,
+              "unsupported_reason": null
+            },
+            "channel": 36,
+            "connect_prompt": {
+              "kind": "password",
+              "message": "Enter the Wi-Fi password, then press Enter.",
+              "optional_fields": [],
+              "required_fields": [
+                "password"
+              ]
+            },
+            "device_iface": "wlan0",
+            "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+            "flags": 1,
+            "frequency": 5180,
+            "key": "ssid-hex:4578616d706c65|security:personal|ifname:776c616e30",
+            "last_seen": 1234,
+            "last_seen_age_ms": 2500,
+            "max_bitrate_mbps": 866,
+            "mode": "Infra",
+            "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+            "portal_hint": {
+              "auto_open_on_connect": false,
+              "reason": null
+            },
+            "primary_profile": null,
+            "profiles": [],
+            "rsn_flags": 256,
+            "rsn_flags_label": "psk",
+            "security": "WPA2/3",
+            "security_class": "personal",
+            "share": {
+              "reason": "Wi-Fi QR sharing requires an open network or a saved profile with a readable password.",
+              "requires_profile_secret_check": false,
+              "shareable": false
+            },
+            "ssid": "Example",
+            "ssid_bytes": [
+              69,
+              120,
+              97,
+              109,
+              112,
+              108,
+              101
+            ],
+            "ssid_hex": "4578616d706c65",
+            "strength": 82,
+            "wpa_flags": 0,
+            "wpa_flags_label": "(none)"
+          }
+        ],
+        "revision": 3,
+        "snapshot": {
+          "age_ms": 0,
+          "refresh_requested": false,
+          "scanning": false,
+          "source": "network-manager",
+          "stale": false,
+          "updated_at_ms": 1762000000000
+        }
+      },
+      "event": "changed",
+      "protocol": "nm-api",
+      "stream": "wifi.networks",
+      "subscription_id": "networks-subscription",
+      "version": 2
+    },
+    "initial": {
+      "data": {
+        "added": [
+          {
+            "access_points": [
+              {
+                "active": false,
+                "band": "5 GHz",
+                "bandwidth_mhz": 80,
+                "bssid": "00:11:22:33:44:55",
+                "channel": 36,
+                "device_iface": "wlan0",
+                "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+                "flags": 1,
+                "frequency": 5180,
+                "last_seen": 1234,
+                "last_seen_age_ms": 2500,
+                "max_bitrate_mbps": 866,
+                "mode": "Infra",
+                "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+                "rsn_flags": 256,
+                "rsn_flags_label": "psk",
+                "security": "WPA2/3",
+                "ssid": "Example",
+                "ssid_bytes": [
+                  69,
+                  120,
+                  97,
+                  109,
+                  112,
+                  108,
+                  101
+                ],
+                "ssid_hex": "4578616d706c65",
+                "strength": 82,
+                "wpa_flags": 0,
+                "wpa_flags_label": "(none)"
+              }
+            ],
+            "active": false,
+            "auth": {
+              "key_management": [
+                "wpa-psk"
+              ],
+              "kind": "wpa-personal",
+              "note": null,
+              "optional_fields": [],
+              "required_fields": [
+                "password"
+              ],
+              "supported": true
+            },
+            "band": "5 GHz",
+            "bandwidth_mhz": 80,
+            "bssid": "00:11:22:33:44:55",
+            "capabilities": {
+              "can_connect": true,
+              "can_connect_now": false,
+              "can_connect_with_credentials": false,
+              "can_connect_with_password": true,
+              "can_forget": false,
+              "can_set_mac_randomization": false,
+              "can_set_send_hostname": false,
+              "can_share_qr": false,
+              "can_toggle_autoconnect": false,
+              "can_toggle_casting": false,
+              "needs_credentials": false,
+              "needs_password": true,
+              "supported_auth": true,
+              "unsupported_reason": null
+            },
+            "channel": 36,
+            "connect_prompt": {
+              "kind": "password",
+              "message": "Enter the Wi-Fi password, then press Enter.",
+              "optional_fields": [],
+              "required_fields": [
+                "password"
+              ]
+            },
+            "device_iface": "wlan0",
+            "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+            "flags": 1,
+            "frequency": 5180,
+            "key": "ssid-hex:4578616d706c65|security:personal|ifname:776c616e30",
+            "last_seen": 1234,
+            "last_seen_age_ms": 2500,
+            "max_bitrate_mbps": 866,
+            "mode": "Infra",
+            "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+            "portal_hint": {
+              "auto_open_on_connect": false,
+              "reason": null
+            },
+            "primary_profile": null,
+            "profiles": [],
+            "rsn_flags": 256,
+            "rsn_flags_label": "psk",
+            "security": "WPA2/3",
+            "security_class": "personal",
+            "share": {
+              "reason": "Wi-Fi QR sharing requires an open network or a saved profile with a readable password.",
+              "requires_profile_secret_check": false,
+              "shareable": false
+            },
+            "ssid": "Example",
+            "ssid_bytes": [
+              69,
+              120,
+              97,
+              109,
+              112,
+              108,
+              101
+            ],
+            "ssid_hex": "4578616d706c65",
+            "strength": 82,
+            "wpa_flags": 0,
+            "wpa_flags_label": "(none)"
+          }
+        ],
+        "base_revision": 0,
+        "changed": [],
+        "epoch": "network-epoch-contract",
+        "initial": true,
+        "removed": [],
+        "revision": 1,
+        "snapshot": {
+          "age_ms": 0,
+          "refresh_requested": false,
+          "scanning": false,
+          "source": "network-manager",
+          "stale": false,
+          "updated_at_ms": 1762000000000
+        }
+      },
+      "event": "changed",
+      "protocol": "nm-api",
+      "stream": "wifi.networks",
+      "subscription_id": "networks-subscription",
+      "version": 2
+    },
+    "lost": {
+      "data": {
+        "added": [
+          {
+            "access_points": [
+              {
+                "active": false,
+                "band": "5 GHz",
+                "bandwidth_mhz": 80,
+                "bssid": "00:11:22:33:44:55",
+                "channel": 36,
+                "device_iface": "wlan0",
+                "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+                "flags": 1,
+                "frequency": 5180,
+                "last_seen": 1234,
+                "last_seen_age_ms": 2500,
+                "max_bitrate_mbps": 866,
+                "mode": "Infra",
+                "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+                "rsn_flags": 0,
+                "rsn_flags_label": "(none)",
+                "security": "WEP",
+                "ssid": "Example",
+                "ssid_bytes": [
+                  69,
+                  120,
+                  97,
+                  109,
+                  112,
+                  108,
+                  101
+                ],
+                "ssid_hex": "4578616d706c65",
+                "strength": 82,
+                "wpa_flags": 0,
+                "wpa_flags_label": "(none)"
+              }
+            ],
+            "active": false,
+            "auth": {
+              "key_management": [
+                "none"
+              ],
+              "kind": "wep",
+              "note": null,
+              "optional_fields": [
+                "wep_key_type"
+              ],
+              "required_fields": [
+                "password"
+              ],
+              "supported": true
+            },
+            "band": "5 GHz",
+            "bandwidth_mhz": 80,
+            "bssid": "00:11:22:33:44:55",
+            "capabilities": {
+              "can_connect": true,
+              "can_connect_now": false,
+              "can_connect_with_credentials": false,
+              "can_connect_with_password": true,
+              "can_forget": false,
+              "can_set_mac_randomization": false,
+              "can_set_send_hostname": false,
+              "can_share_qr": false,
+              "can_toggle_autoconnect": false,
+              "can_toggle_casting": false,
+              "needs_credentials": false,
+              "needs_password": true,
+              "supported_auth": true,
+              "unsupported_reason": null
+            },
+            "channel": 36,
+            "connect_prompt": {
+              "kind": "password",
+              "message": "Enter the Wi-Fi password, then press Enter.",
+              "optional_fields": [
+                "wep_key_type"
+              ],
+              "required_fields": [
+                "password"
+              ]
+            },
+            "device_iface": "wlan0",
+            "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+            "flags": 1,
+            "frequency": 5180,
+            "key": "ssid-hex:4578616d706c65|security:legacy|ifname:776c616e30",
+            "last_seen": 1234,
+            "last_seen_age_ms": 2500,
+            "max_bitrate_mbps": 866,
+            "mode": "Infra",
+            "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+            "portal_hint": {
+              "auto_open_on_connect": false,
+              "reason": null
+            },
+            "primary_profile": null,
+            "profiles": [],
+            "rsn_flags": 0,
+            "rsn_flags_label": "(none)",
+            "security": "WEP",
+            "security_class": "legacy",
+            "share": {
+              "reason": "Wi-Fi QR sharing requires an open network or a saved profile with a readable password.",
+              "requires_profile_secret_check": false,
+              "shareable": false
+            },
+            "ssid": "Example",
+            "ssid_bytes": [
+              69,
+              120,
+              97,
+              109,
+              112,
+              108,
+              101
+            ],
+            "ssid_hex": "4578616d706c65",
+            "strength": 82,
+            "wpa_flags": 0,
+            "wpa_flags_label": "(none)"
+          }
+        ],
+        "base_revision": 1,
+        "changed": [],
+        "epoch": "network-epoch-contract",
+        "initial": false,
+        "removed": [],
+        "revision": 2,
+        "snapshot": {
+          "age_ms": 0,
+          "refresh_requested": false,
+          "scanning": false,
+          "source": "network-manager",
+          "stale": false,
+          "updated_at_ms": 1762000000000
+        }
+      },
+      "event": "changed",
+      "protocol": "nm-api",
+      "stream": "wifi.networks",
+      "subscription_id": "networks-subscription",
+      "version": 2
+    },
+    "replacement": {
+      "data": {
+        "added": [
+          {
+            "access_points": [
+              {
+                "active": false,
+                "band": "5 GHz",
+                "bandwidth_mhz": 80,
+                "bssid": "00:11:22:33:44:55",
+                "channel": 36,
+                "device_iface": "wlan0",
+                "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+                "flags": 1,
+                "frequency": 5180,
+                "last_seen": 1234,
+                "last_seen_age_ms": 2500,
+                "max_bitrate_mbps": 866,
+                "mode": "Infra",
+                "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+                "rsn_flags": 0,
+                "rsn_flags_label": "(none)",
+                "security": "WEP",
+                "ssid": "Example",
+                "ssid_bytes": [
+                  69,
+                  120,
+                  97,
+                  109,
+                  112,
+                  108,
+                  101
+                ],
+                "ssid_hex": "4578616d706c65",
+                "strength": 82,
+                "wpa_flags": 0,
+                "wpa_flags_label": "(none)"
+              }
+            ],
+            "active": false,
+            "auth": {
+              "key_management": [
+                "none"
+              ],
+              "kind": "wep",
+              "note": null,
+              "optional_fields": [
+                "wep_key_type"
+              ],
+              "required_fields": [
+                "password"
+              ],
+              "supported": true
+            },
+            "band": "5 GHz",
+            "bandwidth_mhz": 80,
+            "bssid": "00:11:22:33:44:55",
+            "capabilities": {
+              "can_connect": true,
+              "can_connect_now": false,
+              "can_connect_with_credentials": false,
+              "can_connect_with_password": true,
+              "can_forget": false,
+              "can_set_mac_randomization": false,
+              "can_set_send_hostname": false,
+              "can_share_qr": false,
+              "can_toggle_autoconnect": false,
+              "can_toggle_casting": false,
+              "needs_credentials": false,
+              "needs_password": true,
+              "supported_auth": true,
+              "unsupported_reason": null
+            },
+            "channel": 36,
+            "connect_prompt": {
+              "kind": "password",
+              "message": "Enter the Wi-Fi password, then press Enter.",
+              "optional_fields": [
+                "wep_key_type"
+              ],
+              "required_fields": [
+                "password"
+              ]
+            },
+            "device_iface": "wlan0",
+            "device_path": "/org/freedesktop/NetworkManager/Devices/1",
+            "flags": 1,
+            "frequency": 5180,
+            "key": "ssid-hex:4578616d706c65|security:legacy|ifname:776c616e30",
+            "last_seen": 1234,
+            "last_seen_age_ms": 2500,
+            "max_bitrate_mbps": 866,
+            "mode": "Infra",
+            "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+            "portal_hint": {
+              "auto_open_on_connect": false,
+              "reason": null
+            },
+            "primary_profile": null,
+            "profiles": [],
+            "rsn_flags": 0,
+            "rsn_flags_label": "(none)",
+            "security": "WEP",
+            "security_class": "legacy",
+            "share": {
+              "reason": "Wi-Fi QR sharing requires an open network or a saved profile with a readable password.",
+              "requires_profile_secret_check": false,
+              "shareable": false
+            },
+            "ssid": "Example",
+            "ssid_bytes": [
+              69,
+              120,
+              97,
+              109,
+              112,
+              108,
+              101
+            ],
+            "ssid_hex": "4578616d706c65",
+            "strength": 82,
+            "wpa_flags": 0,
+            "wpa_flags_label": "(none)"
+          }
+        ],
+        "base_revision": 0,
+        "changed": [],
+        "epoch": "replacement-epoch-contract",
+        "initial": true,
+        "removed": [],
+        "revision": 1,
+        "snapshot": {
+          "age_ms": 0,
+          "refresh_requested": false,
+          "scanning": false,
+          "source": "network-manager",
+          "stale": false,
+          "updated_at_ms": 1762000000000
+        }
+      },
+      "event": "changed",
+      "protocol": "nm-api",
+      "stream": "wifi.networks",
+      "subscription_id": "networks-subscription-new",
+      "version": 2
+    }
+  },
   "password_network": {
     "auth": {
       "key_management": [
