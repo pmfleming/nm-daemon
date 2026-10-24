@@ -44,3 +44,23 @@ diff checks, and the five focused RQLens producers before its commit.
   explicit; it does not make the provider-side deletion atomic.
 - Verification: **97 passed, 4 ignored**, strict Clippy/format/diff checks pass.
   Escape-hatch records **9 → 8**, solely from replacing a wildcard test import.
+
+## Stage 3 — Atomic legacy inventory publication
+
+- Fixed a concrete partial-result bug: a failed later UUID query or final owner
+  fence previously left earlier profiles linked to an unavailable inventory.
+  Associations are now staged and published only after all queries and the
+  provider-owner fence succeed; pre-existing associations survive failure.
+- Indexed items by their owned object paths instead of repeatedly searching the
+  item vector. Duplicate global identities and newly appearing UUID-query items
+  reject the snapshot rather than publishing contradictory links. Output remains
+  path-sorted, and locked items with hidden attributes still match via UUID query.
+- Added a bounded session transport (five-second method timeout) and an injectable
+  connection boundary. One private-bus matrix covers success, late query failure,
+  inconsistent item identity, duplicates, and provider loss.
+- Inventory cognitive/cyclomatic/effort: **10/17/84,401 → 7/15/70,474** in the
+  orchestration function; including its connection and item readers:
+  **8/22/84,059**. Complexity adds explicit validation, not weaker checks.
+- Verification: **98 passed, 4 ignored**, strict Clippy/format/diff checks pass.
+  This guarantees atomic *local publication*, not an atomic Secret Service
+  snapshot or protection against all same-owner metadata changes.

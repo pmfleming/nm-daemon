@@ -16,6 +16,8 @@ const SECRET: &str = "org.freedesktop.secrets";
 
 #[cfg(test)]
 mod disposal_tests;
+#[cfg(test)]
+mod inventory_tests;
 
 #[derive(Serialize)]
 struct Inventory {
@@ -228,12 +230,18 @@ fn inventory() -> Result<Inventory> {
 }
 
 fn legacy_inventory(profiles: &mut [Profile]) -> Result<Legacy> {
-    let connection = Connection::session()?;
-    let bus = zbus::blocking::fdo::DBusProxy::new(&connection)?;
+    let connection = zbus::blocking::connection::Builder::session()?
+        .method_timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    legacy_inventory_on(&connection, profiles)
+}
+
+fn legacy_inventory_on(connection: &Connection, profiles: &mut [Profile]) -> Result<Legacy> {
+    let bus = zbus::blocking::fdo::DBusProxy::new(connection)?;
     // Do not activate an absent provider during inventory.
     let owner = bus.get_name_owner(SECRET.try_into()?)?.to_string();
     let service = Proxy::new(
-        &connection,
+        connection,
         owner.as_str(),
         "/org/freedesktop/secrets",
         "org.freedesktop.Secret.Service",
@@ -246,50 +254,73 @@ fn legacy_inventory(profiles: &mut [Profile]) -> Result<Legacy> {
         Ok(service.call("SearchItems", &(attributes,))?)
     };
     let (unlocked, locked) = search(None)?;
-    let mut items = Vec::new();
+    let mut items = HashMap::new();
     for (path, locked) in unlocked
         .into_iter()
         .map(|p| (p, false))
         .chain(locked.into_iter().map(|p| (p, true)))
     {
-        let item = Proxy::new(
-            &connection,
-            owner.as_str(),
-            path.as_str(),
-            "org.freedesktop.Secret.Item",
-        )?;
-        let attributes: HashMap<String, String> = item.get_property("Attributes")?;
-        items.push(LegacyItem {
-            path: path.to_string(),
-            locked,
-            attributes_visible: !attributes.is_empty(),
-            uuid: attributes.get("uuid").cloned(),
-            setting: attributes.get("setting").cloned(),
-            key: attributes.get("key").cloned(),
-            legacy_path_only: attributes.contains_key("connection_path")
-                && !attributes.contains_key("uuid"),
-            matched_profiles: Vec::new(),
-        });
+        let item = legacy_item(connection, &owner, &path, locked)?;
+        anyhow::ensure!(
+            items.insert(path, item).is_none(),
+            "duplicate legacy item identity"
+        );
     }
-    for profile in profiles {
+    let mut associations = Vec::with_capacity(profiles.len());
+    for profile in profiles.iter() {
         let (unlocked, locked) = search(Some(&profile.uuid))?;
+        let mut paths = Vec::new();
         for path in unlocked.into_iter().chain(locked) {
-            profile.legacy_items.push(path.to_string());
-            if let Some(item) = items.iter_mut().find(|i| i.path == path.as_str()) {
-                item.matched_profiles.push(profile.uuid.clone());
-            }
+            let item = items
+                .get_mut(&path)
+                .context("legacy item appeared during inventory")?;
+            item.matched_profiles.push(profile.uuid.clone());
+            paths.push(path.to_string());
         }
-        profile.legacy_items.sort();
+        paths.sort();
+        associations.push(paths);
     }
-    items.sort_by(|a, b| a.path.cmp(&b.path));
     anyhow::ensure!(
         bus.get_name_owner(SECRET.try_into()?)?.as_str() == owner,
         "provider replaced"
     );
+    // Publish only after every query and the owner fence succeeds. Otherwise the
+    // caller's unavailable Legacy result must not expose partially linked profiles.
+    for (profile, paths) in profiles.iter_mut().zip(associations) {
+        profile.legacy_items = paths;
+    }
+    let mut items: Vec<_> = items.into_values().collect();
+    items.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(Legacy {
         available: true,
         error: None,
         items,
+    })
+}
+
+fn legacy_item(
+    connection: &Connection,
+    owner: &str,
+    path: &OwnedObjectPath,
+    locked: bool,
+) -> Result<LegacyItem> {
+    let item = Proxy::new(
+        connection,
+        owner,
+        path.as_str(),
+        "org.freedesktop.Secret.Item",
+    )?;
+    let attributes: HashMap<String, String> = item.get_property("Attributes")?;
+    Ok(LegacyItem {
+        path: path.to_string(),
+        locked,
+        attributes_visible: !attributes.is_empty(),
+        uuid: attributes.get("uuid").cloned(),
+        setting: attributes.get("setting").cloned(),
+        key: attributes.get("key").cloned(),
+        legacy_path_only: attributes.contains_key("connection_path")
+            && !attributes.contains_key("uuid"),
+        matched_profiles: Vec::new(),
     })
 }
 
