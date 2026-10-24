@@ -1,7 +1,16 @@
-use super::*;
+use super::{NM, Policy, ROOT, prepare};
+use crate::daemon_secret::{PendingSecretRequest, SecretPersistenceOutcome};
 use crate::test_support::{bus::TestBus, workflows::isolated};
 use crate::variant::value_map;
+use crate::variant::{ConnectionSettings, owned_value};
+use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use zvariant::{OwnedObjectPath, OwnedValue};
 
 const PATH: &str = "/test/profile";
 const ACTIVATION: &str = "/test/active";

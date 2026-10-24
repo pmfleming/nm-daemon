@@ -140,7 +140,7 @@ pub(super) fn update_profile_secrets(
     }
     for (key, value) in replacements {
         crate::network_credentials::set_system_owned(settings, setting_name, key)?;
-        crate::network_credentials::set_text(settings, setting_name, key, value.to_string())?;
+        crate::network_credentials::set_text(settings, setting_name, key, value)?;
     }
     Ok(())
 }

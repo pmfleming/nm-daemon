@@ -41,24 +41,21 @@ impl Policy {
                 section != "wifi-p2p" || flags & NOT_SAVED != 0,
                 "WPS enrollment requires explicit temporary policy"
             );
-            if flags & NOT_SAVED != 0 {
-                continue;
-            }
-            if flags & AGENT_OWNED != 0 {
-                policy.migration_required = true;
-            } else {
-                policy.persistent.insert(key.clone());
+            match flags & (AGENT_OWNED | NOT_SAVED) {
+                0 => {
+                    policy.persistent.insert(key.clone());
+                }
+                AGENT_OWNED => policy.migration_required = true,
+                _ => {}
             }
         }
         Ok(policy)
     }
     pub(super) fn rejection(&self, save: bool) -> Option<&'static str> {
-        if !save && !self.persistent.is_empty() {
-            Some("temporary-activation-required")
-        } else if save && self.migration_required {
-            Some("networkmanager-migration-required")
-        } else {
-            None
+        match (save, self.persistent.is_empty(), self.migration_required) {
+            (false, false, _) => Some("temporary-activation-required"),
+            (true, _, true) => Some("networkmanager-migration-required"),
+            _ => None,
         }
     }
 }
@@ -122,9 +119,9 @@ fn capture(request: &PendingSecretRequest, supplied: &ConnectionSettings) -> Res
     let profile = proxy(request, &request.connection_path, PROFILE)?;
     let version = bounded(profile.get_property::<u64>("VersionId"))?;
     ensure!(version != 0, "profile version unavailable");
-    let public: ConnectionSettings = bounded(profile.call("GetSettings", &()))?;
+    let public = schema::public_settings(&bounded(profile.call("GetSettings", &()))?)?;
     ensure!(
-        schema::public_settings(&public)? == schema::public_settings(supplied)?,
+        public == schema::public_settings(supplied)?,
         "profile changed during credential prompting"
     );
     ensure!(
@@ -162,7 +159,7 @@ fn capture(request: &PendingSecretRequest, supplied: &ConnectionSettings) -> Res
         "no unambiguous pending activation boundary; storage is unconfirmed"
     );
     Ok(Context {
-        public: schema::public_settings(&public)?,
+        public,
         filename,
         active: matching.remove(0),
     })
@@ -192,10 +189,9 @@ pub(super) fn prepare(
     })
 }
 
-fn confirm(
+fn await_activation(
     request: &PendingSecretRequest,
     context: &Context,
-    values: &HashMap<String, String>,
     cancelled: &AtomicBool,
 ) -> Result<()> {
     let active = proxy(request, context.active.as_str(), ACTIVE)?;
@@ -213,8 +209,18 @@ fn confirm(
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+    Ok(())
+}
+
+fn confirm(
+    request: &PendingSecretRequest,
+    context: &Context,
+    values: &HashMap<String, String>,
+    cancelled: &AtomicBool,
+) -> Result<()> {
     // State was ACTIVATING when captured and is now ACTIVATED: NM has consumed
     // the reply. Reply dispatch alone is deliberately not this synchronization.
+    await_activation(request, context, cancelled)?;
     let profile = proxy(request, &request.connection_path, PROFILE)?;
     let version = bounded(profile.get_property::<u64>("VersionId"))?;
     let public: ConnectionSettings = bounded(profile.call("GetSettings", &()))?;
@@ -236,23 +242,7 @@ fn confirm(
             "credential retention changed"
         );
     }
-    // Do not start background authorization dialogs; explicit foreground
-    // authorization can be retried separately when these permissions are absent.
-    let permissions: HashMap<String, String> =
-        bounded(proxy(request, ROOT, NM)?.call("GetPermissions", &()))?;
-    let acl = public
-        .get("connection")
-        .map(|s| crate::variant::setting_strings(s, "permissions"))
-        .unwrap_or_default();
-    let permission = if acl.len() == 1 {
-        "org.freedesktop.NetworkManager.settings.modify.own"
-    } else {
-        "org.freedesktop.NetworkManager.settings.modify.system"
-    };
-    ensure!(
-        permissions.get(permission).is_some_and(|v| v == "yes"),
-        "authorization needed for durable confirmation"
-    );
+    authorize_confirmation(request, &public)?;
     current(request, cancelled)?;
     ensure!(
         bounded(profile.get_property::<u64>("VersionId"))? == version,
@@ -302,73 +292,107 @@ fn confirm(
     Ok(())
 }
 
+// Never start background authorization dialogs. Foreground authorization can
+// be retried separately when these permissions are absent.
+fn authorize_confirmation(
+    request: &PendingSecretRequest,
+    public: &ConnectionSettings,
+) -> Result<()> {
+    let permissions: HashMap<String, String> =
+        bounded(proxy(request, ROOT, NM)?.call("GetPermissions", &()))?;
+    let acl = public
+        .get("connection")
+        .map(|s| crate::variant::setting_strings(s, "permissions"))
+        .unwrap_or_default();
+    let permission = if acl.len() == 1 {
+        "org.freedesktop.NetworkManager.settings.modify.own"
+    } else {
+        "org.freedesktop.NetworkManager.settings.modify.system"
+    };
+    ensure!(
+        permissions.get(permission).is_some_and(|v| v == "yes"),
+        "authorization needed for durable confirmation"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod confirmation_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::variant::value_map;
+    use super::Policy;
+    use crate::network_credentials::secret_keys_for;
+    use crate::variant::{ConnectionSettings, value_map};
+    use anyhow::Result;
     #[test]
-    fn vpn_messages_are_not_credentials_or_permission_to_guess_a_password() -> Result<()> {
-        let keys = crate::daemon_secret::secret_keys_for(
-            "vpn",
-            &[
-                "vpn.secrets.cookie".into(),
-                "x-vpn-message:Enter a fresh token".into(),
-            ],
-        );
-        assert_eq!(keys, ["cookie"]);
-        let keys = crate::daemon_secret::secret_keys_for(
-            "vpn",
-            &["x-vpn-message:Enter a fresh token".into()],
-        );
-        assert!(Policy::from_request(&ConnectionSettings::new(), "vpn", &keys).is_err());
-        Ok(())
+    fn hints_preserve_schema_names_and_never_guess_credentials_from_vpn_messages() {
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            ("vpn", &[], &["password"]),
+            ("vpn", &[""], &[]),
+            ("vpn", &["x-vpn-message:token"], &[]),
+            (
+                "vpn",
+                &["vpn.secrets.cookie", "x-vpn-message:token"],
+                &["cookie"],
+            ),
+            (
+                "vpn",
+                &["vpn.cookie", "cookie", "vpn.secrets."],
+                &["cookie"],
+            ),
+            ("wireguard", &[], &["private-key"]),
+            (
+                "wireguard",
+                &["wireguard.peers.key.preshared-key"],
+                &["peers.key.preshared-key"],
+            ),
+            ("wifi-p2p", &[], &["wps-pin"]),
+            ("802-11-wireless-security", &[], &["psk"]),
+            ("802-1x", &[""], &["password"]),
+            ("802-1x", &["unknown", "pin"], &["unknown", "pin"]),
+        ];
+        for (section, hints, expected) in cases {
+            let hints = hints.iter().map(|hint| (*hint).into()).collect::<Vec<_>>();
+            let keys = secret_keys_for(section, &hints);
+            assert_eq!(keys, *expected, "{section}: {hints:?}");
+        }
+        assert!(Policy::from_request(&ConnectionSettings::new(), "vpn", &[]).is_err());
     }
 
     #[test]
-    fn mixed_agent_and_system_ownership_requires_migration_not_implicit_conversion() -> Result<()> {
-        let settings = ConnectionSettings::from([(
-            "802-1x".into(),
-            value_map([
-                ("password-flags", 0u32.into()),
-                ("private-key-password-flags", 1u32.into()),
-            ])?,
-        )]);
-        let policy = Policy::from_request(
-            &settings,
-            "802-1x",
-            &["password".into(), "private-key-password".into()],
-        )?;
-        assert_eq!(
-            policy.rejection(false),
-            Some("temporary-activation-required")
-        );
-        assert_eq!(
-            policy.rejection(true),
-            Some("networkmanager-migration-required")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn retention_is_per_secret_and_no_save_cannot_silently_persist() -> Result<()> {
-        let settings = ConnectionSettings::from([(
-            "802-1x".into(),
-            value_map([("password-flags", 0u32.into()), ("pin-flags", 2u32.into())])?,
-        )]);
-        let policy = Policy::from_request(&settings, "802-1x", &["password".into(), "pin".into()])?;
-        assert!(policy.persistent.contains("password"));
-        assert!(!policy.persistent.contains("pin"));
-        assert_eq!(
-            policy.rejection(false),
-            Some("temporary-activation-required")
-        );
-        assert_eq!(policy.rejection(true), None);
-        let temporary = Policy::from_request(&settings, "802-1x", &["pin".into()])?;
-        assert_eq!(temporary.rejection(false), None);
-        assert!(temporary.persistent.is_empty());
+    fn retention_is_per_secret_and_never_implicitly_converts_ownership() -> Result<()> {
+        for flags in 0..=7u32 {
+            let settings = ConnectionSettings::from([(
+                "802-1x".into(),
+                value_map([("password-flags", 0u32.into()), ("pin-flags", flags.into())])?,
+            )]);
+            let pin_persistent = flags & 3 == 0;
+            let migration = flags & 3 == 1;
+            for keys in [vec!["pin".into()], vec!["password".into(), "pin".into()]] {
+                let mixed = keys.len() == 2;
+                let policy = Policy::from_request(&settings, "802-1x", &keys)?;
+                assert_eq!(policy.persistent.contains("password"), mixed);
+                assert_eq!(policy.persistent.contains("pin"), pin_persistent);
+                assert_eq!(policy.migration_required, migration);
+                assert_eq!(
+                    policy.rejection(false),
+                    (mixed || pin_persistent).then_some("temporary-activation-required")
+                );
+                assert_eq!(
+                    policy.rejection(true),
+                    migration.then_some("networkmanager-migration-required")
+                );
+            }
+            let wps = ConnectionSettings::from([(
+                "wifi-p2p".into(),
+                value_map([("wps-pin-flags", flags.into())])?,
+            )]);
+            assert_eq!(
+                Policy::from_request(&wps, "wifi-p2p", &["wps-pin".into()]).is_ok(),
+                flags & 2 != 0
+            );
+        }
         Ok(())
     }
 }

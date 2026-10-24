@@ -31,7 +31,7 @@ fn settings(uuid: &str, password: bool) -> ConnectionSettings {
             &mut settings,
             "802-11-wireless-security",
             "psk",
-            "synthetic-password".into(),
+            "synthetic-password",
         )
         .unwrap();
     }

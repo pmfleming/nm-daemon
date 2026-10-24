@@ -338,7 +338,7 @@ fn policy_preserves_not_required_and_blocks_ambiguous_shared_wep_conversion() ->
             )]),
         )]);
         let mut edited = original.clone();
-        crate::network_credentials::set_text(&mut edited, section, key, "synthetic".into())?;
+        crate::network_credentials::set_text(&mut edited, section, key, "synthetic")?;
         edited.get_mut(section).unwrap().insert(
             crate::network_credentials::flags_key(key),
             owned_value(0u32)?,

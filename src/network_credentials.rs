@@ -110,6 +110,56 @@ pub(crate) fn known_keys(section: &str) -> &'static [&'static str] {
     }
 }
 
+/// Plugin hints name arbitrary credentials; informational VPN messages never
+/// authorize a guessed password. Unknown fixed-schema hints survive so policy
+/// validation rejects them rather than substituting a persistent password.
+pub(crate) fn secret_keys_for(section: &str, hints: &[String]) -> Vec<String> {
+    let plugin = accepts_plugin_secret_names(section);
+    let mut keys: Vec<String> = hints
+        .iter()
+        .filter_map(|hint| {
+            let hint = if plugin {
+                plugin_hint(section, hint)?
+            } else {
+                hint
+            };
+            (!hint.is_empty()).then(|| hint.to_string())
+        })
+        .collect();
+    if plugin {
+        keys.dedup();
+    }
+    if hints.is_empty() || (!plugin && keys.is_empty()) {
+        keys.push(default_secret_key_for_setting(section).into());
+    }
+    keys
+}
+
+pub(crate) fn accepts_plugin_secret_names(section: &str) -> bool {
+    matches!(section, "vpn" | "wireguard")
+}
+
+fn plugin_hint<'a>(section: &str, hint: &'a str) -> Option<&'a str> {
+    if section == "vpn" && hint.starts_with("x-vpn-message:") {
+        return None;
+    }
+    let hint = hint.strip_prefix("vpn.secrets.").unwrap_or(hint);
+    Some(
+        hint.strip_prefix(section)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .unwrap_or(hint),
+    )
+}
+
+pub(crate) fn default_secret_key_for_setting(section: &str) -> &'static str {
+    match section {
+        "802-11-wireless-security" => "psk",
+        "wifi-p2p" => "wps-pin",
+        "wireguard" => "private-key",
+        _ => "password",
+    }
+}
+
 /// Settings whose credentials must be preserved before a durable profile edit.
 pub(crate) fn requires_secrets(section: &str, data: &HashMap<String, OwnedValue>) -> bool {
     if section == "802-11-wireless-security" {
@@ -289,13 +339,13 @@ pub(crate) fn set_text(
     settings: &mut ConnectionSettings,
     section: &str,
     key: &str,
-    value: String,
+    value: &str,
 ) -> Result<()> {
     if section == "vpn" {
         extend_vpn_map(
             settings.entry(section.into()).or_default(),
             "secrets",
-            [(key, value.as_str())],
+            [(key, value)],
         )?;
     } else if section == "wireguard"
         && let Some(public_key) = peer_key(key)
@@ -312,7 +362,7 @@ pub(crate) fn set_text(
             "unsupported secret schema"
         );
         let value = if key == "password-raw" {
-            owned_value(value.into_bytes())?
+            owned_value(value.as_bytes())?
         } else {
             owned_value(value)?
         };
@@ -440,7 +490,7 @@ mod tests {
         ] {
             assert_eq!(flags(&s, section, key)?, 1);
             set_system_owned(&mut s, section, key)?;
-            set_text(&mut s, section, key, "synthetic".into())?;
+            set_text(&mut s, section, key, "synthetic")?;
             assert_eq!(flags(&s, section, key)?, 0);
             assert_eq!(text(&s, section, key).as_deref(), Some("synthetic"));
         }
@@ -448,12 +498,18 @@ mod tests {
         assert!(flags(&s, "vpn", "unspecified").is_err());
         assert!(!s["802-11-wireless-security"].contains_key("wep-key2-flags"));
         assert_eq!(values(&s)?.len(), 3);
+        let raw = "nul\0é";
+        set_text(&mut s, "802-1x", "password-raw", raw)?;
+        assert_eq!(
+            crate::variant::value_list::<u8>(&s["802-1x"]["password-raw"]),
+            Some(raw.as_bytes().to_vec())
+        );
         let inventory = flag_inventory(&s)?;
         assert_eq!(inventory["wireguard.peers[0].preshared-key-flags"], 0);
         assert_eq!(inventory["vpn.data.otp-flags"], 2);
-        set_text(&mut s, "vpn", "other", "keep".into())?;
+        set_text(&mut s, "vpn", "other", "keep")?;
         let mut incoming = ConnectionSettings::new();
-        set_text(&mut incoming, "vpn", "password", "replacement".into())?;
+        set_text(&mut incoming, "vpn", "password", "replacement")?;
         merge_secrets(&mut s, &incoming)?;
         assert_eq!(text(&s, "vpn", "password").as_deref(), Some("replacement"));
         assert_eq!(text(&s, "vpn", "other").as_deref(), Some("keep"));
@@ -507,7 +563,7 @@ mod tests {
             let before = target.clone();
             assert!(flags(&target, "wireguard", key).is_err());
             assert!(set_system_owned(&mut target, "wireguard", key).is_err());
-            assert!(set_text(&mut target, "wireguard", key, "no".into()).is_err());
+            assert!(set_text(&mut target, "wireguard", key, "no").is_err());
             assert!(merge_secrets(&mut target, &source).is_err());
             assert_eq!(
                 target, before,

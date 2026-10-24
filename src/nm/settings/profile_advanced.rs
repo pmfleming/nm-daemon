@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
-use zvariant::OwnedValue;
+use zvariant::{DynamicType, OwnedValue, Value};
 
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
@@ -91,7 +91,7 @@ pub(super) fn read_enterprise(settings: &ConnectionSettings) -> Option<ProfileEn
         ca_cert: blob(section, "ca-cert"),
         ca_path: text(section, "ca-path"),
         phase2_ca_path: text(section, "phase2-ca-path"),
-        system_ca_certs: flag(section, "system-ca-certs"),
+        system_ca_certs: setting(section, "system-ca-certs").unwrap_or(false),
         client_cert: blob(section, "client-cert"),
         private_key: blob(section, "private-key"),
         phase1_peapver: text(section, "phase1-peapver"),
@@ -142,9 +142,9 @@ fn apply_connection_fields(
         "autoconnect-priority",
         update.autoconnect_priority,
     )?;
-    set_clearable_text(connection, "zone", update.firewall_zone.as_deref())?;
-    set_list(connection, "permissions", update.permissions.as_deref())?;
-    set_list(connection, "secondaries", update.secondaries.as_deref())?;
+    set_clearable(connection, "zone", update.firewall_zone.as_deref())?;
+    set_clearable(connection, "permissions", update.permissions.as_deref())?;
+    set_clearable(connection, "secondaries", update.secondaries.as_deref())?;
     if let Some(enabled) = update.casting_enabled {
         super::set_casting_enabled(settings, enabled)?;
     }
@@ -157,13 +157,13 @@ fn apply_wireless_fields(
 ) -> Result<()> {
     validate_wireless_update(update)?;
     let wireless = settings.entry(WIRELESS.to_string()).or_default();
-    set_clearable_text(wireless, "bssid", update.bssid.as_deref())?;
-    set_clearable_text(wireless, "mac-address", update.mac_address.as_deref())?;
-    set_clearable_text(wireless, "mode", update.mode.as_deref())?;
+    set_clearable(wireless, "bssid", update.bssid.as_deref())?;
+    set_clearable(wireless, "mac-address", update.mac_address.as_deref())?;
+    set_clearable(wireless, "mode", update.mode.as_deref())?;
     apply_cloned_address(wireless, update.cloned_mac_address.as_deref())?;
     insert_optional_value(wireless, "mtu", update.mtu)?;
     apply_band(wireless, update.band)?;
-    apply_channel(wireless, update.channel)
+    set_clearable(wireless, "channel", update.channel)
 }
 
 fn validate_wireless_update(update: &WifiProfileAdvancedUpdate) -> Result<()> {
@@ -194,7 +194,7 @@ fn apply_cloned_address(
     // A literal cloned MAC and its keyword policy occupy the same property.
     wireless.remove("cloned-mac-address");
     wireless.remove("mac-address-randomization");
-    set_clearable_text(wireless, "assigned-mac-address", Some(cloned))
+    set_clearable(wireless, "assigned-mac-address", Some(cloned))
 }
 
 fn apply_band(wireless: &mut HashMap<String, OwnedValue>, band: Option<WifiBand>) -> Result<()> {
@@ -210,29 +210,17 @@ fn apply_band(wireless: &mut HashMap<String, OwnedValue>, band: Option<WifiBand>
     Ok(())
 }
 
-fn apply_channel(wireless: &mut HashMap<String, OwnedValue>, channel: Option<u32>) -> Result<()> {
-    let Some(channel) = channel else {
-        return Ok(());
-    };
-    if channel == 0 {
-        wireless.remove("channel");
-    } else {
-        wireless.insert("channel".to_string(), owned_value(channel)?);
-    }
-    Ok(())
-}
-
 fn apply_ip_fields(
     settings: &mut ConnectionSettings,
     update: &WifiProfileAdvancedUpdate,
 ) -> Result<()> {
     let ipv4 = settings.entry("ipv4".to_string()).or_default();
-    set_clearable_text(
+    set_clearable(
         ipv4,
         "dhcp-client-id",
         update.ipv4_dhcp_client_id.as_deref(),
     )?;
-    set_clearable_text(ipv4, "dhcp-hostname", update.ipv4_dhcp_hostname.as_deref())?;
+    set_clearable(ipv4, "dhcp-hostname", update.ipv4_dhcp_hostname.as_deref())?;
     insert_optional_values(
         ipv4,
         [
@@ -276,13 +264,13 @@ fn apply_enterprise(
         ErrorOperation::ProfileOperation,
     )?;
     let section = settings.entry(ENTERPRISE.to_string()).or_default();
-    set_list(section, "eap", update.eap.as_deref())?;
-    set_list(
+    set_clearable(section, "eap", update.eap.as_deref())?;
+    set_clearable(
         section,
         "altsubject-matches",
         update.altsubject_matches.as_deref(),
     )?;
-    set_list(
+    set_clearable(
         section,
         "phase2-altsubject-matches",
         update.phase2_altsubject_matches.as_deref(),
@@ -307,7 +295,7 @@ fn apply_enterprise(
         ("phase2-subject-match", &update.phase2_subject_match),
         ("pac-file", &update.pac_file),
     ] {
-        set_clearable_text(section, key, value.as_deref())?;
+        set_clearable(section, key, value.as_deref())?;
     }
     for (key, value) in [
         ("ca-cert", &update.ca_cert),
@@ -317,7 +305,12 @@ fn apply_enterprise(
         ("phase2-client-cert", &update.phase2_client_cert),
         ("phase2-private-key", &update.phase2_private_key),
     ] {
-        set_certificate(section, key, value.as_deref())?;
+        crate::nm::profile_policy::set_certificate_reference(
+            section,
+            key,
+            value.as_deref(),
+            ErrorOperation::ProfileOperation,
+        )?;
     }
     insert_optional_value(section, "system-ca-certs", update.system_ca_certs)?;
     insert_optional_values(
@@ -340,21 +333,6 @@ fn apply_enterprise(
             ),
             ("pin-flags", update.pin_flags),
         ],
-    )
-}
-
-/// NetworkManager stores certificates as bytes; a `file://`/`pkcs11:` URI is
-/// written as a NUL-terminated byte string exactly as `nmcli` does.
-fn set_certificate(
-    section: &mut HashMap<String, OwnedValue>,
-    key: &str,
-    value: Option<&str>,
-) -> Result<()> {
-    crate::nm::profile_policy::set_certificate_reference(
-        section,
-        key,
-        value,
-        ErrorOperation::ProfileOperation,
     )
 }
 
@@ -392,31 +370,20 @@ fn validate_eap_methods(eap: Option<&[String]>) -> Result<()> {
     Ok(())
 }
 
-fn set_clearable_text(
+/// For editor fields whose default means clear (empty text/list, channel zero).
+/// Absent preserves. Other scalars use `insert_optional_value`: zero/false are values.
+fn set_clearable<'a, T>(
     section: &mut HashMap<String, OwnedValue>,
     key: &str,
-    value: Option<&str>,
-) -> Result<()> {
+    value: Option<T>,
+) -> Result<()>
+where
+    T: Into<Value<'a>> + DynamicType + Default + PartialEq,
+{
     let Some(value) = value else {
         return Ok(());
     };
-    if value.is_empty() {
-        section.remove(key);
-    } else {
-        section.insert(key.to_string(), owned_value(value)?);
-    }
-    Ok(())
-}
-
-fn set_list(
-    section: &mut HashMap<String, OwnedValue>,
-    key: &str,
-    value: Option<&[String]>,
-) -> Result<()> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.is_empty() {
+    if value == T::default() {
         section.remove(key);
     } else {
         section.insert(key.to_string(), owned_value(value)?);
@@ -443,36 +410,26 @@ fn blob(section: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
     }
 }
 
-fn flag(section: &HashMap<String, OwnedValue>, key: &str) -> bool {
-    setting(section, key).unwrap_or(false)
-}
-
 fn secret_flags(section: &HashMap<String, OwnedValue>, key: &str) -> SecretFlags {
     SecretFlags::from_code(setting(section, key).unwrap_or(0))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::{apply_advanced, check_expected_version, profile_version, validate_mode};
     use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
     use crate::model::{ProfileEnterpriseUpdate, WifiBand, WifiProfileAdvancedUpdate};
-    use crate::variant::{ConnectionSettings, owned_value};
+    use crate::variant::{ConnectionSettings, owned_value, setting, value_map};
+    use serde_json::json;
 
     fn settings() -> ConnectionSettings {
         ConnectionSettings::from([(
             "connection".to_string(),
-            HashMap::from([
-                (
-                    "id".to_string(),
-                    owned_value("Example".to_string()).unwrap(),
-                ),
-                (
-                    "timestamp".to_string(),
-                    owned_value(1_762_000_000_u64).unwrap(),
-                ),
-            ]),
+            value_map([
+                ("id", "Example".into()),
+                ("timestamp", 1_762_000_000_u64.into()),
+            ])
+            .unwrap(),
         )])
     }
     #[test]
@@ -480,28 +437,16 @@ mod tests {
         assert!(validate_mode("infrastructure").is_ok());
         assert!(validate_mode("ap").is_ok());
         assert!(validate_mode("adhoc").is_err());
-        for enterprise in [
-            ProfileEnterpriseUpdate {
-                eap: Some(vec!["tls".into(), "not-a-method".into()]),
-                ..Default::default()
-            },
-            ProfileEnterpriseUpdate {
-                ca_cert: Some("/etc/ssl/ca.pem".into()),
-                ..Default::default()
-            },
-            ProfileEnterpriseUpdate {
-                phase1_peaplabel: Some("2".into()),
-                ..Default::default()
-            },
+        for update in [
+            json!({"enterprise": {"eap": ["tls", "not-a-method"]}}),
+            json!({"enterprise": {"ca_cert": "/etc/ssl/ca.pem"}}),
+            json!({"enterprise": {"phase1_peaplabel": "2"}}),
+            json!({"mode": "adhoc"}),
+            json!({"ipv6_privacy": 3}),
+            json!({"band": "2.4", "channel": 36}),
         ] {
-            let error = apply_advanced(
-                &mut settings(),
-                &WifiProfileAdvancedUpdate {
-                    enterprise: Some(enterprise),
-                    ..Default::default()
-                },
-            )
-            .unwrap_err();
+            let update = serde_json::from_value(update).unwrap();
+            let error = apply_advanced(&mut settings(), &update).unwrap_err();
             assert_eq!(
                 ErrorReport::from_error(&error, ErrorOperation::Unknown).code,
                 ErrorCode::ValidationError
@@ -520,22 +465,14 @@ mod tests {
                 },
             )
             .unwrap();
-            assert_eq!(
-                super::read_enterprise(&peap)
-                    .unwrap()
-                    .phase1_peaplabel
-                    .as_deref(),
-                expected
-            );
+            let enterprise = super::read_enterprise(&peap).unwrap();
+            assert_eq!(enterprise.phase1_peaplabel.as_deref(), expected);
         }
         for (nm_key, api_key) in [("ca-path", "ca_path"), ("phase2-ca-path", "phase2_ca_path")] {
             let mut original = settings();
             original.insert(
                 "802-1x".into(),
-                HashMap::from([(
-                    nm_key.into(),
-                    owned_value("/home/user/custom-ca".to_string()).unwrap(),
-                )]),
+                value_map([(nm_key, "/home/user/custom-ca".into())]).unwrap(),
             );
             apply_advanced(&mut original, &WifiProfileAdvancedUpdate::default()).unwrap();
             let permissions = vec!["user:alice:".to_string()];
@@ -582,17 +519,13 @@ mod tests {
         let mut settings = settings();
         let version = profile_version(&settings);
         assert!(check_expected_version(&settings, Some(&version)).is_ok());
-        let update = WifiProfileAdvancedUpdate {
-            autoconnect_priority: Some(30),
-            casting_enabled: Some(true),
-            bssid: Some("00:11:22:33:44:55".to_string()),
-            mtu: Some(1400),
-            band: Some(WifiBand::Ghz5),
-            channel: Some(36),
-            ipv6_privacy: Some(2),
-            ipv4_may_fail: Some(false),
-            ..WifiProfileAdvancedUpdate::default()
-        };
+        let update = serde_json::from_value(json!({
+            "autoconnect_priority": 30, "casting_enabled": true,
+            "permissions": ["user:alice:"], "firewall_zone": "home",
+            "bssid": "00:11:22:33:44:55", "mtu": 1400,
+            "band": "5", "channel": 36, "ipv6_privacy": 2, "ipv4_may_fail": false
+        }))
+        .unwrap();
         apply_advanced(&mut settings, &update).expect("advanced update");
         let conflict = check_expected_version(&settings, Some(&version)).unwrap_err();
         let report = ErrorReport::from_error(&conflict, ErrorOperation::Unknown);
@@ -603,39 +536,45 @@ mod tests {
         );
 
         let connection = &settings["connection"];
-        assert_eq!(
-            i32::try_from(&connection["autoconnect-priority"]).unwrap(),
-            30
-        );
+        assert_eq!(setting::<i32>(connection, "autoconnect-priority"), Some(30));
         assert!(connection.contains_key("id"), "unsent fields are preserved");
-        assert_eq!(i32::try_from(&connection["mdns"]).unwrap(), 1);
         assert!(
-            !connection.contains_key("zone"),
+            !connection.contains_key("secondaries"),
             "unsent fields are not created"
         );
+        assert_eq!(i32::try_from(&connection["mdns"]).unwrap(), 1);
+        assert_eq!(super::strings(connection, "permissions"), ["user:alice:"]);
+        assert_eq!(super::text(connection, "zone").as_deref(), Some("home"));
         let wireless = &settings["802-11-wireless"];
         assert_eq!(
-            <&str>::try_from(&wireless["bssid"]).unwrap(),
-            "00:11:22:33:44:55"
+            setting::<&str>(wireless, "bssid"),
+            Some("00:11:22:33:44:55")
         );
         assert_eq!(<&str>::try_from(&wireless["band"]).unwrap(), "a");
         assert_eq!(u32::try_from(&wireless["channel"]).unwrap(), 36);
         assert!(!bool::try_from(&settings["ipv4"]["may-fail"]).unwrap());
         assert_eq!(i32::try_from(&settings["ipv6"]["ip6-privacy"]).unwrap(), 2);
 
-        apply_advanced(
-            &mut settings,
-            &WifiProfileAdvancedUpdate {
-                bssid: Some(String::new()),
-                band: Some(WifiBand::Auto),
-                ..WifiProfileAdvancedUpdate::default()
-            },
-        )
-        .expect("clearing update");
-
-        let wireless = &settings["802-11-wireless"];
-        assert!(!wireless.contains_key("bssid"));
-        assert!(!wireless.contains_key("band"));
-        assert!(!wireless.contains_key("channel"));
+        let version = profile_version(&settings);
+        apply_advanced(&mut settings, &WifiProfileAdvancedUpdate::default()).unwrap();
+        assert_eq!(
+            profile_version(&settings),
+            version,
+            "unsent fields must survive"
+        );
+        for (band, channel) in [(WifiBand::Ghz5, Some(0)), (WifiBand::Auto, None)] {
+            apply_advanced(&mut settings, &update).unwrap();
+            let update = serde_json::from_value(json!({
+                "bssid": "", "firewall_zone": "", "permissions": [], "band": band, "channel": channel
+            }))
+            .unwrap();
+            apply_advanced(&mut settings, &update).expect("clearing update");
+            let wireless = &settings["802-11-wireless"];
+            assert_eq!(super::text(wireless, "band").as_deref(), band.nm_value());
+            assert!(!wireless.contains_key("bssid"));
+            assert!(!wireless.contains_key("channel"));
+            assert!(!settings["connection"].contains_key("permissions"));
+            assert!(!settings["connection"].contains_key("zone"));
+        }
     }
 }

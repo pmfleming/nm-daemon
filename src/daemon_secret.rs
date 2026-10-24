@@ -23,7 +23,10 @@ use zvariant::OwnedObjectPath;
 
 use crate::daemon_runtime::DaemonRuntime;
 use crate::generated::SECRET_TIMEOUT;
-use crate::network_credentials::{self as credential_schema, SecretValue};
+use crate::network_credentials::{
+    self as credential_schema, SecretValue, accepts_plugin_secret_names,
+    default_secret_key_for_setting, secret_keys_for,
+};
 use crate::nm::{ConnectionSettings, NM_DEST};
 use crate::output::api_data_value;
 use crate::protocol::{Method, Stream};
@@ -168,7 +171,7 @@ impl SecretAgentInterface {
     ) -> Result<zbus::object_server::ResponseDispatchNotifier<ConnectionSettings>, SecretAgentError>
     {
         let mut request = PendingSecretRequest::new(connection_path, setting_name, hints, flags);
-        request.nm_owner = Some(self.authorize(&header).await?);
+        let owner = self.authorize(&header).await?;
         request.nm_connection = self
             .runtime
             .upgrade()
@@ -196,11 +199,8 @@ impl SecretAgentInterface {
         request.save_supported =
             !request.policy.persistent.is_empty() && !request.policy.migration_required;
         persistence::invalidate(&request.connection_path);
-        request.activation = crate::activation::find(
-            request.nm_owner.as_deref().unwrap(),
-            &connection,
-            &request.connection_path,
-        );
+        request.activation = crate::activation::find(&owner, &connection, &request.connection_path);
+        request.nm_owner = Some(owner);
         if let Some(activation) = &request.activation {
             request.deadline = request.deadline.min(activation.credential_deadline());
         }
@@ -360,7 +360,7 @@ fn apply_stored_values(
                 connection,
                 &request.setting_name,
                 &secret.key,
-                secret.password,
+                &secret.password,
             )?;
         }
     }
@@ -858,16 +858,16 @@ fn apply_response_values(
     request: &PendingSecretRequest,
     values: &HashMap<String, String>,
 ) -> zbus::fdo::Result<()> {
-    values.iter().try_for_each(|(key, value)| {
-        apply_password(connection, &request.setting_name, key, value.to_string())
-    })
+    values
+        .iter()
+        .try_for_each(|(key, value)| apply_password(connection, &request.setting_name, key, value))
 }
 
 fn apply_password(
     connection: &mut ConnectionSettings,
     setting_name: &str,
     key: &str,
-    password: String,
+    password: &str,
 ) -> zbus::fdo::Result<()> {
     credential_schema::set_text(connection, setting_name, key, password).map_err(|_| {
         zbus::fdo::Error::NotSupported("Unsupported secret field or peer identity".into())
@@ -952,62 +952,6 @@ impl PendingSecretRequest {
             .first()
             .map(String::as_str)
             .unwrap_or_else(|| default_secret_key_for_setting(&self.setting_name))
-    }
-}
-
-fn secret_keys_for(setting_name: &str, hints: &[String]) -> Vec<String> {
-    // VPN plugins define their own secret names — OpenConnect alone uses
-    // cookie, gateway, gwcert, resolve, and xmlconfig, and OpenVPN can ask for
-    // an ssh-agent socket. Filtering those against a fixed list would drop the
-    // request, so plugin settings accept whatever NetworkManager hints.
-    if accepts_plugin_secret_names(setting_name) {
-        let mut keys = hints
-            .iter()
-            .filter(|hint| setting_name != "vpn" || !hint.starts_with("x-vpn-message:"))
-            .map(|hint| normalize_plugin_hint(setting_name, hint))
-            .filter(|hint| !hint.is_empty())
-            .collect::<Vec<_>>();
-        keys.dedup();
-        if hints.is_empty() {
-            keys.push(default_secret_key_for_setting(setting_name).to_string());
-        }
-        return keys;
-    }
-    // Unknown hints must fail schema validation, not silently turn an OTP or
-    // another unsupported challenge into the profile's persistent password.
-    let mut keys = hints
-        .iter()
-        .filter(|hint| !hint.is_empty())
-        .cloned()
-        .collect::<Vec<_>>();
-    if keys.is_empty() {
-        keys.push(default_secret_key_for_setting(setting_name).to_string());
-    }
-    keys
-}
-
-/// Settings whose secret names come from a plugin rather than the NetworkManager
-/// schema.
-fn accepts_plugin_secret_names(setting_name: &str) -> bool {
-    matches!(setting_name, "vpn" | "wireguard")
-}
-
-/// With VPN-hint capabilities NetworkManager may prefix hints with
-/// `vpn.secrets.`; peer keys arrive as `peers.<public-key>.preshared-key`.
-fn normalize_plugin_hint(setting_name: &str, hint: &str) -> String {
-    let hint = hint.strip_prefix("vpn.secrets.").unwrap_or(hint);
-    let hint = hint
-        .strip_prefix(&format!("{setting_name}."))
-        .unwrap_or(hint);
-    hint.to_string()
-}
-
-fn default_secret_key_for_setting(setting_name: &str) -> &'static str {
-    match setting_name {
-        "802-11-wireless-security" => "psk",
-        "wifi-p2p" => "wps-pin",
-        "wireguard" => "private-key",
-        _ => "password",
     }
 }
 
@@ -1217,82 +1161,74 @@ mod tests {
 
     #[test]
     fn stored_secrets_must_cover_all_hints_before_suppressing_prompt() {
-        for setting in ["802-1x", "vpn"] {
-            for complete in [false, true] {
-                let mut request = pending_request("multi-key", "multi-key-key");
-                request.setting_name = setting.into();
-                request.secret_keys = vec!["password".into(), "pin".into()];
-                request.flags = super::ALLOW_INTERACTION;
-                request.save_supported = false;
-                let mut prompted = false;
-                let connection = super::resolve_secret_request(
-                    &Arc::new(request),
-                    ConnectionSettings::new(),
-                    |request, connection| {
-                        if !complete {
-                            super::apply_password(
-                                connection,
-                                setting,
-                                "password",
-                                "fresh-password".into(),
-                            )?;
-                        }
-                        let mut stored = vec![SecretValue {
-                            key: "password".into(),
-                            password: "stored-password".into(),
-                        }];
-                        if complete {
-                            stored.push(SecretValue {
-                                key: "pin".into(),
-                                password: "1234".into(),
-                            });
-                        }
-                        super::apply_stored_values(request, connection, stored)
-                    },
-                    |request, mut connection| {
-                        prompted = true;
-                        // Supplying only the missing key preserves the stored password.
-                        let deferred = apply_secret_response(
-                            &mut connection,
-                            request,
-                            SecretResponse {
-                                password: None,
-                                values: HashMap::from([
-                                    ("pin".into(), "1234".into()),
-                                    ("not-requested".into(), "ignored".into()),
-                                ]),
-                                save: true,
-                                cancelled: false,
-                            },
-                        )?;
-                        assert!(matches!(
-                            deferred.unwrap()(&std::sync::atomic::AtomicBool::new(false)),
-                            super::SecretPersistenceOutcome::Failed(_)
-                        ));
-                        Ok(connection)
-                    },
-                )
-                .unwrap();
-                assert_eq!(prompted, !complete);
-                let values = if setting == "vpn" {
-                    super::value_string_map(&connection[setting]["secrets"]).unwrap()
-                } else {
-                    connection[setting]
-                        .iter()
-                        .map(|(key, value)| (key.as_str(), <&str>::try_from(value).unwrap()))
-                        .collect()
-                };
-                assert_eq!(
-                    values["password"],
-                    if complete {
-                        "stored-password"
-                    } else {
-                        "fresh-password"
+        for (setting, complete, password) in [
+            ("802-1x", false, "fresh-password"),
+            ("802-1x", true, "stored-password"),
+            ("vpn", false, "fresh-password"),
+            ("vpn", true, "stored-password"),
+        ] {
+            let mut request = pending_request("multi-key", "multi-key-key");
+            request.setting_name = setting.into();
+            request.secret_keys = vec!["password".into(), "pin".into()];
+            request.flags = super::ALLOW_INTERACTION;
+            request.save_supported = false;
+            let mut prompted = false;
+            let connection = super::resolve_secret_request(
+                &Arc::new(request),
+                ConnectionSettings::new(),
+                |request, connection| {
+                    if !complete {
+                        super::apply_password(connection, setting, "password", "fresh-password")?;
                     }
-                );
-                assert_eq!(values["pin"], "1234");
-                assert!(!values.contains_key("not-requested"));
-            }
+                    let mut stored = vec![SecretValue {
+                        key: "password".into(),
+                        password: "stored-password".into(),
+                    }];
+                    if complete {
+                        stored.push(SecretValue {
+                            key: "pin".into(),
+                            password: "1234".into(),
+                        });
+                    }
+                    super::apply_stored_values(request, connection, stored)
+                },
+                |request, mut connection| {
+                    prompted = true;
+                    // Supplying only the missing key preserves the stored password.
+                    let deferred = apply_secret_response(
+                        &mut connection,
+                        request,
+                        SecretResponse {
+                            password: None,
+                            values: HashMap::from([
+                                ("pin".into(), "1234".into()),
+                                ("not-requested".into(), "ignored".into()),
+                            ]),
+                            save: true,
+                            cancelled: false,
+                        },
+                    )?;
+                    assert!(matches!(
+                        deferred.unwrap()(&std::sync::atomic::AtomicBool::new(false)),
+                        super::SecretPersistenceOutcome::Failed(_)
+                    ));
+                    Ok(connection)
+                },
+            )
+            .unwrap();
+            assert_eq!(prompted, !complete);
+            let values = if setting == "vpn" {
+                super::value_string_map(&connection[setting]["secrets"]).unwrap()
+            } else {
+                connection[setting]
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), <&str>::try_from(value).unwrap()))
+                    .collect()
+            };
+            assert_eq!(
+                values,
+                HashMap::from([("password", password), ("pin", "1234")])
+            );
         }
     }
 
