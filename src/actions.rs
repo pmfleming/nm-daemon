@@ -12,8 +12,9 @@ use crate::cli::{
     ListOptions, ProfileCommand, ScanOptions, VpnConnectOptions, VpnSelectOptions,
 };
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorSource};
+use crate::model::{ActiveConnectionSelector, ProfileSelector, VpnSelector};
 use crate::model::{Ssid, WepKeyType, WifiConnectTarget};
-use crate::nm::{ActiveConnectionSelector, HotspotRequest, Nm, ProfileSelector, VpnSelector};
+use crate::nm::{HotspotRequest, Nm};
 use crate::output::{
     print_access_points_json, print_api_data, print_api_message, print_connect_failure,
     print_connect_result, print_connectivity, print_disconnect_result,

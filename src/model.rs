@@ -12,7 +12,9 @@ mod identity;
 mod network;
 pub(crate) mod prompts;
 pub(crate) mod reason;
+mod selection;
 mod wire_v1;
+pub(crate) use selection::{ActiveConnectionSelector, ProfileSelector, SelectionKind, VpnSelector};
 
 pub(crate) use crate::nm::{HealthSeverity, HealthTransitionKind, NetworkHealthEvent};
 pub(crate) use identity::{Bssid, InterfaceName, NmObjectPath, Ssid};

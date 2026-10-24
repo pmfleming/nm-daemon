@@ -11,7 +11,7 @@ use crate::application::Application;
 use crate::daemon_event::{OperationEvents, started_response};
 use crate::daemon_runtime::{DaemonRuntime, TaskKind};
 use crate::error::{DomainError, ErrorOperation};
-use crate::nm::VpnSelector;
+use crate::model::{SelectionKind, VpnSelector};
 use crate::protocol::{Method, Stream};
 
 const STREAM: Stream = Stream::Vpn;
@@ -48,13 +48,7 @@ impl VpnConnectParams {
             uuid: nonempty(self.uuid),
             path: nonempty(self.path),
         };
-        if selector.uuid.is_none() && selector.path.is_none() {
-            return Err(DomainError::validation(
-                ErrorOperation::VpnOperation,
-                "vpn.connect requires uuid or path",
-            )
-            .into());
-        }
+        SelectionKind::Vpn.validate(selector.uuid.as_deref(), selector.path.as_deref())?;
         let timeout = self.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
         if timeout == 0 || timeout > MAX_TIMEOUT_SECS {
             return Err(DomainError::validation(

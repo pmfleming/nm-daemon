@@ -17,8 +17,8 @@ use super::{
 };
 use crate::error::{DomainError, ErrorOperation, check_cancellation};
 use crate::model::{
-    NetworkConnectionSummary, TypedReason, VpnActivationResult, VpnActiveStatus,
-    VpnDisconnectResult, VpnProfileSummary, VpnStatus, active_connection_state_reason,
+    NetworkConnectionSummary, SelectionKind, TypedReason, VpnActivationResult, VpnActiveStatus,
+    VpnDisconnectResult, VpnProfileSummary, VpnSelector, VpnStatus, active_connection_state_reason,
     device_state_reason, vpn_state_name, vpn_state_reason,
 };
 use crate::variant::{setting, setting_string, value_string_map};
@@ -29,13 +29,6 @@ const NM_VPN_STATE_FAILED: u32 = 6;
 const NM_VPN_STATE_DISCONNECTED: u32 = 7;
 const NM_ACTIVE_STATE_DEACTIVATING: u32 = 3;
 const ACTIVATION_POLL: Duration = Duration::from_millis(200);
-
-/// Selects one saved VPN or WireGuard profile.
-#[derive(Debug, Default)]
-pub(crate) struct VpnSelector {
-    pub(crate) uuid: Option<String>,
-    pub(crate) path: Option<String>,
-}
 
 impl Nm {
     pub(crate) fn vpn_profiles(&self) -> Result<Vec<VpnProfileSummary>> {
@@ -65,7 +58,12 @@ impl Nm {
         timeout: Duration,
         cancellation: Option<&AtomicBool>,
     ) -> Result<VpnActivationResult> {
-        let profile = self.select_vpn_profile(selector)?;
+        let profile = SelectionKind::Vpn.select(
+            self.vpn_profiles()?,
+            selector.uuid.as_deref(),
+            selector.path.as_deref(),
+            |profile| (&profile.uuid, &profile.path),
+        )?;
         let profile_path =
             OwnedObjectPath::try_from(profile.path.as_str()).context("parse VPN profile path")?;
         let root = object_path("/")?;
@@ -122,30 +120,6 @@ impl Nm {
             id: Some(active.id),
             uuid: Some(active.uuid),
             path: Some(active.path),
-        })
-    }
-
-    fn select_vpn_profile(&self, selector: &VpnSelector) -> Result<VpnProfileSummary> {
-        let profiles = self.vpn_profiles()?;
-        let matched = match (&selector.uuid, &selector.path) {
-            (Some(uuid), _) => profiles.into_iter().find(|profile| &profile.uuid == uuid),
-            (None, Some(path)) => profiles.into_iter().find(|profile| &profile.path == path),
-            (None, None) => {
-                return Err(DomainError::validation(
-                    ErrorOperation::VpnOperation,
-                    "vpn.connect requires uuid or path",
-                )
-                .into());
-            }
-        };
-        matched.ok_or_else(|| {
-            DomainError::not_found(
-                ErrorOperation::VpnOperation,
-                "no saved VPN or WireGuard profile matched the request",
-            )
-            .with_detail("uuid", selector.uuid.as_deref().unwrap_or_default())
-            .with_detail("path", selector.path.as_deref().unwrap_or_default())
-            .into()
         })
     }
 

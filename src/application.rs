@@ -21,7 +21,8 @@ use crate::model::{
     WifiStatus, connect_target_for_network, connect_target_for_network_access_point,
     connect_target_for_network_key, validate_ssid_bytes,
 };
-use crate::nm::{ActiveConnectionSelector, HotspotRequest, Nm, ProfileSelector, VpnSelector};
+use crate::model::{ActiveConnectionSelector, ProfileSelector, VpnSelector};
+use crate::nm::{HotspotRequest, Nm};
 use anyhow::Result;
 
 /// Transport-neutral operations layer; boundaries only translate requests and results.

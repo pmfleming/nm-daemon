@@ -6,26 +6,12 @@ use zvariant::OwnedObjectPath;
 use super::{ACTIVE_CONNECTION_IFACE, DEVICE_IFACE, Nm, nonempty_string};
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
-    ActiveConnectionSummary, ConnectivityStatus, NetworkConnectionSummary, NetworkDeactivateResult,
-    NetworkDeviceSummary, NetworkInventory, NetworkStateSummary, ProfileActivationResult,
+    ActiveConnectionSelector, ActiveConnectionSummary, ConnectivityStatus,
+    NetworkConnectionSummary, NetworkDeactivateResult, NetworkDeviceSummary, NetworkInventory,
+    NetworkStateSummary, ProfileActivationResult, ProfileSelector, SelectionKind,
     device_state_reason,
 };
 use crate::variant::{setting, setting_string, setting_strings};
-
-/// Selects one saved profile by UUID or settings path, plus an optional device.
-#[derive(Debug, Default)]
-pub(crate) struct ProfileSelector {
-    pub(crate) uuid: Option<String>,
-    pub(crate) path: Option<String>,
-    pub(crate) device: Option<String>,
-}
-
-/// Selects one active connection by active-connection path or profile UUID.
-#[derive(Debug, Default)]
-pub(crate) struct ActiveConnectionSelector {
-    pub(crate) path: Option<String>,
-    pub(crate) uuid: Option<String>,
-}
 
 impl Nm {
     pub(crate) fn network_inventory(&self) -> Result<NetworkInventory> {
@@ -122,7 +108,12 @@ impl Nm {
         let devices = self.network_devices()?;
         let active_connections = self.network_active_connections()?;
         let connections = self.network_connections_with(&devices, &active_connections)?;
-        let profile = select_profile(connections, selector)?;
+        let profile = SelectionKind::Profile.select(
+            connections,
+            selector.uuid.as_deref(),
+            selector.path.as_deref(),
+            |profile| (&profile.uuid, &profile.path),
+        )?;
         let device = activation_device(&profile, &devices, selector)?;
         let profile_path = object_path(&profile.path)?;
         super::profile_policy::validate_private_ca_paths(
@@ -173,7 +164,12 @@ impl Nm {
         selector: &ActiveConnectionSelector,
     ) -> Result<NetworkDeactivateResult> {
         let active_connections = self.network_active_connections()?;
-        let active = select_active_connection(active_connections, selector)?;
+        let active = SelectionKind::Active.select(
+            active_connections,
+            selector.uuid.as_deref(),
+            selector.path.as_deref(),
+            |active| (&active.uuid, &active.path),
+        )?;
         let path = object_path(&active.path)?;
         tracing::info!(active = %active.path, id = %active.id, "deactivating NetworkManager connection");
         self.root_proxy()
@@ -331,36 +327,6 @@ impl Nm {
     }
 }
 
-fn select_profile(
-    connections: Vec<NetworkConnectionSummary>,
-    selector: &ProfileSelector,
-) -> Result<NetworkConnectionSummary> {
-    let matched = match (&selector.uuid, &selector.path) {
-        (Some(uuid), _) => connections
-            .into_iter()
-            .find(|profile| &profile.uuid == uuid),
-        (None, Some(path)) => connections
-            .into_iter()
-            .find(|profile| &profile.path == path),
-        (None, None) => {
-            return Err(DomainError::validation(
-                ErrorOperation::Connect,
-                "network.activateProfile requires uuid or path",
-            )
-            .into());
-        }
-    };
-    matched.ok_or_else(|| {
-        DomainError::not_found(
-            ErrorOperation::Connect,
-            "no saved profile matched the request",
-        )
-        .with_detail("uuid", selector.uuid.as_deref().unwrap_or_default())
-        .with_detail("path", selector.path.as_deref().unwrap_or_default())
-        .into()
-    })
-}
-
 fn activation_device(
     profile: &NetworkConnectionSummary,
     devices: &[NetworkDeviceSummary],
@@ -378,36 +344,6 @@ fn activation_device(
                 .with_detail("device", requested)
                 .into()
         })
-}
-
-fn select_active_connection(
-    active_connections: Vec<ActiveConnectionSummary>,
-    selector: &ActiveConnectionSelector,
-) -> Result<ActiveConnectionSummary> {
-    let matched = match (&selector.path, &selector.uuid) {
-        (Some(path), _) => active_connections
-            .into_iter()
-            .find(|active| &active.path == path),
-        (None, Some(uuid)) => active_connections
-            .into_iter()
-            .find(|active| &active.uuid == uuid),
-        (None, None) => {
-            return Err(DomainError::validation(
-                ErrorOperation::Disconnect,
-                "network.deactivate requires path or uuid",
-            )
-            .into());
-        }
-    };
-    matched.ok_or_else(|| {
-        DomainError::not_found(
-            ErrorOperation::Disconnect,
-            "no active connection matched the request",
-        )
-        .with_detail("path", selector.path.as_deref().unwrap_or_default())
-        .with_detail("uuid", selector.uuid.as_deref().unwrap_or_default())
-        .into()
-    })
 }
 
 fn object_path(value: &str) -> Result<OwnedObjectPath> {

@@ -9,10 +9,10 @@ use crate::application::{Application, NetworksRequest, ProfileOperation, Profile
 use crate::daemon_runtime::DaemonRuntime;
 use crate::discovery::{AddressFamily, ServiceQuery};
 use crate::error::{DomainError, ErrorOperation};
+use crate::model::{ActiveConnectionSelector, ProfileSelector, SelectionKind};
 use crate::model::{
     NmObjectPath, WifiConnectTarget, WifiProfileUpdate, connect_target_for_network_key,
 };
-use crate::nm::{ActiveConnectionSelector, ProfileSelector};
 use crate::output::api_data_value;
 use crate::protocol::Method;
 
@@ -118,13 +118,7 @@ impl ActivateProfileParams {
             path: nonempty(self.path),
             device: nonempty(self.device),
         };
-        if selector.uuid.is_none() && selector.path.is_none() {
-            return Err(DomainError::validation(
-                ErrorOperation::Connect,
-                "network.activateProfile requires uuid or path",
-            )
-            .into());
-        }
+        SelectionKind::Profile.validate(selector.uuid.as_deref(), selector.path.as_deref())?;
         Ok(selector)
     }
 }
@@ -142,13 +136,7 @@ impl DeactivateParams {
             path: nonempty(self.path),
             uuid: nonempty(self.uuid),
         };
-        if selector.path.is_none() && selector.uuid.is_none() {
-            return Err(DomainError::validation(
-                ErrorOperation::Disconnect,
-                "network.deactivate requires path or uuid",
-            )
-            .into());
-        }
+        SelectionKind::Active.validate(selector.uuid.as_deref(), selector.path.as_deref())?;
         Ok(selector)
     }
 }

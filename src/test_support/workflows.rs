@@ -618,8 +618,9 @@ fn activation_failure_and_early_cancellation_roll_back_hotspot_and_vpn() -> Resu
         ),
         || {
             use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
+            use crate::model::VpnSelector;
             use crate::model::{HotspotSecurity, WifiBand};
-            use crate::nm::{HotspotRequest, VpnSelector};
+            use crate::nm::HotspotRequest;
             for outcome in [Outcome::DhcpFailed, Outcome::CancelBeforeWait] {
                 for vpn in [false, true] {
                     let fake = FakeNm::new([outcome], vpn)?;

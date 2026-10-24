@@ -64,3 +64,25 @@ diff checks, and the five focused RQLens producers before its commit.
 - Verification: **98 passed, 4 ignored**, strict Clippy/format/diff checks pass.
   This guarantees atomic *local publication*, not an atomic Secret Service
   snapshot or protection against all same-owner metadata changes.
+
+## Stage 4 — Shared connection selection policy
+
+- Moved profile, active-connection, and VPN selector DTOs out of the NM backend
+  into `model/selection.rs`. Validation and selection now share one explicit
+  operation/error contract across transport adapters and backend operations.
+- Preserved UUID-first saved/VPN selection, path-first active selection, first
+  matching row, and no fallback when a preferred key misses. Both original keys
+  remain in not-found details. Optional VPN *disconnect* selection is deliberately
+  unchanged; its empty-selector behavior is a different contract.
+- Removed the three obsolete selection wrappers. A single pure matrix tests
+  precedence, missing selectors, empty inventories, duplicate matches, and exact
+  error code/operation/message/details against independent expected values.
+- Production function sums across inventory, VPN, the two transport adapters,
+  and the new selection module: cognitive **62 → 57**, cyclomatic **291 → 288**,
+  effort **669,389 → 663,909**. Project clone groups **114 → 111**; duplicated
+  lines **1,606 → 1,537**.
+- Syntax-only NM facade locality **61.75 → 68.5**, inbound consumers **39 → 38**;
+  daemon-method locality **88 → 91**. VPN-adapter locality worsens **91 → 88**
+  because it still uses NM and now also names the model. These are partial graph
+  heuristics, not a claim that every module score improves.
+- Verification: **99 passed, 4 ignored**, strict Clippy/format/diff checks pass.
