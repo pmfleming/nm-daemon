@@ -120,25 +120,9 @@ fn discard_on(
         .interface("org.freedesktop.Secret.Item")?
         .cache_properties(zbus::proxy::CacheProperties::No)
         .build()?;
-    let check = || -> Result<HashMap<String, String>> {
-        let attributes: HashMap<String, String> = item.get_property("Attributes")?;
-        anyhow::ensure!(
-            expected
-                .iter()
-                .all(|(k, v)| attributes.get(*k).map(String::as_str) == Some(*v)),
-            "item ownership/identity mismatch; no deletion attempted"
-        );
-        anyhow::ensure!(
-            !item.get_property::<bool>("Locked")?,
-            "item is locked; no deletion attempted"
-        );
-        Ok(attributes)
-    };
-    let attributes = check()?;
-    let modified: u64 = item.get_property("Modified")?;
+    let snapshot = checked_item(&item, &expected)?;
     anyhow::ensure!(
-        check()? == attributes
-            && item.get_property::<u64>("Modified")? == modified
+        checked_item(&item, &expected)? == snapshot
             && bus.get_name_owner(SECRET.try_into()?)?.as_str() == owner,
         "item/provider changed; no deletion attempted"
     );
@@ -156,6 +140,26 @@ fn discard_on(
         "deletion outcome unconfirmed; re-inventory before retrying"
     );
     Ok(())
+}
+
+/// The entire metadata snapshot must remain stable, not only the four identity
+/// attributes. The caller's uncached, owner-pinned proxy must be used for both reads.
+fn checked_item(
+    item: &Proxy<'_>,
+    expected: &HashMap<&str, &str>,
+) -> Result<(HashMap<String, String>, u64)> {
+    let attributes: HashMap<String, String> = item.get_property("Attributes")?;
+    anyhow::ensure!(
+        expected
+            .iter()
+            .all(|(key, value)| attributes.get(*key).map(String::as_str) == Some(*value)),
+        "item ownership/identity mismatch; no deletion attempted"
+    );
+    anyhow::ensure!(
+        !item.get_property::<bool>("Locked")?,
+        "item is locked; no deletion attempted"
+    );
+    Ok((attributes, item.get_property("Modified")?))
 }
 
 fn inventory() -> Result<Inventory> {

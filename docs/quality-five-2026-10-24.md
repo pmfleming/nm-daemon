@@ -27,3 +27,20 @@ diff checks, and the five focused RQLens producers before its commit.
 - Verification: **97 passed, 4 ignored**, strict Clippy/format/diff checks pass.
   The extra test and explicit setup boundary increase source size; this stage
   prioritizes security-policy locality and testability over line-count savings.
+
+## Stage 2 — Exact legacy disposal snapshots
+
+- Extracted `checked_item`: each uncached owner-pinned read validates identity
+  and unlocked state and returns **all** attributes plus the modification time.
+  Disposal compares complete snapshots, then fences the provider owner, before
+  deletion. Post-delete absence and prompt rejection remain mandatory.
+- Replaced numeric mock modes with named fault cases. The existing private-bus
+  test now checks exact search filters, empty-identity early rejection, extra
+  metadata changes, modification-time races, a newly locked item, and an item
+  still present after an acknowledged deletion. Secret reads are counted and
+  asserted zero, including failure cases.
+- Disposal cognitive/cyclomatic/effort: **0/15/90,939 → 0/13/64,638**;
+  including the helper: **0/16/75,352**. The helper makes the safety contract
+  explicit; it does not make the provider-side deletion atomic.
+- Verification: **97 passed, 4 ignored**, strict Clippy/format/diff checks pass.
+  Escape-hatch records **9 → 8**, solely from replacing a wildcard test import.
