@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde_json::Value;
 use shelllist_daemon_core::RecentResults;
+use shelllist_daemon_tokio::EventEmitter as SignalEmitter;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
-use zbus::object_server::SignalEmitter;
 
 use crate::application::{Application, BackgroundScanScheduler, ScanRequest};
 use crate::error::{DomainError, ErrorOperation, recover_lock};
@@ -780,7 +780,8 @@ impl DaemonRuntime {
             .collect()
     }
 
-    pub(crate) async fn owner_names(&self) -> Vec<String> {
+    /// Socket owners are retired by their connection, never by a D-Bus watcher.
+    pub(crate) async fn dbus_owner_names(&self) -> Vec<String> {
         let (reply, received) = oneshot::channel();
         let mut owners = HashSet::new();
         if self.control.send(Control::Owners(reply)).await.is_ok() {
@@ -791,7 +792,10 @@ impl DaemonRuntime {
                 .values()
                 .filter_map(|task| task.owner.clone()),
         );
-        owners.into_iter().collect()
+        owners
+            .into_iter()
+            .filter(|owner| owner.starts_with(':'))
+            .collect()
     }
 
     pub(crate) async fn drop_owner(&self, owner: String) {
@@ -803,7 +807,7 @@ impl DaemonRuntime {
             }
         }
         if let Err(error) = self.control.send(Control::DropOwner(owner)).await {
-            tracing::warn!(error = ?error, "could not queue disconnected D-Bus owner cleanup");
+            tracing::warn!(error = ?error, "could not queue disconnected transport owner cleanup");
         }
     }
 

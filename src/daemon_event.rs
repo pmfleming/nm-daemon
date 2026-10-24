@@ -2,7 +2,8 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 use shelllist_daemon_core::{ApiError, ApiIdentity, Correlation, wire::Event};
-use zbus::object_server::SignalEmitter;
+// Keep existing domain-worker signatures; this destination is transport-neutral.
+use shelllist_daemon_tokio::EventEmitter as SignalEmitter;
 
 use crate::error::{DomainError, ErrorCode, ErrorOperation, ErrorReport, best_effort};
 use crate::output::api_data_value;
@@ -99,7 +100,7 @@ pub(crate) fn emit_prepared_event(
         .with_detail("event", event)
         .into());
     }
-    crate::daemon::emit_event_signal(emitter, stream, value.to_string())
+    crate::daemon::emit_event_signal(emitter, stream, value)
 }
 
 pub(crate) fn emit_json_event_nonfatal(

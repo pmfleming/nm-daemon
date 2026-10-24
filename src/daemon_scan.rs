@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use zbus::object_server::SignalEmitter;
+use shelllist_daemon_tokio::EventEmitter as SignalEmitter;
 
 use crate::application::{Application, PreparedScanRequest, ScanEvent, ScanRequest};
 use crate::daemon_event::{OperationEvents, emit_json_event, started_response};

@@ -64,6 +64,11 @@ impl TestBus {
         Ok(bus)
     }
 
+    /// Private, newly-created 0700 directory; also usable by isolated sockets.
+    pub(crate) fn runtime_directory(&self) -> &std::path::Path {
+        &self.directory
+    }
+
     pub(crate) fn address(&self) -> &str {
         self.address.trim()
     }

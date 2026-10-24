@@ -4,8 +4,8 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use serde_json::Value;
+use shelllist_daemon_tokio::EventEmitter as SignalEmitter;
 use tokio::sync::{mpsc, oneshot};
-use zbus::object_server::SignalEmitter;
 
 use super::{CancelOutcome, DaemonRuntime, next_request_id};
 use crate::daemon_status::{SharedPayloads, SubscriptionState, refresh_payloads};

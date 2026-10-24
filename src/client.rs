@@ -9,7 +9,7 @@ const ENDPOINT: DaemonEndpoint =
     DaemonEndpoint::new("nm-daemon", DBUS_BUS_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE);
 
 #[derive(Debug, Clone, Copy)]
-struct NmCorrelation;
+pub(crate) struct NmCorrelation;
 
 impl CorrelationPolicy for NmCorrelation {
     fn operation_id<'a>(&self, response: &'a Value) -> Option<&'a str> {

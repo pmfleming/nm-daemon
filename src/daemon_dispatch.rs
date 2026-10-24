@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use zbus::object_server::SignalEmitter;
+use shelllist_daemon_tokio::EventEmitter as SignalEmitter;
 
 use crate::daemon_event::emit_subscription_event_nonfatal;
 use crate::daemon_runtime::{DaemonRuntime, next_request_id};

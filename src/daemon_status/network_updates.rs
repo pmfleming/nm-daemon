@@ -102,7 +102,7 @@ mod tests {
             "first".into(),
             Some("owner-a".into()),
             vec![Stream::WifiNetworks],
-            emitter.clone(),
+            emitter.clone().into(),
         );
         for (key, strength) in [("a", 50), ("a", 60), ("b", 70)] {
             first.emit_changes(&SharedPayloads {
@@ -114,7 +114,7 @@ mod tests {
             "replacement".into(),
             Some("owner-b".into()),
             vec![Stream::WifiNetworks],
-            emitter,
+            emitter.into(),
         );
         replacement.emit_changes(&SharedPayloads {
             networks: Some(networks("b", 70)),

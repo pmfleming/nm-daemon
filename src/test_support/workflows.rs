@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use zbus::blocking::Proxy;
 use zbus::object_server::SignalEmitter;
@@ -162,7 +162,10 @@ impl FakeNm {
         self.state.lock().unwrap().cancellation.clone()
     }
 
-    pub(crate) fn terminal_event(&self, run: impl FnOnce(SignalEmitter<'static>)) -> Result<Value> {
+    pub(crate) fn terminal_event(
+        &self,
+        run: impl FnOnce(shelllist_daemon_tokio::EventEmitter<'static>),
+    ) -> Result<Value> {
         let proxy = Proxy::new(
             &self.peer.client,
             ":1.0",
@@ -170,14 +173,16 @@ impl FakeNm {
             crate::protocol::DBUS_INTERFACE,
         )?;
         let events = proxy.receive_signal("Event")?;
-        let emitter = SignalEmitter::new(self.peer.server.inner(), "/test")?.into_owned();
+        let emitter = shelllist_daemon_tokio::EventEmitter::from(
+            SignalEmitter::new(self.peer.server.inner(), "/test")?.into_owned(),
+        );
         run(emitter.clone());
         // Same-connection fence: inspect every event emitted by the worker,
         // rather than accepting its first terminal signal and missing duplicates.
         crate::daemon::emit_event_signal(
             &emitter,
             crate::protocol::Stream::Hotspot,
-            r#"{"event":"test-complete"}"#.into(),
+            serde_json::json!({"event":"test-complete"}),
         )?;
         let mut terminal = None;
         for message in events {
@@ -671,6 +676,7 @@ fn activation_failure_and_early_cancellation_roll_back_hotspot_and_vpn() -> Resu
 /// Bound hangs and isolate real cache/history writes without unsafe process-global
 /// environment changes. Never retry a failing child (which could hide flakiness).
 pub(crate) fn isolated(name: &str, run: impl FnOnce() -> Result<()>) -> Result<()> {
+    use std::os::unix::process::CommandExt;
     let name = name
         .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
         .unwrap_or(name);
@@ -689,7 +695,8 @@ pub(crate) fn isolated(name: &str, run: impl FnOnce() -> Result<()>) -> Result<(
     std::fs::create_dir(&directory)?;
     let completed = directory.join("completed");
     let mut child = std::process::Command::new(std::env::current_exe()?)
-        .args(["--exact", name, "--nocapture"])
+        .process_group(0)
+        .args(["--exact", name, "--include-ignored", "--nocapture"])
         .env("NM_WORKFLOW_TEST", name)
         .env("NM_WORKFLOW_COMPLETED", &completed)
         // Keep fixtures runnable on small builders and expose dispatch-startup
@@ -709,7 +716,11 @@ pub(crate) fn isolated(name: &str, run: impl FnOnce() -> Result<()>) -> Result<(
             break Some(status);
         }
         if Instant::now() >= deadline {
-            child.kill()?;
+            // This private group is ours and its leader has NOT been reaped.
+            // Include private buses/native Qt probes, not just the test parent.
+            let pid =
+                rustix::process::Pid::from_raw(child.id() as i32).context("workflow child pid")?;
+            rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)?;
             child.wait()?;
             break None;
         }

@@ -184,7 +184,9 @@ fn restart_recovers_registration_and_fences_pending_work_and_secrets() -> Result
                 "secret-frontend".into(),
                 Some(connection.unique_name().unwrap().to_string()),
                 vec![crate::protocol::Stream::WifiSecret],
-                zbus::object_server::SignalEmitter::new(connection.inner(), "/test")?.into_owned(),
+                zbus::object_server::SignalEmitter::new(connection.inner(), "/test")?
+                    .into_owned()
+                    .into(),
             )?;
             // Exercise the exported interface with a genuine sender and pending reply.
             let agent_owner = connection.unique_name().unwrap().to_string();

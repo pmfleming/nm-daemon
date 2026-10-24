@@ -2,7 +2,7 @@
 
 Local NetworkManager JSON/JSONL adapter and user D-Bus service for Shelllist and similar frontends.
 
-`nm-daemon` is the current project, Rust package, binary, Nix package, and repository name. It is not a human Wi-Fi menu: it exposes a frontend-facing protocol while Shelllist owns UI, prompts, forms, and presentation. The JSON protocol name intentionally remains `nm-api` version 1 for compatibility with existing Shelllist contract checks.
+`nm-daemon` is the current project, Rust package, binary, Nix package, and repository name. It is not a human Wi-Fi menu: it exposes a frontend-facing protocol while Shelllist owns UI, prompts, forms, and presentation. The current JSON protocol is `nm-api` version 2; CLI, D-Bus and Unix ingress share the producer-owned contract.
 
 ## Current state
 
@@ -12,17 +12,17 @@ Local NetworkManager JSON/JSONL adapter and user D-Bus service for Shelllist and
 - CLI and D-Bus adapters share one typed application layer for status, network listing, scan, connect, transactional band selection, disconnect, and saved-profile operations. The frontend `forget` profile operation is a daemon-owned disconnect-and-forget workflow rather than a sequence of UI calls.
 - Connection orchestration is an explicit NetworkManager D-Bus state machine with SSID-based activation verification, target-guarded cancellation, and failed-profile cleanup; BSSID and AP paths are selection hints rather than post-activation invariants. Cancellation deactivates only the captured active-connection object whose profile still has the requested SSID, so a previously healthy profile reactivated after a failed attempt is not torn down.
 - The daemon owns one NetworkManager connection, bounded and panic-contained background work, owner-scoped requests, and signal-driven shared subscriptions; it does not create a polling thread per subscriber.
-- Typed protocol registries, errors, identifiers, authentication/readiness states, cache results, and command results define the internal boundaries while custom serializers preserve the `nm-api` v1 response fields.
+- Typed protocol registries, errors, identifiers, authentication/readiness states, cache results, and command results define the internal boundaries while custom serializers preserve established response fields.
 - Local DNS-SD browsing and resolution is exposed through `discovery.services`, backed by systemd-resolved over D-Bus so the daemon never opens a competing mDNS socket; saved Wi-Fi profiles have a single opt-in Cast toggle with version-guarded mDNS live reapply and a separate system firewall companion that blocks discovery and supported casting traffic when off. Install the required [host integration](docs/mdns-discovery.md) for enforcement, limitations and validation.
 - Event-driven scan/connect, cancellation, NetworkManager SecretAgent bridging, separate NetworkManager credential delivery/storage outcomes, and concurrency-safe cache repositories are implemented.
 - `nm-daemon client` provides a long-lived JSONL frontend session over one D-Bus connection for Shelllist and similar process-oriented UIs.
 
-Stable responses use protocol envelope v1:
+Stable responses use protocol envelope v2:
 
 ```json
 {
   "protocol": "nm-api",
-  "version": 1,
+  "version": 2,
   "ok": true,
   "data": {}
 }
@@ -33,7 +33,7 @@ Failures use typed errors:
 ```json
 {
   "protocol": "nm-api",
-  "version": 1,
+  "version": 2,
   "ok": false,
   "error": {
     "code": "secret-required",
@@ -62,7 +62,7 @@ Current D-Bus surface:
 - Methods:
   - `Call(in s method, in s params_json) -> (out s response_json)`
   - `Subscribe(in as streams) -> (out s response_json)`
-  - `Cancel(in s request_id) -> ()`
+  - `Cancel(in s request_id) -> (out s response_json)`
 - Signal: `Event(s stream, s event_json)`
 
 The canonical method/stream registry—including parameter shapes, response keys, subscription defaults, and events—is generated in [`docs/dbus-daemon.md`](./docs/dbus-daemon.md). `nm-daemon debug protocol-registry` exposes it as JSON for frontend code generation.
@@ -71,11 +71,50 @@ Frontends that cannot conveniently maintain an arbitrary D-Bus client can run `n
 
 `wifi.profile.operation` accepts `details`, `update`, and `reveal-secret` operations for Shelllist's advanced saved-profile editor. Advanced updates atomically replace the editable NetworkManager profile fields for metered/hidden state, MAC policy, hostname privacy, IPv4/IPv6 assignment and DNS. Secret updates accept the compatibility `password` field for the profile's primary secret and a named `secrets` object for WPA Personal, active/all WEP keys, LEAP, and 802.1X `password`, `private-key-password`, and `pin` values. Secret reveal returns `setting_name`, `secret_keys`, `primary_secret_key`, and all readable named `values`, while preserving `password` as the primary-value compatibility alias. Secret reveal and replacement remain JSON/JSONL transported and are never logged. The same method accepts `{"operation":"forget","request_id":"forget-…","key":"…"}` for frontend network removal; explicit legacy targets remain available for compatibility. The daemon cancels matching in-flight connects, waits for cancellation, resolves every saved profile with the target's exact SSID bytes, disables autoconnect, disconnects an active target, waits for confirmed deactivation, then deletes the profiles. Its structured result reports cancelled requests, active/disconnected state, deleted and failed profile paths, warnings, and `portal_session_reset:false`. Logs carry the supplied request ID through acceptance, cancellation, profile resolution, deactivation, each mutation, cache refresh, and the final summary. Forget does not revoke a hotspot's network-side captive-portal authorization.
 
-Contract fixtures derive network/authentication readiness through the production model constructors. Tests lock their serialized v1 boundary in [`test_support/contract-v1.json`](./test_support/contract-v1.json) and exercise the real daemon D-Bus lifecycle against in-process fake NetworkManager and Secret Service peers, alongside command-gateway and concurrent cache I/O coverage.
+Contract fixtures derive network/authentication readiness through the production model constructors. Tests lock their current serialized boundary (historical fixture filename) in [`test_support/contract-v1.json`](./test_support/contract-v1.json) and exercise the real daemon D-Bus lifecycle against in-process fake NetworkManager and Secret Service peers, alongside command-gateway and concurrent cache I/O coverage.
 
-`response_json` is the same `nm-api` v1 envelope the CLI prints today. `discovery.services` accepts a local DNS-SD type such as `_googlecast._tcp`, an optional instance name/interface index, and an address family; it returns systemd-resolved's SRV, address, and TXT results without implementing the application protocol itself. Grouped Wi-Fi networks expose a typed `security_class` (`open`, `enhanced-open`, `legacy`, `personal`, `enterprise`, or `unknown`) for consistent frontend presentation; captive portal remains the active connectivity state. Network identity includes exact SSID bytes, security class, and interface, preventing same-name open/secured networks or different adapters from sharing profile and frontend operation state. `wifi.status` includes Wi-Fi/WWAN software and hardware state, device availability, and airplane-mode state; `radio.setWwanEnabled` and `radio.setAirplaneMode` mutate the NetworkManager radios. Shelllist should refresh scan caches only while the network UI is in use: call `wifi.networks` with `cached:true, refresh_cache:true` for fast open/background warming, or `wifi.scan` with `cache:true` for explicit refresh events, but do not request both refresh paths for the same user action. An explicit, non-default `wifi.networks` subscription reports added, removed, and changed local NetworkManager entries without requesting scans; each delta preserves the current snapshot metadata. Network responses and scan snapshots include source, timestamp, age, stale/scanning state, and refresh intent.
+`response_json` is the same `nm-api` v2 envelope the CLI prints today. `discovery.services` accepts a local DNS-SD type such as `_googlecast._tcp`, an optional instance name/interface index, and an address family; it returns systemd-resolved's SRV, address, and TXT results without implementing the application protocol itself. Grouped Wi-Fi networks expose a typed `security_class` (`open`, `enhanced-open`, `legacy`, `personal`, `enterprise`, or `unknown`) for consistent frontend presentation; captive portal remains the active connectivity state. Network identity includes exact SSID bytes, security class, and interface, preventing same-name open/secured networks or different adapters from sharing profile and frontend operation state. `wifi.status` includes Wi-Fi/WWAN software and hardware state, device availability, and airplane-mode state; `radio.setWwanEnabled` and `radio.setAirplaneMode` mutate the NetworkManager radios. Shelllist should refresh scan caches only while the network UI is in use: call `wifi.networks` with `cached:true, refresh_cache:true` for fast open/background warming, or `wifi.scan` with `cache:true` for explicit refresh events, but do not request both refresh paths for the same user action. An explicit, non-default `wifi.networks` subscription reports added, removed, and changed local NetworkManager entries without requesting scans; each delta preserves the current snapshot metadata. Network responses and scan snapshots include source, timestamp, age, stale/scanning state, and refresh intent.
 
 Connect events carry typed phases plus the original opaque key, exact SSID identity, and available device/AP identifiers. `wifi.band.status` reports current, selected, and visible bands for an active profile; event-driven `wifi.band.set` accepts `auto`, `2.4`, `5`, or `6` and uses a NetworkManager checkpoint to restore the original profile and connection when reactivation fails or is cancelled. See the daemon documentation for the complete event and method shapes.
+
+## Direct Unix JSONL ingress (staged)
+
+The resident daemon also listens on `$XDG_RUNTIME_DIR/nm-daemon.sock`. The shared
+framework requires a canonical, same-user-owned 0700 runtime directory, verifies
+kernel peer UID, and bounds connections, requests, output and write deadlines.
+The socket adapter calls the exact exported object's admission, dispatcher and
+bounded worker lanes in-process; it never creates a D-Bus proxy or another
+NetworkManager connection. D-Bus and `nm-daemon client` remain supported.
+
+Connection owners are server-minted. Socket disconnect cancels only that owner's
+tasks (including target-guarded activation abort), health feedback and
+subscriptions; it does not claim that accepted effects rolled back. Cleanup is
+idempotent and repeated after late accepted work. D-Bus owner reconciliation never
+handles socket identities. Closed socket subscriptions are excluded from
+SecretAgent observer lookups while queued removal is pending.
+
+Events use one domain envelope with a transport-neutral destination. Synchronous
+socket producers fail closed on a full bounded output queue rather than blocking
+the shared actor. Pre-ack event-buffer exhaustion also retires the connection,
+never silently evicts a baseline/final event. Reconnect means fresh subscriptions,
+not replaying uncertain effects.
+
+`wifi.networks` has a subscription-local opaque epoch and exact base/next revisions.
+An initial event is a full baseline; missing history requires a replacement
+subscription. Unversioned read/scan collections are not watermarks for that chain.
+Shelllist isolates the collection subscription from status/health/secret observers
+and provides `SHELLLIST_NM_SOCKET=1` as an explicit opt-in, with no bridge fallback.
+**The matching daemon must already be running:** Unix socket activation and a
+default transport switch are not included. Do not restart a live service merely
+to run the isolated tests.
+
+`cargo test --locked --lib daemon::socket::tests` uses a private bus, real Unix
+sockets and scripted NetworkManager to check dispatch/validation parity, owner
+isolation, cancellation, listener recreation and fresh baselines without replay.
+The ignored `native_quickshell_nm_socket_acceptance` additionally requires actual
+Quickshell and `SHELLLIST_SOURCE`; Shelllist's `tests/README.md` gives the command.
+Its native shared-session renewal test is not performance, hardware, sustained-load
+or OS-process-crash evidence.
 
 ## Startup and packaging
 

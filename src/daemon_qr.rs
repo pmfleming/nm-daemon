@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
-use zbus::object_server::SignalEmitter;
+use shelllist_daemon_tokio::EventEmitter as SignalEmitter;
 
 use crate::daemon_connect::DbusConnectTargetParams;
 use crate::daemon_runtime::DaemonRuntime;

@@ -10,7 +10,9 @@ use crate::daemon_event::emit_json_event_nonfatal;
 use crate::daemon_runtime::DaemonRuntime;
 use crate::error::{ErrorOperation, ensure_domain};
 use crate::protocol::{DBUS_BUS_NAME, DBUS_INTERFACE, DBUS_OBJECT_PATH, Stream};
-use shelllist_daemon_tokio::directed_emitter;
+use shelllist_daemon_tokio::{EventEmitter, directed_emitter};
+
+mod socket;
 
 pub(crate) async fn run_daemon() -> Result<()> {
     let tokio = tokio::runtime::Handle::current();
@@ -48,7 +50,23 @@ pub(crate) async fn run_daemon() -> Result<()> {
         &runtime,
     )));
     log_daemon_started();
-    let result = shelllist_daemon_tokio::wait_for_shutdown().await;
+    let (socket_stop, stopped) = tokio::sync::oneshot::channel();
+    let mut socket_task = tokio::spawn(socket::listen(connection.clone(), async {
+        let _ = stopped.await;
+    }));
+    let (mut result, joined) = tokio::select! {
+        result = shelllist_daemon_tokio::wait_for_shutdown() => (result, false),
+        result = &mut socket_task => (result.context("join NM socket listener").and_then(|result| result), true),
+    };
+    let _ = socket_stop.send(());
+    if !joined {
+        result = result.and(
+            socket_task
+                .await
+                .context("join NM socket shutdown")
+                .and_then(|result| result),
+        );
+    }
     owner_watch.abort();
     nm_watch.abort();
     let _ = nm_watch.await;
@@ -115,28 +133,21 @@ impl NmDaemonInterface {
     }
 }
 
-#[zbus::interface(name = "org.laufan.NmDaemon2")]
 impl NmDaemonInterface {
-    /// Dispatches an nm-api v2 method and returns its JSON envelope.
-    async fn call(
+    /// Both ingress paths share admission, dispatch and bounded worker lanes.
+    async fn call_owned(
         &self,
         method: &str,
         params_json: &str,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        owner: Option<String>,
+        emitter: EventEmitter<'static>,
     ) -> String {
-        let admitted =
-            match self
-                .boundary
-                .call(header.sender().map(|s| s.as_str()), method, params_json)
-            {
-                Ok(admitted) => admitted,
-                Err(response) => return response,
-            };
+        let admitted = match self.boundary.call(owner.as_deref(), method, params_json) {
+            Ok(admitted) => admitted,
+            Err(response) => return response,
+        };
         let method = method.to_string();
         let params_json = params_json.to_string();
-        let owner = header.sender().map(ToString::to_string);
-        let emitter = directed_emitter(&emitter, &header);
         let runtime = Arc::clone(&self.runtime);
         admitted.encoded(
             self.requests
@@ -160,22 +171,16 @@ impl NmDaemonInterface {
         )
     }
 
-    /// Subscribe to daemon event streams. Event signals are directed to the subscribing owner.
-    async fn subscribe(
+    async fn subscribe_owned(
         &self,
         streams: Vec<String>,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        owner: Option<String>,
+        emitter: EventEmitter<'static>,
     ) -> String {
-        let admitted = match self
-            .boundary
-            .subscribe(header.sender().map(|s| s.as_str()), &streams)
-        {
+        let admitted = match self.boundary.subscribe(owner.as_deref(), &streams) {
             Ok(admitted) => admitted,
             Err(response) => return response,
         };
-        let owner = header.sender().map(ToString::to_string);
-        let emitter = directed_emitter(&emitter, &header);
         let runtime = Arc::clone(&self.runtime);
         admitted.encoded(
             self.requests
@@ -193,23 +198,18 @@ impl NmDaemonInterface {
         )
     }
 
-    /// Cancel a daemon request or subscription. In-flight NetworkManager calls may finish later.
-    async fn cancel(
+    /// In-flight NetworkManager calls may finish after cancellation.
+    async fn cancel_owned(
         &self,
         request_id: &str,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        owner: Option<String>,
+        emitter: EventEmitter<'static>,
     ) -> String {
-        let admitted = match self
-            .boundary
-            .cancel(header.sender().map(|s| s.as_str()), request_id)
-        {
+        let admitted = match self.boundary.cancel(owner.as_deref(), request_id) {
             Ok(admitted) => admitted,
             Err(response) => return response,
         };
         let request_id = request_id.to_string();
-        let owner = header.sender().map(ToString::to_string);
-        let emitter = directed_emitter(&emitter, &header);
         let runtime = Arc::clone(&self.runtime);
         match self
             .controls
@@ -249,6 +249,53 @@ impl NmDaemonInterface {
             }
         }
     }
+}
+
+#[zbus::interface(name = "org.laufan.NmDaemon2")]
+impl NmDaemonInterface {
+    async fn call(
+        &self,
+        method: &str,
+        params_json: &str,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> String {
+        self.call_owned(
+            method,
+            params_json,
+            header.sender().map(ToString::to_string),
+            directed_emitter(&emitter, &header).into(),
+        )
+        .await
+    }
+
+    async fn subscribe(
+        &self,
+        streams: Vec<String>,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> String {
+        self.subscribe_owned(
+            streams,
+            header.sender().map(ToString::to_string),
+            directed_emitter(&emitter, &header).into(),
+        )
+        .await
+    }
+
+    async fn cancel(
+        &self,
+        request_id: &str,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> String {
+        self.cancel_owned(
+            request_id,
+            header.sender().map(ToString::to_string),
+            directed_emitter(&emitter, &header).into(),
+        )
+        .await
+    }
 
     #[zbus(signal)]
     async fn event(emitter: &SignalEmitter<'_>, stream: &str, event_json: &str)
@@ -265,7 +312,7 @@ async fn watch_client_disconnects(connection: zbus::Connection, runtime: Arc<Dae
     loop {
         if let Err(error) = run_owner_watch(&connection, &runtime).await {
             tracing::warn!(error = %crate::error::err_chain(&error), "D-Bus owner watcher failed; releasing owned work before retry");
-            for owner in runtime.owner_names().await {
+            for owner in runtime.dbus_owner_names().await {
                 runtime.drop_owner(owner).await;
             }
         }
@@ -292,7 +339,7 @@ async fn reconcile_owners(
     monitor: &shelllist_daemon_tokio::OwnerLossMonitor,
     runtime: &DaemonRuntime,
 ) -> Result<()> {
-    for owner in runtime.owner_names().await {
+    for owner in runtime.dbus_owner_names().await {
         if !monitor.has_owner(&owner).await? {
             runtime.drop_owner(owner).await;
         }
@@ -301,16 +348,13 @@ async fn reconcile_owners(
 }
 
 pub(crate) fn emit_event_signal(
-    emitter: &SignalEmitter<'_>,
+    emitter: &EventEmitter<'_>,
     stream: Stream,
-    event_json: String,
+    event: serde_json::Value,
 ) -> Result<()> {
-    futures::executor::block_on(NmDaemonInterface::event(
-        emitter,
-        stream.as_str(),
-        &event_json,
-    ))
-    .map_err(|error| ensure_domain(ErrorOperation::EmitEvent, error.into()))
+    emitter
+        .emit_sync(DBUS_INTERFACE, stream.as_str(), event)
+        .map_err(|error| ensure_domain(ErrorOperation::EmitEvent, error))
 }
 
 #[cfg(test)]

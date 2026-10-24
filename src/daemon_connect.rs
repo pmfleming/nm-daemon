@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use zbus::object_server::SignalEmitter;
+use shelllist_daemon_tokio::EventEmitter as SignalEmitter;
 
 use crate::application::{Application, ConnectEvent, ConnectOutcome, ConnectRequest};
 use crate::daemon_event::{

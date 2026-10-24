@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
-use zbus::object_server::SignalEmitter;
+use shelllist_daemon_tokio::EventEmitter as SignalEmitter;
 
 use crate::application::{Application, NetworksRequest};
 use crate::daemon_event::{emit_json_event_nonfatal, emit_subscription_event_nonfatal};
@@ -51,7 +51,7 @@ impl SubscriptionState {
     }
 
     pub(crate) fn watches(&self, stream: Stream) -> bool {
-        self.streams.contains(&stream)
+        !self.emitter.is_closed() && self.streams.contains(&stream)
     }
 
     pub(crate) fn owner(&self) -> Option<&str> {
@@ -63,6 +63,9 @@ impl SubscriptionState {
     }
 
     pub(crate) fn emit_changes(&mut self, payloads: &SharedPayloads) {
+        if self.emitter.is_closed() {
+            return;
+        }
         for (stream, method, previous, value) in [
             (
                 Stream::WifiStatus,

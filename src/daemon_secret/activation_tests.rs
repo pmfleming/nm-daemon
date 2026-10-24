@@ -77,7 +77,8 @@ impl Harness {
                 Some(fake.peer.client.unique_name().unwrap().to_string()),
                 vec![Stream::WifiSecret],
                 zbus::object_server::SignalEmitter::new(fake.peer.client.inner(), "/test")?
-                    .into_owned(),
+                    .into_owned()
+                    .into(),
             )?;
         }
         Ok(Self {
