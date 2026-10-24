@@ -86,3 +86,65 @@ diff checks, and the five focused RQLens producers before its commit.
   because it still uses NM and now also names the model. These are partial graph
   heuristics, not a claim that every module score improves.
 - Verification: **99 passed, 4 ignored**, strict Clippy/format/diff checks pass.
+
+## Stage 5 — Deterministic activation-grace policy
+
+- Observation, failure latching, and wake scheduling now use explicit monotonic
+  instants. `Deadline::wait_at` shares the existing saturating deadline rule;
+  production still supplies real time, while tests exercise exact boundaries
+  without sleeping or editing private timestamps after the fact.
+- Fixed a busy-loop case: after grace expired, missing activation status retained
+  a zero-duration wake indefinitely. Missing status now waits for a signal or
+  the overall deadline. A separate current-status bit preserves immediate
+  rechecking when valid status crosses the grace boundary between observation
+  and scheduling; the last known status remains available for timeout errors.
+- Extracted activation-scope error handling without moving cancellation/abort
+  fences. Expanded the grace regression and added one outcome matrix covering
+  initial non-progress, recovery/reset, requested activation disappearance,
+  SSID/activation success, typed failures, and typed/unknown-status timeouts.
+- Wait-loop cognitive/cyclomatic/effort: **11/11/58,547 → 7/10/49,860**.
+  Across wait/deadline production functions, including new helpers and the
+  missing-status rule: **32/70/174,142 → 30/73/178,661**. The correctness fix
+  adds a real decision; extraction does not imply an aggregate effort reduction.
+- Verification: **100 passed, 4 ignored**, strict Clippy/format/diff checks pass.
+
+## Final coverage and limits
+
+Fresh final `cargo llvm-cov --locked --json` is under `stage-5/coverage.json`.
+The baseline LLVM data is reused from the preceding verified `0a08c21` review
+(`target/review-2026-10-24/after/coverage.json`), with the same command and four
+ignored tests. These figures include tests/generated code, not production-only
+or branch coverage.
+
+| LLVM measure | Baseline | Final |
+|---|---:|---:|
+| Line coverage | 70.99% | 71.99% |
+| Covered / instrumented lines | 17,879 / 25,186 | 18,284 / 25,397 |
+| Region coverage | 67.90% | 68.95% |
+| Covered regions | 25,215 | 25,871 |
+| Activation-wait line coverage | 79.73% | 96.57% |
+| Migration line coverage | 37.56% | 64.05% |
+| New selection module line coverage | — | 100% |
+
+Final `cargo machete --with-metadata` also reports no unused dependencies.
+No ignored benchmark/firewall fixture, live NetworkManager/hardware, allocation,
+performance, or mutation-test claim is made. The added tests remain private-bus
+or pure-policy tests; they do not certify arbitrary provider implementations.
+
+Project-wide RQLens counts, including added tests, are mixed:
+
+| Metric | Baseline | Final |
+|---|---:|---:|
+| Cognitive sum | 1,941 | 1,956 |
+| Cyclomatic sum | 5,918 | 5,977 |
+| Halstead effort sum | 17,548,939 | 17,917,200 |
+| Duplicated lines | 1,554 | 1,537 |
+| Clone groups | 111 | 111 |
+| Escape-hatch records | 9 | 8 |
+| Measured nonblank source lines | 36,156 | 36,628 |
+| Enabled passing tests | 96 | 100 |
+
+This follow-up prioritizes two correctness fixes, shared policy ownership, and
+previously untested security/timing behavior. It **does not achieve net source or
+test-volume reduction**, nor a project-wide complexity reduction. Local hotspot
+and architecture improvements are reported above without hiding those tradeoffs.

@@ -73,24 +73,33 @@ pub(crate) fn wait_for_active_target_path(
                 ssid_matches,
                 requested_active_path,
                 requested_active_state,
+                Instant::now(),
             )
-            .map_err(|error| {
-                let Some(scope) = scope else { return error };
-                let error = scope.activation_error(error);
-                if scope.error().is_some() {
-                    abort_requested(nm, requested_active_path);
-                }
-                error
-            })?
+            .map_err(|error| activation_scope_error(nm, requested_active_path, scope, error))?
         {
             return Ok(());
         }
         // Cancellation wakes NetworkEvents, so a cancel racing this wait is
         // observed at the top of the next iteration without a second poll.
-        event_generation = nm.wait_for_event(event_generation, wait.next_wake(deadline));
+        event_generation =
+            nm.wait_for_event(event_generation, wait.next_wake(deadline, Instant::now()));
     }
     abort_requested(nm, requested_active_path);
     Err(wait.timeout_error(target))
+}
+
+fn activation_scope_error(
+    nm: &Nm,
+    path: Option<&OwnedObjectPath>,
+    scope: Option<&crate::activation::State>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let Some(scope) = scope else { return error };
+    let error = scope.activation_error(error);
+    if scope.error().is_some() {
+        abort_requested(nm, path);
+    }
+    error
 }
 
 fn abort_requested(nm: &Nm, path: Option<&OwnedObjectPath>) {
@@ -110,6 +119,7 @@ struct PendingFailure {
 #[derive(Default)]
 struct ActivationWait {
     saw_progress: bool,
+    has_current_status: bool,
     pending_failure: Option<PendingFailure>,
     last_status: Option<crate::nm::WifiActivationStatus>,
 }
@@ -122,7 +132,9 @@ impl ActivationWait {
         ssid_matches: bool,
         requested_active_path: Option<&OwnedObjectPath>,
         requested_active_state: Option<u32>,
+        now: Instant,
     ) -> Result<bool> {
+        self.has_current_status = status.is_some();
         let Some(status) = status else {
             if ssid_matches {
                 tracing::info!(ssid = %target.ssid, requested_bssid = ?target.bssid, "target SSID is active; activation status unavailable");
@@ -141,6 +153,7 @@ impl ActivationWait {
             &status,
             requested_active_path,
             requested_active_state,
+            now,
         )?;
         log_activation_status(target, &status);
         self.last_status = Some(status);
@@ -153,6 +166,7 @@ impl ActivationWait {
         status: &crate::nm::WifiActivationStatus,
         requested_active_path: Option<&OwnedObjectPath>,
         requested_active_state: Option<u32>,
+        now: Instant,
     ) -> Result<()> {
         let requested_activation_stopped =
             requested_activation_stopped(requested_active_path, requested_active_state);
@@ -162,8 +176,8 @@ impl ActivationWait {
             self.pending_failure = None;
             return Ok(());
         }
-        let pending = latch_pending_failure(&mut self.pending_failure, status);
-        if pending.since.elapsed() < ACTIVATION_FAILURE_GRACE {
+        let pending = latch_pending_failure(&mut self.pending_failure, status, now);
+        if now.saturating_duration_since(pending.since) < ACTIVATION_FAILURE_GRACE {
             return Ok(());
         }
         let reason = activation_failure_reason(target, &pending.status);
@@ -175,13 +189,20 @@ impl ActivationWait {
         ))
     }
 
-    fn next_wake(&self, deadline: Deadline) -> Duration {
+    fn next_wake(&self, deadline: Deadline, now: Instant) -> Duration {
         let grace_wait = self
             .pending_failure
             .as_ref()
-            .map(|pending| ACTIVATION_FAILURE_GRACE.saturating_sub(pending.since.elapsed()))
+            .map(|pending| {
+                ACTIVATION_FAILURE_GRACE
+                    .saturating_sub(now.saturating_duration_since(pending.since))
+            })
+            // Recheck valid status as soon as grace expires. If status is missing,
+            // wait for a signal or the overall deadline instead of spinning on an
+            // expired timer. Retain last_status for informative timeout diagnostics.
+            .filter(|remaining| self.has_current_status || !remaining.is_zero())
             .unwrap_or(Duration::MAX);
-        deadline.wait(grace_wait)
+        deadline.wait_at(now, grace_wait)
     }
 
     fn timeout_error(self, target: &WifiConnectTarget) -> anyhow::Error {
@@ -204,9 +225,10 @@ impl ActivationWait {
 fn latch_pending_failure<'a>(
     pending: &'a mut Option<PendingFailure>,
     status: &crate::nm::WifiActivationStatus,
+    now: Instant,
 ) -> &'a PendingFailure {
     let pending = pending.get_or_insert_with(|| PendingFailure {
-        since: Instant::now(),
+        since: now,
         status: status.clone(),
     });
     // Keep the original grace deadline; a generic snapshot must not erase
@@ -404,49 +426,152 @@ fn activation_observation(
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{
-        ActivationWait, NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE, latch_pending_failure,
-    };
+    use super::ActivationWait;
     use crate::deadline::Deadline;
-    use crate::generated::ACTIVATION_FAILURE_GRACE;
-    #[test]
-    fn informative_failure_survives_generic_snapshots_and_expires_at_the_grace_deadline() {
-        let status = |reason| crate::nm::WifiActivationStatus {
-            iface: "wlan0".to_string(),
-            device_state: 30,
-            device_state_reason: (30, reason),
+    use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
+    use crate::generated::ACTIVATION_FAILURE_GRACE as GRACE;
+    use crate::model::{Security, example_connect_target};
+    use crate::nm::WifiActivationStatus;
+    use zvariant::OwnedObjectPath;
+
+    fn status(state: u32, reason: u32) -> WifiActivationStatus {
+        WifiActivationStatus {
+            iface: "wlan0".into(),
+            device_state: state,
+            device_state_reason: (state, reason),
             active_connection_path: None,
-            active_connection_state: None,
+            active_connection_state: Some(1),
+        }
+    }
+    fn report(error: &anyhow::Error) -> ErrorReport {
+        ErrorReport::from_error(error, ErrorOperation::Unknown)
+    }
+
+    #[test]
+    fn grace_preserves_informative_failure_and_missing_status_does_not_busy_wait() {
+        let target = example_connect_target(false);
+        let path = OwnedObjectPath::try_from("/test/active").unwrap();
+        let now = Instant::now();
+        let deadline = Deadline::at(now + GRACE * 2);
+        let observe = |wait: &mut ActivationWait, reason, at| {
+            wait.observe(
+                &target,
+                Some(status(30, reason)),
+                false,
+                Some(&path),
+                Some(1),
+                at,
+            )
         };
-        let mut pending = None;
-        let since = latch_pending_failure(&mut pending, &status(0)).since;
-        let upgraded = latch_pending_failure(
-            &mut pending,
-            &status(NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE),
-        );
-        assert_eq!(upgraded.since, since);
+        let mut wait = ActivationWait::default();
+        assert!(!observe(&mut wait, 0, now).unwrap());
+        assert!(!observe(&mut wait, 5, now + GRACE / 2).unwrap());
+        let before = now + GRACE - Duration::from_nanos(1);
+        assert!(!observe(&mut wait, 0, before).unwrap());
+        let pending = wait.pending_failure.as_ref().unwrap();
+        assert_eq!(pending.since, now);
+        assert_eq!(pending.status.device_state_reason.1, 5);
+        assert_eq!(wait.next_wake(deadline, before), Duration::from_nanos(1));
         assert_eq!(
-            upgraded.status.device_state_reason.1,
-            NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE
+            wait.next_wake(deadline, now + GRACE),
+            Duration::ZERO,
+            "valid terminal status must be rechecked when grace expires"
         );
-        // Simulate elapsed grace without sleeping, then receive a neutral update.
-        let since = Instant::now() - ACTIVATION_FAILURE_GRACE;
-        pending.as_mut().unwrap().since = since;
-        latch_pending_failure(&mut pending, &status(0));
-        let pending = pending.unwrap();
-        assert_eq!(
-            pending.status.device_state_reason.1,
-            super::NM_DEVICE_STATE_REASON_IP_CONFIG_UNAVAILABLE
+        assert!(
+            !wait
+                .observe(&target, None, false, Some(&path), None, now + GRACE)
+                .unwrap()
         );
-        assert_eq!(pending.since, since);
-        let wait = ActivationWait {
-            saw_progress: true,
-            pending_failure: Some(pending),
-            last_status: None,
+        assert_eq!(wait.next_wake(deadline, now + GRACE), GRACE);
+        assert_eq!(wait.next_wake(deadline, now + GRACE * 2), Duration::ZERO);
+        let error = observe(&mut wait, 0, now + GRACE).unwrap_err();
+        assert_eq!(report(&error).code, ErrorCode::DhcpFailed);
+        assert_eq!(report(&error).details["reason_code"], 5);
+    }
+
+    #[test]
+    fn observations_distinguish_progress_recovery_success_and_typed_timeouts() {
+        let mut target = example_connect_target(false);
+        target.security = Some(Security::Wpa2Or3);
+        let now = Instant::now();
+        let observe = |wait: &mut ActivationWait, state, reason, at| {
+            wait.observe(&target, Some(status(state, reason)), false, None, None, at)
         };
-        assert_eq!(
-            wait.next_wake(Deadline::from_now(Duration::from_secs(90)).unwrap()),
-            Duration::ZERO
+        for (reason, failure, timeout) in [
+            (0, ErrorCode::ActivationFailed, ErrorCode::Timeout),
+            (5, ErrorCode::DhcpFailed, ErrorCode::DhcpFailed),
+            (
+                7,
+                ErrorCode::PasswordUnavailable,
+                ErrorCode::PasswordUnavailable,
+            ),
+            (8, ErrorCode::WrongPassword, ErrorCode::WrongPassword),
+            (11, ErrorCode::Timeout, ErrorCode::Timeout),
+            (53, ErrorCode::NotFound, ErrorCode::NotFound),
+        ] {
+            let mut wait = ActivationWait::default();
+            assert!(!observe(&mut wait, 30, reason, now).unwrap());
+            assert!(wait.pending_failure.is_none(), "no progress yet");
+            assert!(!observe(&mut wait, 40, reason, now).unwrap());
+            assert_eq!(report(&wait.timeout_error(&target)).code, timeout);
+
+            let mut wait = ActivationWait::default();
+            assert!(!observe(&mut wait, 40, 0, now).unwrap());
+            assert!(!observe(&mut wait, 30, reason, now).unwrap());
+            assert!(!observe(&mut wait, 60, 0, now + GRACE / 2).unwrap());
+            assert!(
+                wait.pending_failure.is_none(),
+                "recovery clears the pending failure"
+            );
+            assert!(!observe(&mut wait, 30, reason, now + GRACE).unwrap());
+            assert_eq!(
+                report(&observe(&mut wait, 30, 0, now + GRACE * 2).unwrap_err()).code,
+                failure
+            );
+        }
+        let mut wait = ActivationWait::default();
+        let mut activated = status(100, 0);
+        activated.active_connection_state = Some(2);
+        assert!(
+            !wait
+                .observe(&target, Some(activated.clone()), false, None, None, now)
+                .unwrap()
         );
+        assert!(
+            wait.observe(&target, Some(activated), true, None, None, now)
+                .unwrap()
+        );
+        assert!(wait.observe(&target, None, true, None, None, now).unwrap());
+        assert_eq!(
+            report(&ActivationWait::default().timeout_error(&target)).code,
+            ErrorCode::Timeout
+        );
+        let path = OwnedObjectPath::try_from("/test/active").unwrap();
+        for active_state in [None, Some(3)] {
+            let mut wait = ActivationWait::default();
+            assert!(
+                !wait
+                    .observe(
+                        &target,
+                        Some(status(60, 0)),
+                        false,
+                        Some(&path),
+                        active_state,
+                        now
+                    )
+                    .unwrap()
+            );
+            assert!(
+                wait.observe(
+                    &target,
+                    Some(status(60, 0)),
+                    false,
+                    Some(&path),
+                    active_state,
+                    now + GRACE
+                )
+                .is_err()
+            );
+        }
     }
 }

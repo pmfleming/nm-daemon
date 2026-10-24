@@ -22,6 +22,10 @@ impl Deadline {
     }
 
     pub(crate) fn wait(self, max: Duration) -> Duration {
-        max.min(self.0.saturating_duration_since(Instant::now()))
+        self.wait_at(Instant::now(), max)
+    }
+
+    pub(crate) fn wait_at(self, now: Instant, max: Duration) -> Duration {
+        max.min(self.0.saturating_duration_since(now))
     }
 }
