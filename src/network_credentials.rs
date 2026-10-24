@@ -135,6 +135,32 @@ pub(crate) fn secret_keys_for(section: &str, hints: &[String]) -> Vec<String> {
     keys
 }
 
+/// Wi-Fi profiles refine the default PSK only when NM supplied no explicit hint.
+/// WEP's transmit index wins over LEAP, matching NetworkManager's key selection.
+pub(crate) fn wireless_secret_key(
+    settings: &ConnectionSettings,
+    section: &str,
+    hints: &[String],
+) -> Option<String> {
+    if section != "802-11-wireless-security" || !hints.is_empty() {
+        return None;
+    }
+    let security = settings.get(section)?;
+    match (
+        setting::<&str>(security, "key-mgmt"),
+        setting::<&str>(security, "auth-alg"),
+    ) {
+        (Some("none"), _) => Some(format!(
+            "wep-key{}",
+            setting::<u32>(security, "wep-tx-keyidx")
+                .unwrap_or(0)
+                .min(3)
+        )),
+        (_, Some("leap")) => Some("leap-password".into()),
+        _ => None,
+    }
+}
+
 pub(crate) fn accepts_plugin_secret_names(section: &str) -> bool {
     matches!(section, "vpn" | "wireguard")
 }
@@ -457,6 +483,37 @@ mod tests {
     use crate::variant::{ConnectionSettings, owned_value, setting};
     use anyhow::Result;
     use std::collections::HashMap;
+
+    #[test]
+    fn wireless_defaults_preserve_explicit_hints_and_wep_precedence() -> Result<()> {
+        const WIFI: &str = "802-11-wireless-security";
+        assert_eq!(
+            super::wireless_secret_key(&ConnectionSettings::new(), WIFI, &[]),
+            None
+        );
+        for (management, auth, index, expected) in [
+            ("none", "leap", None, Some("wep-key0")),
+            ("none", "open", Some(2u32), Some("wep-key2")),
+            ("none", "open", Some(9), Some("wep-key3")),
+            ("ieee8021x", "leap", None, Some("leap-password")),
+            ("wpa-psk", "open", None, None),
+        ] {
+            let mut section =
+                value_map([("key-mgmt", management.into()), ("auth-alg", auth.into())])?;
+            crate::variant::insert_optional_value(&mut section, "wep-tx-keyidx", index)?;
+            let settings = ConnectionSettings::from([(WIFI.into(), section)]);
+            assert_eq!(
+                super::wireless_secret_key(&settings, WIFI, &[]).as_deref(),
+                expected
+            );
+            assert_eq!(
+                super::wireless_secret_key(&settings, WIFI, &["psk".into()]),
+                None
+            );
+            assert_eq!(super::wireless_secret_key(&settings, "vpn", &[]), None);
+        }
+        Ok(())
+    }
 
     #[test]
     fn schema_handles_shared_nested_and_temporary_flags() -> Result<()> {

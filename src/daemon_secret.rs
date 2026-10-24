@@ -176,34 +176,7 @@ impl SecretAgentInterface {
             .runtime
             .upgrade()
             .map(|runtime| runtime.network_manager_connection());
-        if request.hints.is_empty()
-            && setting_name == "802-11-wireless-security"
-            && let Some(security) = connection.get(setting_name)
-        {
-            if crate::variant::setting::<&str>(security, "key-mgmt") == Some("none") {
-                let index = crate::variant::setting::<u32>(security, "wep-tx-keyidx")
-                    .unwrap_or(0)
-                    .min(3);
-                request.secret_keys = vec![format!("wep-key{index}")];
-            } else if crate::variant::setting::<&str>(security, "auth-alg") == Some("leap") {
-                request.secret_keys = vec!["leap-password".into()];
-            }
-        }
-        request.policy =
-            storage::Policy::from_request(&connection, setting_name, &request.secret_keys)
-                .map_err(|_| {
-                    SecretAgentError::NoSecrets(
-                        "Unsupported or ambiguous credential retention policy".into(),
-                    )
-                })?;
-        request.save_supported =
-            !request.policy.persistent.is_empty() && !request.policy.migration_required;
-        persistence::invalidate(&request.connection_path);
-        request.activation = crate::activation::find(&owner, &connection, &request.connection_path);
-        request.nm_owner = Some(owner);
-        if let Some(activation) = &request.activation {
-            request.deadline = request.deadline.min(activation.credential_deadline());
-        }
+        request.prepare(&connection, owner)?;
         let request = Arc::new(request);
         let _credential_guard = request
             .activation
@@ -927,6 +900,30 @@ impl PendingSecretRequest {
             secret_keys,
             flags,
         }
+    }
+
+    /// Bind policy and activation only after the caller has been authorized.
+    fn prepare(&mut self, settings: &ConnectionSettings, owner: String) -> SecretResult<()> {
+        if let Some(key) =
+            credential_schema::wireless_secret_key(settings, &self.setting_name, &self.hints)
+        {
+            self.secret_keys = vec![key];
+        }
+        self.policy =
+            storage::Policy::from_request(settings, &self.setting_name, &self.secret_keys)
+                .map_err(|_| {
+                    SecretAgentError::NoSecrets(
+                        "Unsupported or ambiguous credential retention policy".into(),
+                    )
+                })?;
+        self.save_supported = !self.policy.persistent.is_empty() && !self.policy.migration_required;
+        persistence::invalidate(&self.connection_path);
+        self.activation = crate::activation::find(&owner, settings, &self.connection_path);
+        self.nm_owner = Some(owner);
+        if let Some(activation) = &self.activation {
+            self.deadline = self.deadline.min(activation.credential_deadline());
+        }
+        Ok(())
     }
 
     fn live(&self) -> bool {
