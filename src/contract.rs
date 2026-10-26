@@ -84,14 +84,9 @@ fn registry_fixtures() -> Value {
             "request_id": "connect-contract",
             "status": "finished",
             "stream": Stream::WifiConnect,
-            "event": {
-                "protocol": crate::output::API_PROTOCOL,
-                "version": crate::output::API_VERSION,
-                "stream": Stream::WifiConnect,
-                "request_id": "connect-contract",
-                "event": "succeeded",
-                "result": { "status": "connected" },
-            },
+            "operation_revision": 4,
+            "event": operation_stream_events(Stream::WifiConnect).into_iter()
+                .find(|event| event["event"] == "succeeded").expect("connect terminal fixture"),
         })),
     })
 }
@@ -1223,7 +1218,14 @@ fn operation_stream_events(stream: Stream) -> Vec<Value> {
         ),
         _ => return Vec::new(),
     };
-    stream_events(stream, request_id, events)
+    let mut events = stream_events(stream, request_id, events);
+    if stream == Stream::WifiConnect {
+        for (index, event) in events.iter_mut().enumerate().skip(1) {
+            // Alternatives in the fixture catalog, not one operation trace.
+            event["operation_revision"] = json!(index + 1);
+        }
+    }
+    events
 }
 
 fn subscribed_event(subscription_id: &str) -> (&'static str, Value) {

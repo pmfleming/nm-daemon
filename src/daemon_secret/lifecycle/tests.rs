@@ -111,12 +111,14 @@ fn terminal_owner_fence_does_not_depend_on_watcher_delivery() -> Result<()> {
                 runtime.request_status(&id, None)["cancellation_requested"],
                 false
             );
-            let event = runtime.store_terminal_result(
-                &id,
-                None,
-                crate::protocol::Stream::WifiConnect,
-                serde_json::json!({"event":"succeeded", "data":{"result":{"portal":true}}}),
-            );
+            let event = runtime
+                .store_terminal_result(
+                    &id,
+                    None,
+                    crate::protocol::Stream::WifiConnect,
+                    serde_json::json!({"event":"succeeded", "data":{"result":{"portal":true}}}),
+                )
+                .unwrap();
             assert_eq!(event["event"], "cancelled");
             assert!(event["data"].get("result").is_none());
             release.send(())?;
@@ -173,7 +175,7 @@ fn restart_recovers_registration_and_fences_pending_work_and_secrets() -> Result
                         Some("frontend".into()),
                         crate::protocol::Stream::WifiConnect,
                         serde_json::json!({"event":"succeeded", "data":{"result":{"portal":true}}}),
-                    );
+                    ).unwrap();
                     done.send((cancelled.load(Ordering::Acquire), deleted.is_err(), event))
                         .unwrap();
                 },

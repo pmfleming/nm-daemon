@@ -277,6 +277,67 @@ fn socket_matches_dbus_dispatch_and_keeps_owners_separate() -> Result<()> {
 }
 
 #[test]
+fn quiet_connect_terminal_status_matches_native_event_without_replay() -> Result<()> {
+    isolated(
+        concat!(
+            module_path!(),
+            "::quiet_connect_terminal_status_matches_native_event_without_replay"
+        ),
+        || {
+            let rig = Rig::new([Outcome::Connected])?;
+            let mut a = rig.peer()?;
+            a.subscribe("owner", &["wifi.secret"])?;
+            let owner = rig
+                .runtime
+                .subscriber_owners(crate::protocol::Stream::WifiSecret)
+                .pop()
+                .context("socket owner")?;
+            let mut target = crate::model::example_connect_target(false);
+            target.ap_path = Some(crate::model::NmObjectPath::parse(
+                "/org/freedesktop/NetworkManager/AccessPoint/1".into(),
+            )?);
+            target.security = Some(crate::model::Security::Open);
+            let params =
+                crate::daemon_connect::DbusConnectTargetParams::for_target(target, None, None);
+            let started = a.call("wifi.connectTarget", serde_json::to_value(params)?)?;
+            let id = started["data"]["result"]["request_id"]
+                .as_str()
+                .context("accepted id")?;
+            // Deliberately do not consume the terminal notification first.
+            until(|| rig.runtime.request_status(id, Some(&owner))["status"] == "finished")?;
+            let recovered =
+                a.call("operation.status", json!({"request_id":id}))?["data"]["result"].clone();
+            assert_eq!(recovered["status"], "finished");
+            assert_eq!(recovered["event"]["event"], "succeeded");
+            assert!(recovered["operation_revision"].as_u64().unwrap() > 1);
+            assert_eq!(
+                recovered["event"]["operation_revision"],
+                recovered["operation_revision"]
+            );
+            let delivered = tokio::runtime::Handle::current().block_on(a.matching(|value| {
+                value["kind"] == "event"
+                    && value["event"]["request_id"] == id
+                    && value["event"]["event"] == "succeeded"
+            }))?;
+            assert_eq!(delivered["event"], recovered["event"]);
+            let mut foreign = rig.peer()?;
+            assert_eq!(
+                foreign.call("operation.status", json!({"request_id":id}))?["data"]["result"],
+                json!({"request_id":id, "status":"unknown"})
+            );
+            assert_eq!(
+                a.call("operation.status", json!({"request_id":id}))?["data"]["result"],
+                recovered
+            );
+            assert_eq!(rig.fake.state.lock().unwrap().activations.len(), 1);
+            drop(a);
+            drop(foreign);
+            rig.finish()
+        },
+    )
+}
+
+#[test]
 fn disconnect_cancels_owned_connect_and_reconnect_never_replays_it() -> Result<()> {
     isolated(
         concat!(

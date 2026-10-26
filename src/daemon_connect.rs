@@ -239,22 +239,33 @@ fn emit_connect_event(
     if let Some(runtime) = terminal_runtime.upgrade() {
         let event = event_value(STREAM, Some(request_id), name, data);
         if terminal {
-            let stored = runtime.store_terminal_result(
-                request_id,
-                terminal_owner.map(ToString::to_string),
-                STREAM,
-                event,
-            );
-            // Delivery failure must not overwrite authoritative completion.
-            if let Err(error) = crate::daemon_event::emit_prepared_event(emitter, STREAM, stored) {
-                tracing::warn!(%error, "could not deliver retained terminal event");
-            }
+            emit_retained_connect_terminal(&runtime, emitter, request_id, terminal_owner, event);
             return Ok(());
         }
-        runtime.store_connect_progress(request_id, terminal_owner, event.clone());
-        return crate::daemon_event::emit_prepared_event(emitter, STREAM, event);
+        if let Some(stored) = runtime.store_connect_progress(request_id, terminal_owner, event) {
+            return crate::daemon_event::emit_prepared_event(emitter, STREAM, stored);
+        }
+        return Ok(());
     }
     emit_json_event(emitter, STREAM, Some(request_id), name, data)
+}
+
+/// Normal completion and worker failure must publish the same retained proof.
+/// Delivery failure cannot overwrite it, and expired proof stays suppressed.
+fn emit_retained_connect_terminal(
+    runtime: &DaemonRuntime,
+    emitter: &SignalEmitter<'static>,
+    request_id: &str,
+    owner: Option<&str>,
+    event: Value,
+) {
+    let stored =
+        runtime.store_terminal_result(request_id, owner.map(ToString::to_string), STREAM, event);
+    if let Some(stored) = stored
+        && let Err(error) = crate::daemon_event::emit_prepared_event(emitter, STREAM, stored)
+    {
+        tracing::warn!(%error, "could not deliver retained connection terminal");
+    }
 }
 
 fn connect_event_payload(request_id: &str, event: &ConnectEvent) -> (&'static str, Value) {
@@ -365,14 +376,16 @@ fn emit_connect_failure(
         "details": report.api_details(),
     });
     if let Some(runtime) = terminal_runtime.upgrade() {
-        runtime.store_terminal_result(
+        emit_retained_connect_terminal(
+            &runtime,
+            emitter,
             request_id,
-            terminal_owner.map(ToString::to_string),
-            STREAM,
-            event_value(STREAM, Some(request_id), "failed", data.clone()),
+            terminal_owner,
+            event_value(STREAM, Some(request_id), "failed", data),
         );
+    } else {
+        emit_json_event_nonfatal(emitter, STREAM, Some(request_id), "failed", data);
     }
-    emit_json_event_nonfatal(emitter, STREAM, Some(request_id), "failed", data);
 }
 
 #[cfg(test)]

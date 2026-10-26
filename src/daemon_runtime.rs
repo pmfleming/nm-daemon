@@ -80,6 +80,9 @@ struct TaskHandle {
     nm: Arc<Nm>,
     started: Instant,
     progress: Option<Value>,
+    // Ordered only within this owned request, never a cross-stream clock.
+    observation_revision: u64,
+    terminal: bool,
     timed_out: bool,
     kind: TaskKind,
     owner: Option<String>,
@@ -101,6 +104,7 @@ impl TaskHandle {
 struct TerminalRequestResult {
     stream: Stream,
     event: Value,
+    observation_revision: u64,
 }
 
 fn terminal_request_status(
@@ -114,6 +118,7 @@ fn terminal_request_status(
             "status": "finished",
             "stream": result.stream,
             "event": result.event,
+            "operation_revision": result.observation_revision,
         })
     })
 }
@@ -140,6 +145,8 @@ impl TaskRegistration {
                 nm,
                 started: Instant::now(),
                 progress: None,
+                observation_revision: 1,
+                terminal: false,
                 timed_out: false,
                 kind,
                 owner,
@@ -277,7 +284,7 @@ impl DaemonRuntime {
         owner: Option<String>,
         stream: Stream,
         mut event: Value,
-    ) -> Value {
+    ) -> Option<Value> {
         // Check outside the task lock: a D-Bus owner lookup must not block cancel.
         let bound_nm = recover_lock(&self.tasks, "daemon task map")
             .get(request_id)
@@ -287,7 +294,18 @@ impl DaemonRuntime {
         // Completion and cancellation share one linearization point. If the
         // cancellation won, a just-computed success cannot authorize portal
         // launch while the queued abort disconnects its link.
-        let tasks = recover_lock(&self.tasks, "daemon task map");
+        let mut tasks = recover_lock(&self.tasks, "daemon task map");
+        let mut results = recover_lock(&self.terminal_results, "terminal request results");
+        // Terminal evidence is immutable, including during worker teardown.
+        if let Some(result) = results.get_owned(request_id, owner.as_deref()) {
+            return Some(result.event.clone());
+        }
+        if tasks
+            .get(request_id)
+            .is_some_and(|task| task.owner == owner && task.terminal)
+        {
+            return None; // Evicted/expired evidence stays unknown, not a new outcome.
+        }
         if let Some(task) = tasks.get(request_id)
             && task.owner == owner
             && task.kind == TaskKind::Connect
@@ -305,29 +323,38 @@ impl DaemonRuntime {
                 object.remove("result");
             }
         }
-        let mut results = recover_lock(&self.terminal_results, "terminal request results");
+        let observation_revision = tasks
+            .get_mut(request_id)
+            .filter(|task| task.owner == owner && task.kind.stream() == stream)
+            .map_or(1, |task| {
+                task.terminal = true;
+                task.observation_revision = task.observation_revision.saturating_add(1);
+                task.observation_revision
+            });
+        event["operation_revision"] = serde_json::json!(observation_revision);
         results.record(
             request_id.to_string(),
             owner,
             TerminalRequestResult {
                 stream,
                 event: event.clone(),
+                observation_revision,
             },
         );
-        event
+        Some(event)
     }
 
     pub(crate) fn request_status(&self, request_id: &str, owner: Option<&str>) -> Value {
-        {
-            let mut results = recover_lock(&self.terminal_results, "terminal request results");
-            if let Some(status) = terminal_request_status(&mut results, request_id, owner) {
-                return status;
-            }
-        }
+        // Use the publication/teardown lock order. Checking results and tasks
+        // separately can return running (or unknown) after terminal publication.
         let tasks = recover_lock(&self.tasks, "daemon task map");
+        let mut results = recover_lock(&self.terminal_results, "terminal request results");
+        if let Some(status) = terminal_request_status(&mut results, request_id, owner) {
+            return status;
+        }
         if let Some(task) = tasks
             .get(request_id)
-            .filter(|task| task.owner.as_deref() == owner)
+            .filter(|task| task.owner.as_deref() == owner && !task.terminal)
         {
             return serde_json::json!({
                 "request_id": request_id,
@@ -335,6 +362,7 @@ impl DaemonRuntime {
                 "stream": task.kind.stream(),
                 "elapsed_ms": task.started.elapsed().as_millis() as u64,
                 "event": task.progress,
+                "operation_revision": task.observation_revision,
                 "cancellation_requested": task.cancellation.load(Ordering::Acquire),
                 "timed_out": task.timed_out,
             });
@@ -355,14 +383,26 @@ impl DaemonRuntime {
         &self,
         request_id: &str,
         owner: Option<&str>,
-        event: Value,
-    ) {
-        if let Some(task) = recover_lock(&self.tasks, "daemon task map").get_mut(request_id)
+        mut event: Value,
+    ) -> Option<Value> {
+        let mut tasks = recover_lock(&self.tasks, "daemon task map");
+        if let Some(task) = tasks.get_mut(request_id)
             && task.owner.as_deref() == owner
             && task.kind == TaskKind::Connect
         {
-            task.progress = Some(event);
+            let mut results = recover_lock(&self.terminal_results, "terminal request results");
+            if let Some(result) = results.get_owned(request_id, owner) {
+                return Some(result.event.clone());
+            }
+            if task.terminal {
+                return None; // Retention expired; never publish progress after completion.
+            }
+            task.observation_revision = task.observation_revision.saturating_add(1);
+            event["operation_revision"] = serde_json::json!(task.observation_revision);
+            task.progress = Some(event.clone());
+            return Some(event);
         }
+        None
     }
 
     /// Request cancellation, never fabricate completion. The task and admission
@@ -372,7 +412,7 @@ impl DaemonRuntime {
             let mut tasks = recover_lock(&self.tasks, "daemon task map");
             let Some(task) = tasks
                 .get_mut(request_id)
-                .filter(|t| t.kind == TaskKind::Connect)
+                .filter(|t| t.kind == TaskKind::Connect && !t.terminal)
             else {
                 return;
             };
@@ -697,7 +737,7 @@ impl DaemonRuntime {
     fn cancel_task(&self, request_id: &str, owner: Option<&str>) -> Option<CancelledTask> {
         recover_lock(&self.tasks, "daemon task map")
             .get(request_id)
-            .filter(|task| task.owner.as_deref() == owner)
+            .filter(|task| task.owner.as_deref() == owner && !task.terminal)
             .filter(|task| {
                 recover_lock(&self.terminal_results, "terminal request results")
                     .get_owned(request_id, task.owner.as_deref())
@@ -772,6 +812,7 @@ impl DaemonRuntime {
             .iter()
             .filter(|(request_id, task)| {
                 task.owner.as_deref() == Some(owner)
+                    && !task.terminal
                     && recover_lock(&self.terminal_results, "terminal request results")
                         .get_owned(request_id, Some(owner))
                         .is_none()
@@ -1054,9 +1095,16 @@ mod tests {
                     },
                 )?;
                 let progress = json!({"request_id":id, "event":"progress", "data":{"phase":"verifying", "message":"Verifying Wi-Fi activation"}});
-                runtime.store_connect_progress(&id, Some("other"), progress.clone());
+                assert!(
+                    runtime
+                        .store_connect_progress(&id, Some("other"), progress.clone())
+                        .is_none()
+                );
                 assert!(runtime.request_status(&id, Some("owner"))["event"].is_null());
-                runtime.store_connect_progress(&id, Some("owner"), progress.clone());
+                let progress = runtime
+                    .store_connect_progress(&id, Some("owner"), progress)
+                    .unwrap();
+                assert_eq!(progress["operation_revision"], 2);
                 assert_eq!(
                     runtime.request_status(&id, Some("owner"))["event"],
                     progress
@@ -1075,7 +1123,7 @@ mod tests {
                     Some("owner".into()),
                     Stream::WifiConnect,
                     json!({"request_id":id, "event":"succeeded", "data":{"result":{"suggest_open_portal":true}}}),
-                );
+                ).unwrap();
                 assert_eq!(
                     terminal["event"], "cancelled",
                     "deadline won the completion race"
@@ -1103,7 +1151,7 @@ mod tests {
                         let _ = wait.recv_timeout(std::time::Duration::from_secs(5));
                     },
                 )?;
-                runtime.store_terminal_result(
+                let _ = runtime.store_terminal_result(
                     &completed,
                     Some("owner".into()),
                     Stream::WifiConnect,
@@ -1133,6 +1181,135 @@ mod tests {
                 );
                 assert!(super::recover_lock(&runtime.tasks, "test tasks").is_empty());
                 drop(runtime);
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn owned_connect_observations_are_atomic_and_terminal_loss_is_not_running() -> anyhow::Result<()>
+    {
+        crate::test_support::workflows::isolated(
+            concat!(
+                module_path!(),
+                "::owned_connect_observations_are_atomic_and_terminal_loss_is_not_running"
+            ),
+            || {
+                use super::{DaemonRuntime, TaskKind, TaskRegistration};
+                let fake = crate::test_support::workflows::FakeNm::new([], false)?;
+                let runtime = DaemonRuntime::start(fake.nm, tokio::runtime::Handle::current())?;
+                let attempt_key = || super::ConnectAttemptKey::new("fixture".into(), b"", false);
+                let admission = runtime.begin_connect_attempt(attempt_key())?;
+                let registration = TaskRegistration::new(
+                    &runtime,
+                    "owned".into(),
+                    TaskKind::Connect,
+                    Some("owner".into()),
+                    None,
+                    runtime.nm.scoped()?,
+                );
+                let initial = runtime.request_status("owned", Some("owner"));
+                assert_eq!(initial["operation_revision"], 1);
+                assert!(initial["event"].is_null());
+                let readers = (0..4)
+                    .map(|_| {
+                        let runtime = std::sync::Arc::clone(&runtime);
+                        std::thread::spawn(move || {
+                            let mut revision = 0;
+                            let mut finished = false;
+                            for _ in 0..300 {
+                                let status = runtime.request_status("owned", Some("owner"));
+                                let next = status["operation_revision"].as_u64().unwrap();
+                                assert!(next >= revision, "owned observations cannot go backwards");
+                                if !status["event"].is_null() {
+                                    assert_eq!(status["event"]["operation_revision"], next);
+                                }
+                                assert!(!finished || status["status"] == "finished");
+                                revision = next;
+                                finished = status["status"] == "finished";
+                                std::thread::yield_now();
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for _ in 0..100 {
+                    assert!(runtime.store_connect_progress("owned", Some("owner"), json!({
+                        "stream":"wifi.connect", "request_id":"owned", "event":"progress", "data":{}
+                    })).is_some());
+                }
+                let terminal = runtime.store_terminal_result("owned", Some("owner".into()), Stream::WifiConnect,
+                    json!({"stream":"wifi.connect", "request_id":"owned", "event":"failed", "data":{}})).unwrap();
+                assert_eq!(terminal["operation_revision"], 102);
+                for reader in readers {
+                    reader.join().unwrap();
+                }
+                assert_eq!(
+                    runtime.request_status("owned", Some("owner"))["event"],
+                    terminal
+                );
+                assert_eq!(
+                    runtime.request_status("owned", Some("foreign")),
+                    json!({"request_id":"owned", "status":"unknown"})
+                );
+                assert_eq!(
+                    runtime.store_terminal_result(
+                        "owned",
+                        Some("owner".into()),
+                        Stream::WifiConnect,
+                        json!({"event":"succeeded", "data":{}})
+                    ),
+                    Some(terminal.clone()),
+                    "terminal evidence is immutable"
+                );
+                assert_eq!(
+                    runtime.store_connect_progress(
+                        "owned",
+                        Some("owner"),
+                        json!({"event":"progress"})
+                    ),
+                    Some(terminal)
+                );
+                // Simulate retention eviction while worker teardown still holds
+                // admission. Missing evidence cannot resurrect running or cancel
+                // an already completed link.
+                *super::recover_lock(&runtime.terminal_results, "test terminal results") =
+                    shelllist_daemon_core::RecentResults::new(1, None);
+                assert_eq!(
+                    runtime.request_status("owned", Some("owner"))["status"],
+                    "unknown"
+                );
+                assert!(
+                    runtime
+                        .store_terminal_result(
+                            "owned",
+                            Some("owner".into()),
+                            Stream::WifiConnect,
+                            json!({"event":"succeeded", "data":{}})
+                        )
+                        .is_none()
+                );
+                assert!(
+                    runtime
+                        .store_connect_progress("owned", Some("owner"), json!({"event":"progress"}))
+                        .is_none()
+                );
+                assert!(runtime.cancel_task("owned", Some("owner")).is_none());
+                assert!(runtime.cancel_tasks_for_owner("owner").is_empty());
+                runtime.expire_connect("owned");
+                assert!(
+                    !registration
+                        .cancellation
+                        .load(std::sync::atomic::Ordering::Acquire)
+                );
+                assert!(fake.state.lock().unwrap().activations.is_empty());
+                assert!(
+                    runtime.begin_connect_attempt(attempt_key()).is_err(),
+                    "terminal retention/owner cleanup cannot release admission"
+                );
+                drop(registration);
+                drop(admission);
+                assert!(runtime.begin_connect_attempt(attempt_key()).is_ok());
+                tokio::runtime::Handle::current().block_on(runtime.shutdown());
                 Ok(())
             },
         )

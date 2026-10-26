@@ -176,6 +176,7 @@
           }
         },
         "event": "started",
+        "operation_revision": 2,
         "protocol": "nm-api",
         "request_id": "connect-contract",
         "stream": "wifi.connect",
@@ -205,6 +206,7 @@
           }
         },
         "event": "progress",
+        "operation_revision": 3,
         "protocol": "nm-api",
         "request_id": "connect-contract",
         "stream": "wifi.connect",
@@ -251,6 +253,7 @@
           }
         },
         "event": "succeeded",
+        "operation_revision": 4,
         "protocol": "nm-api",
         "request_id": "connect-contract",
         "stream": "wifi.connect",
@@ -305,6 +308,7 @@
           "message": "password required for Example"
         },
         "event": "failed",
+        "operation_revision": 5,
         "protocol": "nm-api",
         "request_id": "connect-contract",
         "stream": "wifi.connect",
@@ -334,6 +338,7 @@
           }
         },
         "event": "cancelled",
+        "operation_revision": 6,
         "protocol": "nm-api",
         "request_id": "connect-contract",
         "stream": "wifi.connect",
