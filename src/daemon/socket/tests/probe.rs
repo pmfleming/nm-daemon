@@ -3,13 +3,62 @@ use super::*;
 use std::process::Stdio;
 use tokio::{io::AsyncReadExt, process::Command};
 
-async fn bounded(reader: impl tokio::io::AsyncRead + Unpin) -> Result<Vec<u8>> {
+// Keep each native entrypoint, expected receipt and scripted effect in one
+// fixture record. A new scenario cannot silently select an ordinary fallback.
+struct Scenario {
+    qml: &'static str,
+    passed: &'static str,
+    outcome: Option<Outcome>,
+    quiet_status: bool,
+}
+
+const SCENARIOS: [Scenario; 3] = [
+    Scenario {
+        qml: "tests/e2e/nm-unix-jsonl.qml",
+        passed: "NM_SOCKET_PROBE_PASS native-shared-session-renewal",
+        outcome: None,
+        quiet_status: false,
+    },
+    Scenario {
+        qml: "tests/e2e/nm-connect-recovery.qml",
+        passed: "NM_CONNECT_RECOVERY_PASS native-quiet-terminal-status",
+        outcome: Some(Outcome::Connected),
+        quiet_status: false,
+    },
+    Scenario {
+        qml: "tests/e2e/nm-status-recovery.qml",
+        passed: "NM_STATUS_RECOVERY_PASS native-quiet-status-read",
+        outcome: None,
+        quiet_status: true,
+    },
+];
+
+async fn bounded(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    quiet_status: Option<Arc<std::sync::Mutex<crate::test_support::workflows::State>>>,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    reader.take(1024 * 1024 + 1).read_to_end(&mut bytes).await?;
-    ensure!(
-        bytes.len() <= 1024 * 1024,
-        "native probe log limit exceeded"
-    );
+    let mut chunk = [0_u8; 4096];
+    let mut changed = false;
+    loop {
+        let count = reader.read(&mut chunk).await?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        ensure!(
+            bytes.len() <= 1024 * 1024,
+            "native probe log limit exceeded"
+        );
+        if !changed && let Some(state) = &quiet_status {
+            let marker = b"NM_STATUS_RECOVERY_BASELINE";
+            if bytes.windows(marker.len()).any(|window| window == marker) {
+                // Current synthetic facts only: no activation and no signal.
+                state.lock().unwrap().current = Some(Outcome::Connected);
+                changed = true;
+            }
+        }
+    }
     Ok(bytes)
 }
 
@@ -23,12 +72,8 @@ fn native_quickshell_nm_socket_acceptance() -> Result<()> {
                 std::env::var_os("SHELLLIST_SOURCE").context("set SHELLLIST_SOURCE")?,
             )
             .canonicalize()?;
-            for recovery in [false, true] {
-                let rig = Rig::new(if recovery {
-                    vec![Outcome::Connected]
-                } else {
-                    vec![]
-                })?;
+            for scenario in SCENARIOS {
+                let rig = Rig::new(scenario.outcome)?;
                 std::fs::create_dir_all(rig.directory.join("home"))?;
                 let mut target = crate::model::example_connect_target(false);
                 target.ap_path = Some(crate::model::NmObjectPath::parse(
@@ -55,11 +100,7 @@ fn native_quickshell_nm_socket_acceptance() -> Result<()> {
                         // helper consumers. None may execute an installed host binary.
                         .env("PATH", "/nonexistent/nm-native-probe-programs")
                         .args(["--no-color", "--path"])
-                        .arg(root.join(if recovery {
-                            "tests/e2e/nm-connect-recovery.qml"
-                        } else {
-                            "tests/e2e/nm-unix-jsonl.qml"
-                        }))
+                        .arg(root.join(scenario.qml))
                         .env(
                             "SHELLLIST_NM_FIXTURE_TARGET",
                             serde_json::to_string(&target)?,
@@ -95,8 +136,14 @@ fn native_quickshell_nm_socket_acceptance() -> Result<()> {
                     let result = tokio::time::timeout(Duration::from_secs(15), async {
                         tokio::try_join!(
                             async { Ok::<_, anyhow::Error>(child.wait().await?) },
-                            bounded(stdout),
-                            bounded(stderr)
+                            bounded(
+                                stdout,
+                                scenario.quiet_status.then(|| rig.fake.state.clone())
+                            ),
+                            bounded(
+                                stderr,
+                                scenario.quiet_status.then(|| rig.fake.state.clone())
+                            )
                         )
                     })
                     .await;
@@ -116,22 +163,28 @@ fn native_quickshell_nm_socket_acceptance() -> Result<()> {
                     );
                     ensure!(
                         status.success()
-                            && output.contains(if recovery {
-                                "NM_CONNECT_RECOVERY_PASS native-quiet-terminal-status"
-                            } else {
-                                "NM_SOCKET_PROBE_PASS native-shared-session-renewal"
-                            })
+                            && output.contains(scenario.passed)
                             && !output.contains("NM_SOCKET_PROBE_FAIL")
-                            && !output.contains("NM_CONNECT_RECOVERY_FAIL"),
+                            && !output.contains("NM_CONNECT_RECOVERY_FAIL")
+                            && !output.contains("NM_STATUS_RECOVERY_FAIL"),
                         "native probe failed ({status}):\n{output}"
                     );
                     Ok::<_, anyhow::Error>(output)
                 })?;
                 println!("{output}");
+                let state = rig.fake.state.lock().unwrap();
                 assert_eq!(
-                    rig.fake.state.lock().unwrap().activations.len(),
-                    usize::from(recovery)
+                    state.activations.len(),
+                    usize::from(scenario.outcome.is_some())
                 );
+                if scenario.quiet_status {
+                    assert!(state.deactivated.is_empty());
+                    assert_eq!(state.added, 0);
+                    assert_eq!(state.updates, 0);
+                    assert_eq!(state.secret_probes, 0);
+                    assert_eq!(state.connectivity_checks, 0);
+                }
+                drop(state);
                 rig.finish()?;
             }
             Ok(())

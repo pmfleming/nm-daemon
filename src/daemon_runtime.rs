@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -36,7 +35,6 @@ pub(crate) fn next_request_id(prefix: &str) -> String {
 
 const FAST_WORKER_COUNT: usize = 1;
 const READ_WORKER_COUNT: usize = 4;
-const STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_RESULT_TTL: Duration = Duration::from_secs(300);
 const TERMINAL_RESULT_LIMIT: usize = 256;
@@ -185,12 +183,6 @@ struct CancelledTask {
     target_ssid: Option<Arc<[u8]>>,
 }
 
-struct CachedStatus {
-    nm_owner: String,
-    recorded_at: Instant,
-    response: Value,
-}
-
 pub(crate) struct DaemonRuntime {
     nm: Arc<Nm>,
     tokio: tokio::runtime::Handle,
@@ -202,8 +194,7 @@ pub(crate) struct DaemonRuntime {
     terminal_results: Mutex<RecentResults<TerminalRequestResult>>,
     tasks_changed: Condvar,
     connect_attempts: ConnectAttempts,
-    status_cache: Mutex<Option<CachedStatus>>,
-    status_generation: AtomicUsize,
+    status_observations: crate::daemon_status::observation::StatusObservations,
     cache_refresh_pending: AtomicBool,
 }
 
@@ -234,8 +225,7 @@ impl DaemonRuntime {
             )),
             tasks_changed: Condvar::new(),
             connect_attempts: ConnectAttempts::default(),
-            status_cache: Mutex::new(None),
-            status_generation: AtomicUsize::new(0),
+            status_observations: Default::default(),
             cache_refresh_pending: AtomicBool::new(false),
         });
         subscriptions::start(&tokio, Arc::downgrade(&runtime), control_rx);
@@ -482,71 +472,30 @@ impl DaemonRuntime {
     }
 
     pub(crate) fn call_status(self: &Arc<Self>) -> Result<Value> {
-        if let Some(response) = self.cached_status() {
-            return Ok(response);
-        }
-        let generation = self.status_generation.load(Ordering::Acquire);
-        let runtime = Arc::downgrade(self);
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-        self.submit_read(
-            ErrorOperation::Status,
-            Box::new(move |nm| {
-                let application = Application::new(nm);
-                match application.status_snapshot().and_then(|status| {
-                    nm.ensure_current_owner()?;
-                    let response = api_data_value(
-                        Method::WifiStatus.spec().response_key,
-                        &status,
-                        "serialize daemon method response JSON",
-                    )?;
-                    Ok((response, status))
-                }) {
-                    Ok((response, status)) => {
-                        if let Some(runtime) = runtime.upgrade() {
-                            runtime.store_status(generation, response.clone(), nm.destination());
-                        }
-                        // Release the interactive response before filesystem
-                        // cache maintenance, which is only best-effort state.
-                        let _ = reply_tx.send(Ok(response));
-                        application.persist_status(&status);
-                    }
-                    Err(error) => {
-                        let _ = reply_tx.send(Err(error));
-                    }
-                }
-            }),
-        )?;
-        reply_rx
-            .recv()
-            .map_err(|_| runtime_stopped(ErrorOperation::Status))?
+        let runtime = Arc::clone(self);
+        self.read_work.call(ErrorOperation::Status, move || {
+            api_data_value(
+                Method::WifiStatus.spec().response_key,
+                &runtime.observe_status()?,
+                "serialize daemon method response JSON",
+            )
+        })
     }
 
-    fn cached_status(&self) -> Option<Value> {
-        let owner = self.nm.current_owner().ok();
-        let mut cached = recover_lock(&self.status_cache, "Wi-Fi status cache");
-        if cached.as_ref().is_some_and(|status| {
-            Some(status.nm_owner.as_str()) == owner.as_deref()
-                && status.recorded_at.elapsed() <= STATUS_CACHE_TTL
-        }) {
-            return cached.as_ref().map(|status| status.response.clone());
-        }
-        cached.take();
-        None
-    }
-
-    fn store_status(&self, generation: usize, response: Value, nm_owner: &str) {
-        if self.status_generation.load(Ordering::Acquire) == generation {
-            *recover_lock(&self.status_cache, "Wi-Fi status cache") = Some(CachedStatus {
-                nm_owner: nm_owner.to_owned(),
-                recorded_at: Instant::now(),
-                response,
-            });
-        }
+    fn observe_status(&self) -> Result<Value> {
+        self.status_observations.observe(|| {
+            let nm = self.nm.scoped()?;
+            let application = Application::new(&nm);
+            let status = application.status_snapshot()?;
+            let value = serde_json::to_value(&status)?;
+            application.persist_status(&status);
+            nm.ensure_current_owner()?;
+            Ok(value)
+        })
     }
 
     fn invalidate_status(&self) {
-        self.status_generation.fetch_add(1, Ordering::AcqRel);
-        recover_lock(&self.status_cache, "Wi-Fi status cache").take();
+        self.status_observations.invalidate();
     }
 
     pub(crate) fn call<T>(
@@ -940,10 +889,6 @@ impl DaemonRuntime {
 
     fn submit_fast(&self, operation: ErrorOperation, job: Job) -> Result<()> {
         self.submit_on_lane(&self.fast_work, operation, job)
-    }
-
-    fn submit_read(&self, operation: ErrorOperation, job: Job) -> Result<()> {
-        self.submit_on_lane(&self.read_work, operation, job)
     }
 
     fn submit_on_lane(

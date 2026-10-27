@@ -525,8 +525,7 @@ fn link_completion_and_status_never_wait_for_internet_probe() -> Result<()> {
             }
             assert_eq!(fake.state.lock().unwrap().deleted, 0);
             assert!(fake.nm.wifi_status()?.active);
-            let payloads =
-                crate::daemon_status::refresh_payloads(&fake.nm, false, true, false, false);
+            let payloads = crate::daemon_status::refresh_payloads(&fake.nm, true, false, false);
             assert_eq!(payloads.connectivity.unwrap()["code"], 0);
             assert_eq!(fake.state.lock().unwrap().connectivity_checks, 0);
             // Preserve the explicit diagnostic probe API.

@@ -10,6 +10,7 @@ use crate::nm::Nm;
 use crate::protocol::{Method, Stream};
 
 pub(crate) mod network_updates;
+pub(crate) mod observation;
 use network_updates::NetworkUpdates;
 
 #[derive(Default)]
@@ -102,31 +103,21 @@ impl SubscriptionState {
 
 pub(crate) fn refresh_payloads(
     nm: &Nm,
-    need_status: bool,
     need_connectivity: bool,
     need_inventory: bool,
     need_networks: bool,
 ) -> SharedPayloads {
     let started = Instant::now();
     let application = Application::new(nm);
-    let status = need_status
-        .then(|| application.status())
-        .and_then(log_typed_refresh_error);
     let connectivity = need_connectivity
         .then(|| {
-            match status
-                .as_ref()
-                .and_then(|status| status.connectivity.as_ref())
-            {
-                Some(connectivity) => Ok(json!(connectivity)),
-                None => nm
-                    .connectivity_snapshot()
-                    .map(|connectivity| json!(connectivity)),
-            }
+            nm.connectivity_snapshot()
+                .map(|connectivity| json!(connectivity))
         })
         .and_then(log_typed_refresh_error);
     let payloads = SharedPayloads {
-        status: status.map(|status| json!(status)),
+        // Only the runtime-owned status capture may populate this projection.
+        status: None,
         connectivity,
         inventory: need_inventory
             .then(|| {
@@ -150,7 +141,6 @@ pub(crate) fn refresh_payloads(
             .and_then(log_typed_refresh_error),
     };
     tracing::debug!(
-        need_status,
         need_connectivity,
         need_inventory,
         need_networks,

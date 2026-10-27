@@ -342,16 +342,22 @@ fn submit_shared_refresh(
     needs: SharedPayloadDemand,
 ) {
     let control = runtime.control.clone();
-    match runtime.submit_fast(
+    let observation_runtime = Arc::clone(runtime);
+    // Queue even when NM is absent: status must publish an ordered unavailable
+    // observation rather than leave the last healthy value indefinitely live.
+    match runtime.fast_work.try_submit(
         ErrorOperation::Status,
-        Box::new(move |nm| {
-            let payloads = refresh_payloads(
-                nm,
-                needs.status,
-                needs.connectivity,
-                needs.inventory,
-                needs.networks,
-            );
+        Box::new(move || {
+            let mut payloads = observation_runtime
+                .nm
+                .scoped()
+                .map(|nm| {
+                    refresh_payloads(&nm, needs.connectivity, needs.inventory, needs.networks)
+                })
+                .unwrap_or_default();
+            if needs.status {
+                payloads.status = observation_runtime.observe_status().ok();
+            }
             let _ = control.blocking_send(Control::Refreshed(payloads));
         }),
     ) {

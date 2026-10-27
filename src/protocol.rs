@@ -100,7 +100,7 @@ pub(crate) static METHOD_REGISTRY: &[MethodSpec; 38] = &[
         response_key: "status",
         stream: Some(Stream::WifiStatus),
         operation: ErrorOperation::Status,
-        description: "Current Wi-Fi radio state, active status, and connection details.",
+        description: "Authoritative Wi-Fi status with available and atomic _publication epoch/revision; unavailable is not inactive.",
     },
     MethodSpec {
         method: Method::WifiSetEnabled,
@@ -552,7 +552,7 @@ pub(crate) static STREAM_REGISTRY: &[StreamSpec; 14] = &[
         default: true,
         delivery: StreamDelivery::Continuous,
         events: &["subscribed", "changed"],
-        description: "Current Wi-Fi status, emitted immediately and whenever it changes.",
+        description: "Full Wi-Fi status replacement sharing available/_publication with wifi.status reads, including unavailability.",
     },
     StreamSpec {
         stream: Stream::NetworkConnectivity,

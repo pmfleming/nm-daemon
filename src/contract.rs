@@ -32,6 +32,7 @@ use crate::protocol::{Method, Stream};
 struct ShelllistContractFixture {
     network: NetworkEntry,
     network_stream: Value,
+    status_stream: Value,
     status: WifiStatus,
     connect_success: ConnectResult,
     connect_error: ConnectResult,
@@ -109,8 +110,8 @@ fn wifi_method_fixtures() -> Value {
         })),
         "wifi-band.stream": { "events": operation_stream_events(Stream::WifiBand) },
         "wifi-saved.profiles": response_fixture(Method::WifiSaved, json!([contract_profile()])),
-        "wifi-status.active": response_fixture(Method::WifiStatus, json!(combined.status)),
-        "wifi-status.inactive": response_fixture(Method::WifiStatus, json!(inactive_status())),
+        "wifi-status.active": response_fixture(Method::WifiStatus, status_fixture(json!(combined.status), "status-active-contract")),
+        "wifi-status.inactive": response_fixture(Method::WifiStatus, status_fixture(json!(inactive_status()), "status-inactive-contract")),
         "wifi-set-enabled.success": response_fixture(Method::WifiSetEnabled, json!(WifiPowerResult {
             enabled: true,
             message: "Wi-Fi turned on".to_string(),
@@ -437,6 +438,47 @@ fn response_fixture(method: Method, value: Value) -> Value {
     Value::Object(object)
 }
 
+fn status_fixture(value: Value, epoch: &str) -> Value {
+    let observations = crate::daemon_status::observation::StatusObservations::default();
+    let mut value = observations
+        .observe(|| Ok(value))
+        .expect("native status fixture");
+    value["_publication"]["epoch"] = json!(epoch);
+    value
+}
+
+fn status_stream_fixture() -> Value {
+    let observations = crate::daemon_status::observation::StatusObservations::default();
+    let ready = WifiStatus::inactive(true, contract_radio_status(), Some("wlan0".into()), None);
+    let mut active = ready.clone();
+    active.active = true;
+    let off = inactive_status();
+    let mut events = serde_json::Map::new();
+    for (name, value) in [
+        ("initial", observations.observe(|| Ok(json!(ready)))),
+        ("lost", observations.observe(|| Ok(json!(active)))),
+        (
+            "unavailable",
+            observations.observe(|| anyhow::bail!("fixture unavailable")),
+        ),
+        ("restored", observations.observe(|| Ok(json!(ready)))),
+        ("off", observations.observe(|| Ok(json!(off)))),
+    ] {
+        let mut status = value.expect("native status observation");
+        status["_publication"]["epoch"] = json!("status-epoch-contract");
+        events.insert(
+            name.into(),
+            crate::daemon_event::subscription_event_value(
+                Stream::WifiStatus,
+                "status-subscription",
+                "changed",
+                json!({"status": status}),
+            ),
+        );
+    }
+    Value::Object(events)
+}
+
 fn network_response_fixture(networks: Vec<NetworkEntry>) -> Value {
     json!({
         "networks": networks,
@@ -518,6 +560,7 @@ fn shelllist_contract_fixture() -> ShelllistContractFixture {
     ShelllistContractFixture {
         network: network.clone(),
         network_stream: network_stream_fixture(),
+        status_stream: status_stream_fixture(),
         status: WifiStatus {
             hidden_prompt: Default::default(),
             enabled: true,
@@ -1333,7 +1376,10 @@ fn continuous_stream_events() -> Vec<Value> {
         "status-contract",
         vec![
             subscribed_event("status-subscription"),
-            ("changed", json!({ "status": inactive_status() })),
+            (
+                "changed",
+                json!({ "status": status_fixture(json!(inactive_status()), "continuous-status-contract") }),
+            ),
         ],
     );
     events.extend(stream_events(
@@ -1564,6 +1610,7 @@ fn serialized_boundary_snapshot() -> Value {
         "connect_success": shell["connect_success"],
         "connect_error": shell["connect_error"],
         "network_stream": shell["network_stream"],
+        "status_stream": shell["status_stream"],
         "connect_stream": methods["wifi-connect.stream"],
         "scan_stream": methods["wifi-scan.stream"],
         "saved_profiles": methods["wifi-saved.profiles"],

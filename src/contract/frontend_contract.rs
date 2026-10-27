@@ -65,6 +65,29 @@ fn frontend_contract_network_status_profiles_and_results_use_owned_types() {
     assert!(WifiStatus::deserialize(&*Box::leak(Box::new(bad))).is_err());
 }
 #[test]
+fn frontend_contract_status_observations_use_owned_payloads_and_live_clock() {
+    let stream = shelllist_contract_fixture().status_stream;
+    for (index, name) in ["initial", "lost", "unavailable", "restored", "off"]
+        .iter()
+        .enumerate()
+    {
+        let event = &stream[*name];
+        assert_eq!(event["stream"], "wifi.status");
+        assert_eq!(event["subscription_id"], "status-subscription");
+        let status = &event["data"]["status"];
+        assert_eq!(status["_publication"]["revision"], index + 1);
+        assert_eq!(status["_publication"]["epoch"], "status-epoch-contract");
+        if *name == "unavailable" {
+            assert_eq!(status["available"], false);
+            assert!(status.get("active").is_none());
+        } else {
+            let _: WifiStatus = decode(status);
+            assert_eq!(status["available"], true);
+        }
+    }
+}
+
+#[test]
 fn frontend_contract_network_delta_recovery_uses_live_projection_and_owned_rows() {
     let stream = shelllist_contract_fixture().network_stream;
     for name in ["initial", "lost", "after_gap", "replacement"] {

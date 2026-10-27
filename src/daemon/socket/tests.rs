@@ -1,5 +1,6 @@
 //! Real private D-Bus + Unix sockets; all NetworkManager work is scripted.
 mod probe;
+mod status;
 use super::*;
 use crate::test_support::{
     bus::TestBus,

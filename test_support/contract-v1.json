@@ -1895,5 +1895,676 @@
       "rx_bitrate_mbps": 144.4,
       "tx_bitrate_mbps": 130.0
     }
+  },
+  "status_stream": {
+    "initial": {
+      "data": {
+        "status": {
+          "_publication": {
+            "epoch": "status-epoch-contract",
+            "revision": 1
+          },
+          "access_point": null,
+          "active": false,
+          "active_connection_path": null,
+          "active_since_ms": null,
+          "available": true,
+          "connectivity": null,
+          "device_iface": "wlan0",
+          "device_path": null,
+          "enabled": true,
+          "hidden_prompt": {
+            "fields": [
+              {
+                "key": "ssid",
+                "password": false,
+                "required": true,
+                "value": ""
+              },
+              {
+                "key": "security",
+                "password": false,
+                "required": true,
+                "value": "wpa-psk"
+              },
+              {
+                "key": "password",
+                "password": true,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.eap",
+                "password": false,
+                "required": false,
+                "value": "peap"
+              },
+              {
+                "key": "enterprise.identity",
+                "password": false,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.anonymous_identity",
+                "password": false,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.phase2_auth",
+                "password": false,
+                "required": false,
+                "value": "mschapv2"
+              },
+              {
+                "key": "enterprise.ca_cert",
+                "password": false,
+                "required": false,
+                "value": ""
+              }
+            ],
+            "security_modes": [
+              {
+                "enterprise": false,
+                "id": "open",
+                "key_mgmt": "open",
+                "required_fields": [],
+                "security": "--",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "owe",
+                "key_mgmt": "owe",
+                "required_fields": [],
+                "security": "OWE",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "wpa-psk",
+                "key_mgmt": "wpa-psk",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WPA2/3",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "sae",
+                "key_mgmt": "sae",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WPA2/3",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "wep-key",
+                "key_mgmt": "wep",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WEP",
+                "wep_key_type": "key"
+              },
+              {
+                "enterprise": false,
+                "id": "wep-phrase",
+                "key_mgmt": "wep",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WEP",
+                "wep_key_type": "phrase"
+              },
+              {
+                "enterprise": true,
+                "id": "wpa-eap",
+                "key_mgmt": "wpa-eap",
+                "required_fields": [
+                  "enterprise.identity",
+                  "enterprise.eap"
+                ],
+                "security": "Enterprise",
+                "wep_key_type": null
+              }
+            ]
+          },
+          "ip4": null,
+          "ip6": null,
+          "link": null,
+          "metered": null,
+          "network": null,
+          "profile": null,
+          "radios": {
+            "airplane_mode": false,
+            "wireless_available": true,
+            "wireless_enabled": true,
+            "wireless_hardware_enabled": true,
+            "wwan_available": true,
+            "wwan_enabled": true,
+            "wwan_hardware_enabled": true
+          },
+          "wireless": null
+        }
+      },
+      "event": "changed",
+      "protocol": "nm-api",
+      "stream": "wifi.status",
+      "subscription_id": "status-subscription",
+      "version": 2
+    },
+    "lost": {
+      "data": {
+        "status": {
+          "_publication": {
+            "epoch": "status-epoch-contract",
+            "revision": 2
+          },
+          "access_point": null,
+          "active": true,
+          "active_connection_path": null,
+          "active_since_ms": null,
+          "available": true,
+          "connectivity": null,
+          "device_iface": "wlan0",
+          "device_path": null,
+          "enabled": true,
+          "hidden_prompt": {
+            "fields": [
+              {
+                "key": "ssid",
+                "password": false,
+                "required": true,
+                "value": ""
+              },
+              {
+                "key": "security",
+                "password": false,
+                "required": true,
+                "value": "wpa-psk"
+              },
+              {
+                "key": "password",
+                "password": true,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.eap",
+                "password": false,
+                "required": false,
+                "value": "peap"
+              },
+              {
+                "key": "enterprise.identity",
+                "password": false,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.anonymous_identity",
+                "password": false,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.phase2_auth",
+                "password": false,
+                "required": false,
+                "value": "mschapv2"
+              },
+              {
+                "key": "enterprise.ca_cert",
+                "password": false,
+                "required": false,
+                "value": ""
+              }
+            ],
+            "security_modes": [
+              {
+                "enterprise": false,
+                "id": "open",
+                "key_mgmt": "open",
+                "required_fields": [],
+                "security": "--",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "owe",
+                "key_mgmt": "owe",
+                "required_fields": [],
+                "security": "OWE",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "wpa-psk",
+                "key_mgmt": "wpa-psk",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WPA2/3",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "sae",
+                "key_mgmt": "sae",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WPA2/3",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "wep-key",
+                "key_mgmt": "wep",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WEP",
+                "wep_key_type": "key"
+              },
+              {
+                "enterprise": false,
+                "id": "wep-phrase",
+                "key_mgmt": "wep",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WEP",
+                "wep_key_type": "phrase"
+              },
+              {
+                "enterprise": true,
+                "id": "wpa-eap",
+                "key_mgmt": "wpa-eap",
+                "required_fields": [
+                  "enterprise.identity",
+                  "enterprise.eap"
+                ],
+                "security": "Enterprise",
+                "wep_key_type": null
+              }
+            ]
+          },
+          "ip4": null,
+          "ip6": null,
+          "link": null,
+          "metered": null,
+          "network": null,
+          "profile": null,
+          "radios": {
+            "airplane_mode": false,
+            "wireless_available": true,
+            "wireless_enabled": true,
+            "wireless_hardware_enabled": true,
+            "wwan_available": true,
+            "wwan_enabled": true,
+            "wwan_hardware_enabled": true
+          },
+          "wireless": null
+        }
+      },
+      "event": "changed",
+      "protocol": "nm-api",
+      "stream": "wifi.status",
+      "subscription_id": "status-subscription",
+      "version": 2
+    },
+    "off": {
+      "data": {
+        "status": {
+          "_publication": {
+            "epoch": "status-epoch-contract",
+            "revision": 5
+          },
+          "access_point": null,
+          "active": false,
+          "active_connection_path": null,
+          "active_since_ms": null,
+          "available": true,
+          "connectivity": {
+            "captive_portal": false,
+            "check_available": false,
+            "check_enabled": false,
+            "check_uri": null,
+            "code": 1,
+            "full": false,
+            "primary_connection": null,
+            "state": "none"
+          },
+          "device_iface": "wlan0",
+          "device_path": null,
+          "enabled": false,
+          "hidden_prompt": {
+            "fields": [
+              {
+                "key": "ssid",
+                "password": false,
+                "required": true,
+                "value": ""
+              },
+              {
+                "key": "security",
+                "password": false,
+                "required": true,
+                "value": "wpa-psk"
+              },
+              {
+                "key": "password",
+                "password": true,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.eap",
+                "password": false,
+                "required": false,
+                "value": "peap"
+              },
+              {
+                "key": "enterprise.identity",
+                "password": false,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.anonymous_identity",
+                "password": false,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.phase2_auth",
+                "password": false,
+                "required": false,
+                "value": "mschapv2"
+              },
+              {
+                "key": "enterprise.ca_cert",
+                "password": false,
+                "required": false,
+                "value": ""
+              }
+            ],
+            "security_modes": [
+              {
+                "enterprise": false,
+                "id": "open",
+                "key_mgmt": "open",
+                "required_fields": [],
+                "security": "--",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "owe",
+                "key_mgmt": "owe",
+                "required_fields": [],
+                "security": "OWE",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "wpa-psk",
+                "key_mgmt": "wpa-psk",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WPA2/3",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "sae",
+                "key_mgmt": "sae",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WPA2/3",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "wep-key",
+                "key_mgmt": "wep",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WEP",
+                "wep_key_type": "key"
+              },
+              {
+                "enterprise": false,
+                "id": "wep-phrase",
+                "key_mgmt": "wep",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WEP",
+                "wep_key_type": "phrase"
+              },
+              {
+                "enterprise": true,
+                "id": "wpa-eap",
+                "key_mgmt": "wpa-eap",
+                "required_fields": [
+                  "enterprise.identity",
+                  "enterprise.eap"
+                ],
+                "security": "Enterprise",
+                "wep_key_type": null
+              }
+            ]
+          },
+          "ip4": null,
+          "ip6": null,
+          "link": null,
+          "metered": null,
+          "network": null,
+          "profile": null,
+          "radios": {
+            "airplane_mode": false,
+            "wireless_available": true,
+            "wireless_enabled": false,
+            "wireless_hardware_enabled": true,
+            "wwan_available": true,
+            "wwan_enabled": true,
+            "wwan_hardware_enabled": true
+          },
+          "wireless": null
+        }
+      },
+      "event": "changed",
+      "protocol": "nm-api",
+      "stream": "wifi.status",
+      "subscription_id": "status-subscription",
+      "version": 2
+    },
+    "restored": {
+      "data": {
+        "status": {
+          "_publication": {
+            "epoch": "status-epoch-contract",
+            "revision": 4
+          },
+          "access_point": null,
+          "active": false,
+          "active_connection_path": null,
+          "active_since_ms": null,
+          "available": true,
+          "connectivity": null,
+          "device_iface": "wlan0",
+          "device_path": null,
+          "enabled": true,
+          "hidden_prompt": {
+            "fields": [
+              {
+                "key": "ssid",
+                "password": false,
+                "required": true,
+                "value": ""
+              },
+              {
+                "key": "security",
+                "password": false,
+                "required": true,
+                "value": "wpa-psk"
+              },
+              {
+                "key": "password",
+                "password": true,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.eap",
+                "password": false,
+                "required": false,
+                "value": "peap"
+              },
+              {
+                "key": "enterprise.identity",
+                "password": false,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.anonymous_identity",
+                "password": false,
+                "required": false,
+                "value": ""
+              },
+              {
+                "key": "enterprise.phase2_auth",
+                "password": false,
+                "required": false,
+                "value": "mschapv2"
+              },
+              {
+                "key": "enterprise.ca_cert",
+                "password": false,
+                "required": false,
+                "value": ""
+              }
+            ],
+            "security_modes": [
+              {
+                "enterprise": false,
+                "id": "open",
+                "key_mgmt": "open",
+                "required_fields": [],
+                "security": "--",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "owe",
+                "key_mgmt": "owe",
+                "required_fields": [],
+                "security": "OWE",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "wpa-psk",
+                "key_mgmt": "wpa-psk",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WPA2/3",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "sae",
+                "key_mgmt": "sae",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WPA2/3",
+                "wep_key_type": null
+              },
+              {
+                "enterprise": false,
+                "id": "wep-key",
+                "key_mgmt": "wep",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WEP",
+                "wep_key_type": "key"
+              },
+              {
+                "enterprise": false,
+                "id": "wep-phrase",
+                "key_mgmt": "wep",
+                "required_fields": [
+                  "password"
+                ],
+                "security": "WEP",
+                "wep_key_type": "phrase"
+              },
+              {
+                "enterprise": true,
+                "id": "wpa-eap",
+                "key_mgmt": "wpa-eap",
+                "required_fields": [
+                  "enterprise.identity",
+                  "enterprise.eap"
+                ],
+                "security": "Enterprise",
+                "wep_key_type": null
+              }
+            ]
+          },
+          "ip4": null,
+          "ip6": null,
+          "link": null,
+          "metered": null,
+          "network": null,
+          "profile": null,
+          "radios": {
+            "airplane_mode": false,
+            "wireless_available": true,
+            "wireless_enabled": true,
+            "wireless_hardware_enabled": true,
+            "wwan_available": true,
+            "wwan_enabled": true,
+            "wwan_hardware_enabled": true
+          },
+          "wireless": null
+        }
+      },
+      "event": "changed",
+      "protocol": "nm-api",
+      "stream": "wifi.status",
+      "subscription_id": "status-subscription",
+      "version": 2
+    },
+    "unavailable": {
+      "data": {
+        "status": {
+          "_publication": {
+            "epoch": "status-epoch-contract",
+            "revision": 3
+          },
+          "available": false
+        }
+      },
+      "event": "changed",
+      "protocol": "nm-api",
+      "stream": "wifi.status",
+      "subscription_id": "status-subscription",
+      "version": 2
+    }
   }
 }
