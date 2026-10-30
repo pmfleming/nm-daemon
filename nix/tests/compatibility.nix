@@ -70,11 +70,14 @@ pkgs.testers.runNixOSTest {
       ];
       environment = {
         DBUS_SESSION_BUS_ADDRESS = "unix:path=/run/nm-test-session-bus";
+        XDG_RUNTIME_DIR = "/run/nm-compat-test";
         USER = "root";
         LOGNAME = "root";
       };
       serviceConfig = {
         ExecStart = "${package}/bin/nm-daemon daemon";
+        RuntimeDirectory = "nm-compat-test";
+        RuntimeDirectoryMode = "0700";
         Restart = "on-failure";
       };
     };
@@ -86,6 +89,8 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("NetworkManager.service")
     machine.succeed("NetworkManager --print-config | grep -Fx 'connection.mdns=0'")
     machine.wait_for_unit("compat-test-daemon.service")
+    assert machine.succeed("stat -c '%u:%a' /run/nm-compat-test").strip() == "0:700"
+    machine.wait_until_succeeds("test -S /run/nm-compat-test/nm-daemon.sock")
     machine.wait_until_succeeds("test -e /sys/class/net/wlan1/phy80211")
     machine.succeed("nmcli radio wifi on; nmcli device set wlan0 managed yes; systemctl start compat-test-ap")
     # Avoid competing nmcli rescans during backend startup. A timed-out initial

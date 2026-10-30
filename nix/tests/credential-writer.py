@@ -4,6 +4,7 @@ import os
 import pathlib
 import signal
 import subprocess
+import tempfile
 import time
 
 import dbus
@@ -19,7 +20,8 @@ for path in service.ListConnections():
     profiles[str(profile.GetSettings()["connection"]["id"])] = (path, profile)
 
 address, pid = subprocess.check_output(["dbus-daemon", "--session", "--fork", "--print-address", "--print-pid"], text=True).strip().splitlines()
-env = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": address, "USER": "root", "LOGNAME": "root"}
+runtime = tempfile.TemporaryDirectory(prefix="nm-credential-writer-")
+env = {**os.environ, "DBUS_SESSION_BUS_ADDRESS": address, "XDG_RUNTIME_DIR": runtime.name, "USER": "root", "LOGNAME": "root"}
 daemon = subprocess.Popen(["nm-daemon", "daemon"], env=env, stdout=subprocess.DEVNULL)
 try:
     session = dbus.bus.BusConnection(address)
@@ -74,3 +76,4 @@ finally:
         daemon.kill()
         daemon.wait()
     os.kill(int(pid), signal.SIGTERM)
+    runtime.cleanup()

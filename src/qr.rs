@@ -153,34 +153,27 @@ pub(crate) fn parse_wifi_qr(payload: &str) -> Result<ParsedWifiQr> {
 /// optional quoting older NetworkManager versions used for hex-looking values.
 fn split_fields(body: &str) -> Result<BTreeMap<String, String>> {
     let mut fields = BTreeMap::new();
-    let mut current = String::new();
+    let mut start = 0;
     let mut escaped = false;
-    for character in body.chars() {
+    for (index, character) in body.char_indices() {
         match character {
-            _ if escaped => {
-                current.push(character);
-                escaped = false;
-            }
-            '\\' => {
-                // Keep escapes until after removing optional wrapper quotes, so
-                // escaped literal quotes cannot be mistaken for wrappers.
-                current.push(character);
-                escaped = true;
-            }
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
             ';' => {
-                insert_field(&mut fields, std::mem::take(&mut current))?;
+                insert_field(&mut fields, &body[start..index])?;
+                start = index + 1;
             }
-            _ => current.push(character),
+            _ => {}
         }
     }
     if escaped {
         return Err(qr_error("payload ends with a dangling escape", "payload"));
     }
-    insert_field(&mut fields, current)?;
+    insert_field(&mut fields, &body[start..])?;
     Ok(fields)
 }
 
-fn insert_field(fields: &mut BTreeMap<String, String>, field: String) -> Result<()> {
+fn insert_field(fields: &mut BTreeMap<String, String>, field: &str) -> Result<()> {
     if field.is_empty() {
         return Ok(());
     }
@@ -363,6 +356,22 @@ mod tests {
             wifi_qr_payload("WPA", "CAFE", Some(&raw_psk), false),
             format!("WIFI:T:WPA;S:CAFE;P:{raw_psk};;")
         );
+        // Independent intake vectors, including legacy forms never exported.
+        for (payload, ssid) in [
+            ("WIFI:T:nopass;S:Café", "Café"),
+            ("WIFI:;;T:nopass;;;S:Guest;;;;", "Guest"),
+            (r"WIFI:T:nopass;S:Café\;Guest;;", "Café;Guest"),
+            (r"WIFI:T:nopass;S:Path\\;;", r"Path\"),
+            (r"WIFI:T:nopass;S:key\:value;;", "key:value"),
+            ("WIFI:S:Old;S:New;T:nopass;;", "New"),
+            (r#"WIFI:T:nopass;S:"CAFE";;"#, "CAFE"),
+            (r#"WIFI:T:nopass;S:\"CAFE\";;"#, r#""CAFE""#),
+            ("WIFI:T:nopass;S:a:b;;", "a:b"),
+        ] {
+            let parsed = parse_wifi_qr(payload).unwrap();
+            assert_eq!(parsed.ssid, ssid);
+            assert_eq!(parsed.password, None);
+        }
     }
 
     #[test]

@@ -123,6 +123,38 @@ impl Nm {
     }
 }
 
+/// Derives per-second rates from two samples, tolerating counter resets.
+pub(crate) fn statistics_rates(
+    previous: &DeviceStatisticsSample,
+    current: &mut DeviceStatisticsSample,
+) {
+    let elapsed_ms = current.sampled_at_ms.saturating_sub(previous.sampled_at_ms);
+    current.interval_ms = elapsed_ms;
+    if elapsed_ms == 0 {
+        return;
+    }
+    let per_second = |current: u64, previous: u64| {
+        let delta = current.checked_sub(previous)?;
+        Some((delta as f64) * 1000.0 / (elapsed_ms as f64))
+    };
+    current.rx_bytes_per_second = per_second(current.rx_bytes, previous.rx_bytes);
+    current.tx_bytes_per_second = per_second(current.tx_bytes, previous.tx_bytes);
+}
+
+fn no_statistics_device(requested: Option<&str>) -> anyhow::Error {
+    let mut error = DomainError::not_found(
+        ErrorOperation::Statistics,
+        match requested {
+            Some(_) => "no NetworkManager device matched the requested statistics device",
+            None => "NetworkManager reported no devices to watch",
+        },
+    );
+    if let Some(requested) = requested {
+        error = error.with_detail("device", requested);
+    }
+    error.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::Nm;
@@ -200,36 +232,4 @@ mod tests {
         assert_eq!(*rates.lock().unwrap(), [1_000, 500, 0, 200, 0]);
         Ok(())
     }
-}
-
-/// Derives per-second rates from two samples, tolerating counter resets.
-pub(crate) fn statistics_rates(
-    previous: &DeviceStatisticsSample,
-    current: &mut DeviceStatisticsSample,
-) {
-    let elapsed_ms = current.sampled_at_ms.saturating_sub(previous.sampled_at_ms);
-    current.interval_ms = elapsed_ms;
-    if elapsed_ms == 0 {
-        return;
-    }
-    let per_second = |current: u64, previous: u64| {
-        let delta = current.checked_sub(previous)?;
-        Some((delta as f64) * 1000.0 / (elapsed_ms as f64))
-    };
-    current.rx_bytes_per_second = per_second(current.rx_bytes, previous.rx_bytes);
-    current.tx_bytes_per_second = per_second(current.tx_bytes, previous.tx_bytes);
-}
-
-fn no_statistics_device(requested: Option<&str>) -> anyhow::Error {
-    let mut error = DomainError::not_found(
-        ErrorOperation::Statistics,
-        match requested {
-            Some(_) => "no NetworkManager device matched the requested statistics device",
-            None => "NetworkManager reported no devices to watch",
-        },
-    );
-    if let Some(requested) = requested {
-        error = error.with_detail("device", requested);
-    }
-    error.into()
 }
