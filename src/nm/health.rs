@@ -182,9 +182,9 @@ impl Nm {
             && let Ok(settings) = self.connection_settings(&profile)
             && let Some(connection) = settings.get("connection")
         {
-            event.id = connection.get("id").and_then(value_string);
-            event.uuid = connection.get("uuid").and_then(value_string);
-            event.connection_type = connection.get("type").and_then(value_string);
+            event.id = connection.get("id").and_then(|value| value_string(value));
+            event.uuid = connection.get("uuid").and_then(|value| value_string(value));
+            event.connection_type = connection.get("type").and_then(|value| value_string(value));
         }
     }
 }

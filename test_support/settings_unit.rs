@@ -109,6 +109,47 @@ fn ip_profiles_preserve_defaults_signed_values_and_family_boundaries() -> anyhow
     assert!(parsed.ignore_auto_dns);
     update.ipv4.dns = vec!["2001:db8::53".into()];
     assert!(validate_profile_update(&update).is_err());
+
+    let address = value_map([
+        ("address", b"192.0.2.30".to_vec().into()),
+        ("prefix", 24_u32.into()),
+        ("unrelated", vec![0_u8; 128].into()),
+    ])?;
+    let rows = owned_value(vec![
+        address.clone(),
+        value_map([("prefix", 64_u32.into())])?,
+    ])?;
+    let parsed = super::setting_address_data(&rows).unwrap();
+    assert_eq!(parsed.len(), 1, "only malformed rows are skipped");
+    assert_eq!(parsed[0].address, "192.0.2.30");
+    assert_eq!(parsed[0].prefix, 24);
+    let route = owned_value(vec![value_map([
+        ("dest", b"198.51.100.0".to_vec().into()),
+        ("prefix", 24_u32.into()),
+        ("next-hop", "".into()),
+        ("metric", (-1_i64).into()),
+        ("table", 200_u32.into()),
+    ])?])?;
+    let parsed = super::setting_route_data(&route).unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].dest, "198.51.100.0");
+    assert_eq!(parsed[0].prefix, 24);
+    assert_eq!((parsed[0].metric, parsed[0].table), (None, Some(200)));
+    assert!(parsed[0].next_hop.is_none());
+    for malformed in [
+        owned_value("not-an-array")?,
+        owned_value(vec![std::collections::HashMap::from([(
+            1_u32,
+            owned_value("bad key")?,
+        )])])?,
+        owned_value(vec![
+            zvariant::Value::new(address),
+            zvariant::Value::new(7_u32),
+        ])?,
+    ] {
+        assert!(super::setting_address_data(&malformed).is_none());
+        assert!(super::setting_route_data(&malformed).is_none());
+    }
     Ok(())
 }
 

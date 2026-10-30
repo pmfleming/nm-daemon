@@ -40,13 +40,16 @@ pub(crate) fn setting_string(section: &HashMap<String, OwnedValue>, key: &str) -
 /// Decode a whole string array, including variant-wrapped elements, without
 /// cloning the D-Bus container. A malformed element invalidates the whole list.
 pub(crate) fn setting_strings(section: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
-    section.get(key).and_then(value_list).unwrap_or_default()
+    section
+        .get(key)
+        .and_then(|value| value_list(value))
+        .unwrap_or_default()
 }
 
 /// Decode elements by reference, allocating only the output list, not a copy
 /// of the D-Bus container. As with zvariant's owned conversion, one invalid
 /// element rejects the entire list (including variant-wrapped elements).
-pub(crate) fn value_list<'a, T>(value: &'a OwnedValue) -> Option<Vec<T>>
+pub(crate) fn value_list<'a, T>(value: &'a Value<'a>) -> Option<Vec<T>>
 where
     T: TryFrom<&'a Value<'a>>,
     T::Error: Into<zvariant::Error>,
@@ -58,6 +61,16 @@ where
         .map(Value::downcast_ref)
         .collect::<Result<_, _>>()
         .ok()
+}
+
+/// Borrow string-keyed dictionaries without cloning their keys or values.
+/// Reject the whole container on an invalid entry/key, just like owned decoding.
+pub(crate) fn value_dicts<'a>(value: &'a Value<'a>) -> Option<Vec<&'a zvariant::Dict<'a, 'a>>> {
+    let dictionaries = value_list::<&zvariant::Dict<'_, '_>>(value)?;
+    dictionaries
+        .iter()
+        .all(|dict| dict.iter().all(|(key, _)| <&str>::try_from(key).is_ok()))
+        .then_some(dictionaries)
 }
 
 /// Borrow string dictionary entries, rejecting the entire map on a bad key or
@@ -73,10 +86,10 @@ pub(crate) fn value_string_map(value: &OwnedValue) -> Option<HashMap<&str, &str>
 /// NetworkManager's legacy settings also encode text as UTF-8 byte arrays.
 /// Keep this distinct from strict string inspection (`value_string`).
 pub(crate) fn setting_text(section: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
-    section.get(key).and_then(value_text)
+    section.get(key).and_then(|value| value_text(value))
 }
 
-pub(crate) fn value_text(value: &OwnedValue) -> Option<String> {
+pub(crate) fn value_text(value: &Value<'_>) -> Option<String> {
     value_string(value).or_else(|| String::from_utf8(value_list(value)?).ok())
 }
 
@@ -90,7 +103,7 @@ pub(crate) fn setting_i32(section: &HashMap<String, OwnedValue>, key: &str) -> O
     })
 }
 
-pub(crate) fn value_string(value: &OwnedValue) -> Option<String> {
+pub(crate) fn value_string(value: &Value<'_>) -> Option<String> {
     <&str>::try_from(value).ok().map(str::to_string)
 }
 

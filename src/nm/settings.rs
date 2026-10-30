@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use zvariant::{OwnedObjectPath, OwnedValue};
+use zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use super::{ConnectionSettings, DEVICE_IFACE, Nm, SETTINGS_CONNECTION_IFACE, owned_value};
 
@@ -20,7 +20,8 @@ use crate::model::{
     network_entries_with_profile_matches, security_class,
 };
 use crate::variant::{
-    setting, setting_i32, setting_strings, setting_text, value_text as setting_value_string,
+    setting, setting_i32, setting_strings, setting_text, value_dicts,
+    value_text as setting_value_string,
 };
 use profile_advanced::{apply_advanced, check_expected_version, profile_version, read_enterprise};
 use profile_secrets::{
@@ -647,7 +648,7 @@ fn saved_wifi_connection_from_settings(
     let wireless = settings.get("802-11-wireless")?;
     if connection
         .get("type")
-        .and_then(setting_value_string)
+        .and_then(|value| setting_value_string(value))
         .is_some_and(|connection_type| connection_type != "802-11-wireless")
     {
         return None;
@@ -973,14 +974,13 @@ fn profile_ip_settings(settings: &ConnectionSettings, section: &str) -> ProfileI
 }
 
 fn setting_address_data(value: &OwnedValue) -> Option<Vec<TargetIpAddress>> {
-    let entries: Vec<HashMap<String, OwnedValue>> = value.try_clone().ok()?.try_into().ok()?;
     Some(
-        entries
+        value_dicts(value)?
             .into_iter()
             .filter_map(|entry| {
                 Some(TargetIpAddress {
-                    address: setting_text(&entry, "address")?,
-                    prefix: entry.get("prefix").and_then(setting_u32)?,
+                    address: setting_value_string(entry.get::<_, &Value>(&"address").ok()??)?,
+                    prefix: entry.get(&"prefix").ok()??,
                 })
             })
             .collect(),
@@ -988,17 +988,21 @@ fn setting_address_data(value: &OwnedValue) -> Option<Vec<TargetIpAddress>> {
 }
 
 fn setting_route_data(value: &OwnedValue) -> Option<Vec<TargetIpRoute>> {
-    let entries: Vec<HashMap<String, OwnedValue>> = value.try_clone().ok()?.try_into().ok()?;
     Some(
-        entries
+        value_dicts(value)?
             .into_iter()
             .filter_map(|entry| {
                 Some(TargetIpRoute {
-                    dest: setting_text(&entry, "dest")?,
-                    prefix: entry.get("prefix").and_then(setting_u32)?,
-                    next_hop: setting_text(&entry, "next-hop").filter(|value| !value.is_empty()),
-                    metric: entry.get("metric").and_then(setting_u32),
-                    table: entry.get("table").and_then(setting_u32),
+                    dest: setting_value_string(entry.get::<_, &Value>(&"dest").ok()??)?,
+                    prefix: entry.get(&"prefix").ok()??,
+                    next_hop: entry
+                        .get::<_, &Value>(&"next-hop")
+                        .ok()
+                        .flatten()
+                        .and_then(setting_value_string)
+                        .filter(|value| !value.is_empty()),
+                    metric: entry.get(&"metric").ok().flatten(),
+                    table: entry.get(&"table").ok().flatten(),
                 })
             })
             .collect(),

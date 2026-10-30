@@ -385,7 +385,7 @@ fn selected_band(settings: &ConnectionSettings) -> WifiBand {
     settings
         .get("802-11-wireless")
         .and_then(|wireless| wireless.get("band"))
-        .and_then(value_string)
+        .and_then(|value| value_string(value))
         .map(|value| WifiBand::from_nm_value(&value))
         .unwrap_or(WifiBand::Auto)
 }

@@ -404,7 +404,7 @@ fn hotspot_profile_status(settings: &ConnectionSettings) -> HotspotStatus {
     let wireless = settings.get("802-11-wireless").unwrap_or(&empty);
     let ssid_bytes = wireless
         .get("ssid")
-        .and_then(value_list)
+        .and_then(|value| value_list(value))
         .unwrap_or_default();
     HotspotStatus {
         ssid: Some(display_ssid(&ssid_bytes)),

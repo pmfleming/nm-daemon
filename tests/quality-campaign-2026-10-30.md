@@ -141,3 +141,24 @@ Raw log: `target/quality-campaign/stage-3-tests.log`.
 An optional intermediate stage-2 lens attempt rejected changing Git/evidence
 inputs and published nothing; it is not counted as a successful measurement.
 Only stable baseline/initial/final snapshots are used for metric claims.
+
+## Improvement 4 — borrowed IP dictionaries
+
+The shared variant array reader now accepts borrowed `Value` as well as deref-
+coerced `OwnedValue`. Added a borrowed string-keyed dictionary reader that rejects
+an invalid member/key before exposing any rows. Saved IP readers inspect those
+dictionaries directly; neither their keys nor unrelated nested values are cloned.
+Text still accepts strict strings or UTF-8 bytes; numeric fields retain exact
+u32 typing. Function-pointer callers use explicit deref-coercing closures; no
+public exported API or wire fixture changes.
+
+Expanded the existing IP-profile owner with legacy byte text, unrelated opaque
+metadata, malformed-row skipping, empty next-hop clearing, signed-metric
+rejection, route-table retention, wrong outer type, wrong dictionary keys and a
+mixed dictionary/scalar container. The latter two reject the whole collection.
+These cases supplement the existing family/default/update checks.
+
+`cargo test --locked --lib nm::`: **23 passed**, zero ignored selected tests.
+Format/diff checks pass. Raw log: `target/quality-campaign/stage-4-tests.log`.
+This adds a small shared decoder and test cases; it prioritizes avoiding full
+variant-tree copies over LOC. No allocation benchmark or speedup is claimed.
