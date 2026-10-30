@@ -58,3 +58,48 @@ Delta cognitive/cyclomatic remain **4/9**. Its measured effort increases
 JSON ownership and avoiding serialization, not a claimed numeric complexity gain.
 The co-located implementation and added cases increase physical source by 28
 lines. No runtime benchmark improvement is claimed.
+
+## Ranked post-initial five
+
+Ranked from the refreshed initial hotspot report plus source/behavior inspection:
+
+1. **Statistics watcher handoff race.** `release_statistics_refresh` removes the
+   last watcher and drops its mutex before writing zero to NM. A new acquisition
+   can write a nonzero rate in between and then be disabled. Serialize that final
+   write with acquisition and prove ordering using a blocked private D-Bus setter.
+2. **Duplicate credential validation.** WPA and WEP byte/ASCII/hex validation is
+   duplicated in activation and saved-profile edits. Give both one policy owner,
+   preserving caller-specific errors and QR compatibility, and exercise boundary
+   inputs through both adapters.
+3. **Repeated terminal task lookup.** `store_terminal_result` (cognitive 9,
+   cyclomatic 13, effort 70,431) repeatedly resolves the same owner-scoped task
+   under one lock. Bind it once while preserving immutable result retention,
+   cancellation linearization, stream matching and owner checks.
+4. **Cloned IP dictionaries.** Saved address/route parsing clones whole variant
+   trees before discarding malformed rows. Consume the existing borrowed variant
+   array decoder and retain strict whole-container validation and row semantics.
+5. **QR field allocation.** `split_fields` allocates a fresh buffer at every
+   separator, then immediately unescapes into another string. Reuse its scratch
+   buffer while retaining escape/quote/duplicate-key semantics and secret-safe
+   errors. Extend its current behavior matrix rather than adding another owner.
+
+These are bounded improvements to inspected hotspots and correctness boundaries,
+not a claim of an exhaustive project-wide optimal ranking. Dependency/API and
+wire compatibility take precedence over heuristic score reduction.
+
+## Improvement 1 — serialize statistics refresh handoff
+
+The last watcher now retains the existing ownership mutex until the zero-rate
+D-Bus write completes, matching acquisition's existing lock scope. A blocked
+in-process D-Bus property setter proves the lock is held at that boundary; two
+watchers share refresh, the departing watcher writes zero before a new watcher's
+200ms rate, and the new watcher's final release writes zero again. No production
+sleep or polling was introduced. The existing NM call timeout still bounds the
+external call; this does not attempt recovery from an unacknowledged property
+write or restore a faster rate when only slower watchers remain.
+
+`cargo test --locked --lib nm::statistics::tests`: **1 passed**.
+`cargo fmt --all -- --check` and `git diff --check`: pass.
+Raw log: `target/quality-campaign/stage-1-tests.log`.
+This adds a test fixture for a previously untested race; test-volume reduction is
+not claimed for this stage. Existing external-write error handling is unchanged.

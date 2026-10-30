@@ -93,7 +93,8 @@ impl Nm {
             return;
         }
         devices.remove(device_path);
-        drop(devices);
+        // Acquisition writes RefreshRateMs under this same lock. Keep the
+        // final disable ordered before a new watcher's nonzero refresh rate.
         if let Err(error) = self.set_refresh_rate(device_path, 0) {
             tracing::warn!(
                 device = device_path,
@@ -119,6 +120,85 @@ impl Nm {
         self.proxy(device_path, STATISTICS_IFACE)?
             .set_property("RefreshRateMs", rate_ms)
             .with_context(|| format!("set RefreshRateMs for {device_path}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Nm;
+    use crate::command::SystemCommandRunner;
+    use crate::nl80211::UnavailableWirelessTelemetry;
+    use crate::test_support::TestPeer;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+
+    struct Statistics {
+        rates: Arc<Mutex<Vec<u32>>>,
+        stop: Mutex<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>>,
+    }
+
+    #[zbus::interface(name = "org.freedesktop.NetworkManager.Device.Statistics")]
+    impl Statistics {
+        #[zbus(property)]
+        fn refresh_rate_ms(&self) -> u32 {
+            0
+        }
+        #[zbus(property)]
+        fn set_refresh_rate_ms(&self, rate: u32) {
+            if rate == 0
+                && let Some((stopped, resume)) = self.stop.lock().unwrap().take()
+            {
+                stopped.send(()).unwrap();
+                resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            self.rates.lock().unwrap().push(rate);
+        }
+    }
+
+    #[test]
+    fn last_watcher_disable_is_serialized_with_new_acquisition() -> anyhow::Result<()> {
+        let peer = TestPeer::new(":1.0", ":1.1");
+        let rates = Arc::new(Mutex::new(Vec::new()));
+        let (stopped, stopping) = mpsc::sync_channel(1);
+        let (resume, resumed) = mpsc::sync_channel(1);
+        peer.server.object_server().at(
+            "/device",
+            Statistics {
+                rates: Arc::clone(&rates),
+                stop: Mutex::new(Some((stopped, resumed))),
+            },
+        )?;
+        let nm = Arc::new(Nm::with_connection_runner_destination_and_telemetry(
+            peer.client.clone(),
+            Arc::new(SystemCommandRunner),
+            ":1.0",
+            Arc::new(UnavailableWirelessTelemetry),
+        )?);
+        nm.acquire_statistics_refresh("/device", 1_000)?;
+        nm.acquire_statistics_refresh("/device", 500)?;
+        nm.release_statistics_refresh("/device");
+        assert_eq!(*rates.lock().unwrap(), [1_000, 500]);
+        let leaving = Arc::clone(&nm);
+        let leaving = std::thread::spawn(move || leaving.release_statistics_refresh("/device"));
+        stopping.recv_timeout(Duration::from_secs(5))?;
+        // Deterministic race fence: the setter is blocked, so acquisition must
+        // still be excluded. The former early unlock fails this assertion.
+        let locked = nm.statistics.devices.try_lock().is_err();
+        let joining = Arc::clone(&nm);
+        let joining =
+            std::thread::spawn(move || joining.acquire_statistics_refresh("/device", 200));
+        resume.send(())?;
+        leaving.join().unwrap();
+        joining.join().unwrap()?;
+        assert!(
+            locked,
+            "last-watcher disable must retain the ownership lock"
+        );
+        assert_eq!(*rates.lock().unwrap(), [1_000, 500, 0, 200]);
+        assert_eq!(nm.statistics.devices.lock().unwrap()["/device"].watchers, 1);
+        nm.release_statistics_refresh("/device");
+        assert_eq!(*rates.lock().unwrap(), [1_000, 500, 0, 200, 0]);
+        Ok(())
     }
 }
 
