@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 
+use crate::auth::WifiPasswordFormat;
 use crate::variant::setting_text;
 
 use super::{
@@ -9,7 +10,7 @@ use super::{
     setting_u32, wep_secret_key, wifi_secret_kind,
 };
 use crate::error::{DomainError, ErrorOperation};
-use crate::model::WifiProfileUpdate;
+use crate::model::{WepKeyType, WifiProfileUpdate};
 
 /// NetworkManager's built-in secret names; plugin-defined hints are handled by the agent.
 pub(crate) fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
@@ -200,49 +201,30 @@ fn validate_profile_secret(
     key: &str,
     value: &str,
 ) -> Result<()> {
-    match (spec.kind, key) {
-        ("password", "psk") => validate_profile_wpa_psk(value),
-        ("wep-key", key) if key.starts_with("wep-key") => validate_profile_wep_key(settings, value),
-        _ => Ok(()),
-    }
-}
-
-fn validate_profile_wpa_psk(value: &str) -> Result<()> {
-    let len = value.len();
-    if (8..=63).contains(&len) || (len == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())) {
-        return Ok(());
-    }
-    invalid_profile_secret(
-        "secrets.psk",
-        "WPA-PSK password must be 8-63 characters, or 64 hexadecimal characters",
-    )
-}
-
-fn validate_profile_wep_key(settings: &ConnectionSettings, value: &str) -> Result<()> {
-    let key_type = settings
-        .get("802-11-wireless-security")
-        .and_then(|section| section.get("wep-key-type"))
-        .and_then(setting_u32)
-        .unwrap_or(1);
-    let message = match key_type {
-        2 if (8..=64).contains(&value.len()) => return Ok(()),
-        2 => "WEP passphrase must be 8-64 characters",
-        _ if valid_wep_network_key(value) => return Ok(()),
-        _ => "WEP key must be 5 or 13 ASCII characters, or 10 or 26 hexadecimal characters",
+    let format = match (spec.kind, key) {
+        ("password", "psk") => WifiPasswordFormat::WpaPsk,
+        ("wep-key", key) if key.starts_with("wep-key") => {
+            let phrase = settings
+                .get("802-11-wireless-security")
+                .and_then(|section| section.get("wep-key-type"))
+                .and_then(setting_u32)
+                == Some(2);
+            WifiPasswordFormat::Wep(if phrase {
+                WepKeyType::Phrase
+            } else {
+                WepKeyType::Key
+            })
+        }
+        _ => return Ok(()),
     };
-    invalid_profile_secret("secrets", message)
-}
-
-fn valid_wep_network_key(value: &str) -> bool {
-    (matches!(value.len(), 5 | 13) && value.is_ascii())
-        || (matches!(value.len(), 10 | 26) && value.chars().all(|ch| ch.is_ascii_hexdigit()))
-}
-
-fn invalid_profile_secret(field: &'static str, message: &'static str) -> Result<()> {
-    Err(
-        DomainError::validation(ErrorOperation::ProfileOperation, message)
-            .with_detail("field", field)
-            .into(),
+    format.validate(
+        value,
+        ErrorOperation::ProfileOperation,
+        if spec.kind == "password" {
+            "secrets.psk"
+        } else {
+            "secrets"
+        },
     )
 }
 

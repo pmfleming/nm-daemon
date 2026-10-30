@@ -103,3 +103,23 @@ write or restore a faster rate when only slower watchers remain.
 Raw log: `target/quality-campaign/stage-1-tests.log`.
 This adds a test fixture for a previously untested race; test-volume reduction is
 not claimed for this stage. Existing external-write error handling is unchanged.
+
+## Improvement 2 — one native credential-format policy
+
+`auth::WifiPasswordFormat` owns WPA PSK and WEP key/passphrase validation and
+constructs the existing typed error from each caller's explicit operation/field.
+Deleted the separate activation and profile-update validators and their duplicate
+predicates. ASCII hex checks now iterate bytes; Unicode handling and byte-length
+limits are unchanged. Saved WEP's unknown/missing key-type still means raw key.
+QR intake deliberately retains its existing character-count/legacy-length rules.
+
+Expanded the existing profile-secret owner with **19 boundary inputs through both
+activation and profile editing**: WPA lengths 7/8/63/64/65, raw hex vs nonhex,
+multibyte UTF-8, WEP ASCII/hex lengths and non-ASCII rejection, phrase limits.
+Assertions include acceptance and exact code/operation/message/field on failure.
+Existing foreign-key, primary-key, named-secret and enterprise checks remain.
+
+`cargo test --locked --lib nm::`: **23 passed**, zero ignored selected tests.
+Format/diff checks pass. Raw log: `target/quality-campaign/stage-2-tests.log`.
+Production changes remove five physical lines overall; added behavioral cases
+increase test lines. No numeric coverage claim is inferred from case counts.

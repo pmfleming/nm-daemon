@@ -5,7 +5,7 @@ mod profile;
 use anyhow::Result;
 use zvariant::OwnedValue;
 
-use crate::auth::WifiAuthentication;
+use crate::auth::{WifiAuthentication, WifiPasswordFormat};
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{
     AccessPoint, EnterpriseAuth, WepKeyType, WifiConnectTarget, enterprise_key_mgmt,
@@ -21,7 +21,7 @@ pub(super) fn psk_wifi_connection_settings(
 ) -> Result<ConnectionSettings> {
     let key_mgmt = crate::auth::personal_key_management(ap.wpa_flags, ap.rsn_flags);
     if key_mgmt == "wpa-psk" {
-        validate_wpa_psk(password)?;
+        WifiPasswordFormat::WpaPsk.validate(password, ErrorOperation::Connect, "password")?;
     }
     Ok(security_connection_settings(wireless_security_section(
         key_mgmt, password,
@@ -105,7 +105,7 @@ fn security_settings_for_saved_profile(
         .unwrap_or_default();
     match (key_mgmt, password) {
         ("wpa-psk" | "sae", Some(password)) => {
-            validate_wpa_psk(password)?;
+            WifiPasswordFormat::WpaPsk.validate(password, ErrorOperation::Connect, "password")?;
             Ok(Some(security_connection_settings(
                 wireless_security_section(key_mgmt, password)?,
             )))
@@ -225,7 +225,7 @@ fn security_settings_without_hint(
     if let Some(wep_key_type) = wep_key_type {
         return wep_wifi_connection_settings(password, wep_key_type).map(Some);
     }
-    validate_wpa_psk(password)?;
+    WifiPasswordFormat::WpaPsk.validate(password, ErrorOperation::Connect, "password")?;
     Ok(Some(security_connection_settings(
         wireless_security_section("wpa-psk", password)?,
     )))
@@ -246,7 +246,7 @@ fn hidden_personal_settings(
 ) -> Result<Option<ConnectionSettings>> {
     let password =
         required_hidden_password(password, "hidden WPA/SAE network requires a password")?;
-    validate_wpa_psk(password)?;
+    WifiPasswordFormat::WpaPsk.validate(password, ErrorOperation::Connect, "password")?;
     Ok(Some(security_connection_settings(
         wireless_security_section(key_mgmt, password)?,
     )))
@@ -490,7 +490,11 @@ fn wep_security_section(
     password: &str,
     wep_key_type: WepKeyType,
 ) -> Result<HashMap<String, OwnedValue>> {
-    validate_wep_key(password, wep_key_type)?;
+    WifiPasswordFormat::Wep(wep_key_type).validate(
+        password,
+        ErrorOperation::Connect,
+        "password",
+    )?;
     value_map([
         ("key-mgmt", "none".into()),
         ("wep-key0", password.into()),
@@ -513,43 +517,6 @@ fn insert_required_string(
         .into());
     };
     insert_string(settings, key, value)
-}
-
-pub(super) fn validate_wpa_psk(password: &str) -> Result<()> {
-    let len = password.len();
-    if (8..=63).contains(&len) || (len == 64 && password.chars().all(|ch| ch.is_ascii_hexdigit())) {
-        return Ok(());
-    }
-    Err(DomainError::validation(
-        ErrorOperation::Connect,
-        "WPA-PSK password must be 8-63 characters, or 64 hexadecimal characters",
-    )
-    .with_detail("field", "password")
-    .into())
-}
-
-fn validate_wep_key(password: &str, wep_key_type: WepKeyType) -> Result<()> {
-    match wep_key_type {
-        WepKeyType::Key if wep_key_is_valid(password) => Ok(()),
-        WepKeyType::Key => Err(DomainError::validation(
-            ErrorOperation::Connect,
-            "WEP key must be 5 or 13 ASCII characters, or 10 or 26 hexadecimal characters",
-        )
-        .with_detail("field", "password")
-        .into()),
-        WepKeyType::Phrase if (8..=64).contains(&password.len()) => Ok(()),
-        WepKeyType::Phrase => Err(DomainError::validation(
-            ErrorOperation::Connect,
-            "WEP passphrase must be 8-64 characters",
-        )
-        .with_detail("field", "password")
-        .into()),
-    }
-}
-
-fn wep_key_is_valid(password: &str) -> bool {
-    (matches!(password.len(), 5 | 13) && password.is_ascii())
-        || (matches!(password.len(), 10 | 26) && password.chars().all(|ch| ch.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]

@@ -114,6 +114,103 @@ fn ip_profiles_preserve_defaults_signed_values_and_family_boundaries() -> anyhow
 
 #[test]
 fn profile_secrets_use_the_security_specific_section_key_and_validation() -> anyhow::Result<()> {
+    use crate::error::{ErrorCode, ErrorOperation, ErrorReport};
+    use crate::model::WepKeyType;
+    for (management, kind, key, field, message, cases) in [
+        (
+            "wpa-psk",
+            WepKeyType::Key,
+            "psk",
+            "secrets.psk",
+            "WPA-PSK password must be 8-63 characters, or 64 hexadecimal characters",
+            vec![
+                ("x".repeat(7), false),
+                ("x".repeat(8), true),
+                ("x".repeat(63), true),
+                ("a".repeat(64), true),
+                ("x".repeat(64), false),
+                ("a".repeat(65), false),
+                ("é".repeat(4), true),
+                ("é".repeat(32), false),
+            ],
+        ),
+        (
+            "wep",
+            WepKeyType::Key,
+            "wep-key0",
+            "secrets",
+            "WEP key must be 5 or 13 ASCII characters, or 10 or 26 hexadecimal characters",
+            vec![
+                ("x".repeat(4), false),
+                ("x".repeat(5), true),
+                ("x".repeat(13), true),
+                ("a".repeat(10), true),
+                ("a".repeat(26), true),
+                ("x".repeat(10), false),
+                ("éabc".into(), false),
+            ],
+        ),
+        (
+            "wep",
+            WepKeyType::Phrase,
+            "wep-key0",
+            "secrets",
+            "WEP passphrase must be 8-64 characters",
+            vec![
+                ("x".repeat(7), false),
+                ("x".repeat(8), true),
+                ("x".repeat(64), true),
+                ("x".repeat(65), false),
+            ],
+        ),
+    ] {
+        for (password, valid) in cases {
+            let mut target = crate::model::example_connect_target(true);
+            target.key_mgmt = Some(management.into());
+            let activation = crate::nm::wifi_settings::hidden_wifi_connection_settings(
+                &target,
+                Some(&password),
+                Some(kind),
+            )
+            .map(|_| ());
+            let mut settings = wifi_settings("Example", "802-11-wireless")?;
+            settings.insert(
+                "802-11-wireless-security".into(),
+                value_map([
+                    (
+                        "key-mgmt",
+                        if management == "wep" {
+                            "none"
+                        } else {
+                            management
+                        }
+                        .into(),
+                    ),
+                    ("wep-key-type", kind.nm_value().into()),
+                ])?,
+            );
+            let edit = update_profile_secrets(
+                &mut settings,
+                &WifiProfileUpdate {
+                    secrets: BTreeMap::from([(key.into(), password)]),
+                    ..Default::default()
+                },
+            );
+            for (result, operation, field) in [
+                (activation, ErrorOperation::Connect, "password"),
+                (edit, ErrorOperation::ProfileOperation, field),
+            ] {
+                assert_eq!(result.is_ok(), valid, "{management} {kind:?} {operation:?}");
+                if let Err(error) = result {
+                    let report = ErrorReport::from_error(&error, ErrorOperation::Unknown);
+                    assert_eq!(report.code, ErrorCode::ValidationError);
+                    assert_eq!(report.operation, operation);
+                    assert_eq!(report.message, message);
+                    assert_eq!(report.details["field"], field);
+                }
+            }
+        }
+    }
     for (management, section, key, password, foreign_key) in [
         (
             "wpa-psk",
