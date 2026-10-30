@@ -290,14 +290,11 @@ impl DaemonRuntime {
         if let Some(result) = results.get_owned(request_id, owner.as_deref()) {
             return Some(result.event.clone());
         }
-        if tasks
-            .get(request_id)
-            .is_some_and(|task| task.owner == owner && task.terminal)
-        {
+        let task = tasks.get_mut(request_id).filter(|task| task.owner == owner);
+        if task.as_ref().is_some_and(|task| task.terminal) {
             return None; // Evicted/expired evidence stays unknown, not a new outcome.
         }
-        if let Some(task) = tasks.get(request_id)
-            && task.owner == owner
+        if let Some(task) = task.as_ref()
             && task.kind == TaskKind::Connect
             && (owner_changed || task.cancellation.load(Ordering::Acquire))
             && event["event"] == "succeeded"
@@ -313,14 +310,13 @@ impl DaemonRuntime {
                 object.remove("result");
             }
         }
-        let observation_revision = tasks
-            .get_mut(request_id)
-            .filter(|task| task.owner == owner && task.kind.stream() == stream)
-            .map_or(1, |task| {
-                task.terminal = true;
-                task.observation_revision = task.observation_revision.saturating_add(1);
-                task.observation_revision
-            });
+        let observation_revision =
+            task.filter(|task| task.kind.stream() == stream)
+                .map_or(1, |task| {
+                    task.terminal = true;
+                    task.observation_revision = task.observation_revision.saturating_add(1);
+                    task.observation_revision
+                });
         event["operation_revision"] = serde_json::json!(observation_revision);
         results.record(
             request_id.to_string(),

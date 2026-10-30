@@ -123,3 +123,21 @@ Existing foreign-key, primary-key, named-secret and enterprise checks remain.
 Format/diff checks pass. Raw log: `target/quality-campaign/stage-2-tests.log`.
 Production changes remove five physical lines overall; added behavioral cases
 increase test lines. No numeric coverage claim is inferred from case counts.
+
+## Improvement 3 — one owner-scoped terminal task binding
+
+`store_terminal_result` binds the matching mutable task once under the existing
+publication locks, then uses that binding for eviction/expiry protection,
+cancellation conversion and revision advancement. Removed repeated map lookups
+and owner comparisons. The pre-lock NM-owner query, task/results lock order,
+terminal immutability, stream filter and portal-authorization removal stay in
+place. No additional synchronization or forwarding helper was added.
+
+`cargo test --locked --lib daemon_runtime::tests`: **3 passed**. Existing owners
+exercise cancellation/deadline-vs-success, concurrent monotonic observations,
+foreign-owner rejection, immutable completion and missing/evicted terminal
+results. Format/diff checks pass; no tests were deleted or duplicated.
+Raw log: `target/quality-campaign/stage-3-tests.log`.
+An optional intermediate stage-2 lens attempt rejected changing Git/evidence
+inputs and published nothing; it is not counted as a successful measurement.
+Only stable baseline/initial/final snapshots are used for metric claims.
