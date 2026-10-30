@@ -1,6 +1,8 @@
 //! A subscriber's delta chain. Cursor and collection advance together, before
 //! emission: a failed emission is detectable by the next delta's base revision.
-use super::*;
+use std::collections::HashMap;
+
+use serde_json::{Map, Value, json};
 
 pub(crate) const MAX_REVISION: u64 = (1_u64 << 53) - 1;
 
@@ -24,7 +26,7 @@ impl NetworkUpdates {
         if self.revision == MAX_REVISION {
             *self = Self::default();
         }
-        let mut delta = super::network_delta(self.last.as_ref(), current)?;
+        let mut delta = network_delta(self.last.as_ref(), current)?;
         delta.insert("initial".into(), json!(self.last.is_none()));
         delta.insert("epoch".into(), json!(self.epoch));
         delta.insert("base_revision".into(), json!(self.revision));
@@ -35,9 +37,109 @@ impl NetworkUpdates {
     }
 }
 
+fn network_delta(previous: Option<&Value>, current: &Value) -> Option<Map<String, Value>> {
+    let current_networks = current.get("networks")?.as_array()?;
+    let previous_networks = previous
+        .and_then(|payload| payload.get("networks"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let previous_by_key = networks_by_key(previous_networks);
+    let current_by_key = networks_by_key(current_networks);
+
+    let added: Vec<Value> = current_networks
+        .iter()
+        .filter(|network| {
+            network_key(network).is_some_and(|key| !previous_by_key.contains_key(key))
+        })
+        .cloned()
+        .collect();
+    let changed: Vec<Value> = current_networks
+        .iter()
+        .filter(|network| {
+            network_key(network)
+                .and_then(|key| previous_by_key.get(key))
+                .is_some_and(|previous| network_entry_changed(previous, network))
+        })
+        .cloned()
+        .collect();
+    let removed: Vec<Value> = previous_networks
+        .iter()
+        .filter(|network| network_key(network).is_some_and(|key| !current_by_key.contains_key(key)))
+        .cloned()
+        .collect();
+
+    if previous.is_some() && added.is_empty() && removed.is_empty() && changed.is_empty() {
+        return None;
+    }
+
+    let mut delta = Map::new();
+    delta.insert("added".to_string(), Value::Array(added));
+    delta.insert("removed".to_string(), Value::Array(removed));
+    delta.insert("changed".to_string(), Value::Array(changed));
+    if let Some(snapshot) = current.get("snapshot") {
+        delta.insert("snapshot".to_string(), snapshot.clone());
+    }
+    if let Some(warning) = current.get("warning").filter(|warning| !warning.is_null()) {
+        delta.insert("warning".to_string(), warning.clone());
+    }
+    Some(delta)
+}
+
+fn networks_by_key(networks: &[Value]) -> HashMap<&str, &Value> {
+    networks
+        .iter()
+        .filter_map(|network| Some((network_key(network)?, network)))
+        .collect()
+}
+
+fn network_key(network: &Value) -> Option<&str> {
+    network.get("key").and_then(Value::as_str)
+}
+
+fn network_entry_changed(previous: &Value, current: &Value) -> bool {
+    !equal_network_fields(previous, current, |key, previous, current| {
+        match (key, previous, current) {
+            ("access_points", Value::Array(previous), Value::Array(current)) => {
+                previous.len() == current.len()
+                    && previous.iter().zip(current).all(|(previous, current)| {
+                        equal_network_fields(previous, current, |_, a, b| a == b)
+                    })
+            }
+            _ => previous == current,
+        }
+    })
+}
+
+// Ignore age only at the network and AP object boundaries, not in arbitrary
+// nested metadata. Compare borrowed values without copying either JSON tree.
+fn equal_network_fields(
+    previous: &Value,
+    current: &Value,
+    equal: impl Fn(&str, &Value, &Value) -> bool,
+) -> bool {
+    let (Value::Object(previous), Value::Object(current)) = (previous, current) else {
+        return previous == current;
+    };
+    stable_fields(previous).count() == stable_fields(current).count()
+        && stable_fields(previous).all(|(key, value)| {
+            current
+                .get(key)
+                .is_some_and(|current| equal(key, value, current))
+        })
+}
+
+fn stable_fields(object: &Map<String, Value>) -> impl Iterator<Item = (&String, &Value)> {
+    object.iter().filter(|(key, _)| *key != "last_seen_age_ms")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{MAX_REVISION, NetworkUpdates};
+    use crate::daemon_status::{SharedPayloads, SubscriptionState};
+    use crate::protocol::Stream;
+    use serde_json::{Value, json};
+    use std::time::Duration;
     fn networks(key: &str, strength: u8) -> Value {
         json!({"networks":[{"key":key,"strength":strength,"last_seen_age_ms":1}]})
     }
@@ -65,6 +167,26 @@ mod tests {
         assert_eq!(c["revision"], 3);
         assert_eq!(c["removed"][0]["key"], "a");
         assert_eq!(c["added"][0]["key"], "b");
+
+        let next = json!({"networks": [
+            {"key":"z", "strength":10}, {"key":"b", "strength":80},
+            {"key":"a", "strength":20}, {"strength":90}
+        ], "snapshot":{"source":"scan"}, "warning":"partial"});
+        let delta = updates.project(&next).unwrap();
+        assert_eq!(
+            delta["added"],
+            json!([next["networks"][0], next["networks"][2]])
+        );
+        assert_eq!(delta["changed"], json!([next["networks"][1]]));
+        assert_eq!(delta["removed"], json!([]));
+        assert_eq!(delta["snapshot"], next["snapshot"]);
+        assert_eq!(delta["warning"], "partial");
+        assert!(updates.project(&next).is_none());
+        let empty = updates.project(&json!({"networks":[]})).unwrap();
+        assert_eq!(
+            empty["removed"],
+            json!(&next["networks"].as_array().unwrap()[..3])
+        );
     }
     #[test]
     fn replacement_and_other_subscribers_have_independent_full_baselines() {

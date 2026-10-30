@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
@@ -184,99 +183,6 @@ fn emit_network_changes(
         "changed",
         payload,
     );
-}
-
-fn network_delta(previous: Option<&Value>, current: &Value) -> Option<Map<String, Value>> {
-    let current_networks = current.get("networks")?.as_array()?;
-    let previous_networks = previous
-        .and_then(|payload| payload.get("networks"))
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let previous_by_key = networks_by_key(previous_networks);
-    let current_by_key = networks_by_key(current_networks);
-
-    let added = current_networks
-        .iter()
-        .filter(|network| {
-            network_key(network).is_some_and(|key| !previous_by_key.contains_key(key))
-        })
-        .collect::<Vec<_>>();
-    let changed = current_networks
-        .iter()
-        .filter(|network| {
-            network_key(network)
-                .and_then(|key| previous_by_key.get(key))
-                .is_some_and(|previous| network_entry_changed(previous, network))
-        })
-        .collect::<Vec<_>>();
-    let removed = previous_networks
-        .iter()
-        .filter(|network| network_key(network).is_some_and(|key| !current_by_key.contains_key(key)))
-        .collect::<Vec<_>>();
-
-    if previous.is_some() && added.is_empty() && removed.is_empty() && changed.is_empty() {
-        return None;
-    }
-
-    let mut delta = Map::new();
-    delta.insert("added".to_string(), json!(added));
-    delta.insert("removed".to_string(), json!(removed));
-    delta.insert("changed".to_string(), json!(changed));
-    if let Some(snapshot) = current.get("snapshot") {
-        delta.insert("snapshot".to_string(), snapshot.clone());
-    }
-    if let Some(warning) = current.get("warning").filter(|warning| !warning.is_null()) {
-        delta.insert("warning".to_string(), warning.clone());
-    }
-    Some(delta)
-}
-
-fn networks_by_key(networks: &[Value]) -> HashMap<&str, &Value> {
-    networks
-        .iter()
-        .filter_map(|network| Some((network_key(network)?, network)))
-        .collect()
-}
-
-fn network_key(network: &Value) -> Option<&str> {
-    network.get("key").and_then(Value::as_str)
-}
-
-fn network_entry_changed(previous: &Value, current: &Value) -> bool {
-    !equal_network_fields(previous, current, |key, previous, current| {
-        match (key, previous, current) {
-            ("access_points", Value::Array(previous), Value::Array(current)) => {
-                previous.len() == current.len()
-                    && previous.iter().zip(current).all(|(previous, current)| {
-                        equal_network_fields(previous, current, |_, a, b| a == b)
-                    })
-            }
-            _ => previous == current,
-        }
-    })
-}
-
-// Ignore age only at the network and AP object boundaries, not in arbitrary
-// nested metadata. Compare borrowed values without copying either JSON tree.
-fn equal_network_fields(
-    previous: &Value,
-    current: &Value,
-    equal: impl Fn(&str, &Value, &Value) -> bool,
-) -> bool {
-    let (Value::Object(previous), Value::Object(current)) = (previous, current) else {
-        return previous == current;
-    };
-    stable_fields(previous).count() == stable_fields(current).count()
-        && stable_fields(previous).all(|(key, value)| {
-            current
-                .get(key)
-                .is_some_and(|current| equal(key, value, current))
-        })
-}
-
-fn stable_fields(object: &Map<String, Value>) -> impl Iterator<Item = (&String, &Value)> {
-    object.iter().filter(|(key, _)| *key != "last_seen_age_ms")
 }
 
 fn emit_on_change(
