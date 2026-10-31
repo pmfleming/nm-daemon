@@ -248,6 +248,91 @@ fn assert_activation_outcome(
 }
 
 #[test]
+fn new_visible_network_uses_one_native_prompt_for_temporary_and_remembered_connections()
+-> Result<()> {
+    isolated(
+        concat!(
+            module_path!(),
+            "::new_visible_network_uses_one_native_prompt_for_temporary_and_remembered_connections"
+        ),
+        || {
+            for remember in [false, true] {
+                let harness = Harness::new(true)?;
+                {
+                    let mut state = harness.fake.state.lock().unwrap();
+                    state.settings.clear();
+                    state.rsn_flags = crate::model::NM_AP_SEC_KEY_MGMT_PSK;
+                }
+                let returned = harness.callback(1, false, false)?;
+                let frontend = harness.fake.peer.client.unique_name().unwrap().to_string();
+                let reply = std::thread::spawn(move || {
+                    let id = pending();
+                    let result = provide(
+                        Some(&frontend),
+                        SecretProvideParams {
+                            request_id: id,
+                            save: remember,
+                            password: None,
+                            values: HashMap::from([("psk".into(), "synthetic-fresh".into())]),
+                            cancel: false,
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(result["data"]["result"]["accepted"], true);
+                });
+                let app = Application::new(&harness.fake.nm);
+                let entries = harness
+                    .fake
+                    .nm
+                    .network_entries_for_access_points(harness.fake.nm.list_all_access_points()?)?;
+                let mut request = app.connect_request_for_key(&entries[0].key, None, None, None)?;
+                for candidate in
+                    std::iter::once(&mut request.candidate).chain(&mut request.alternatives)
+                {
+                    candidate.target.profile.remember = Some(remember);
+                }
+                let result = app.connect(&request, None, |_| Ok(()))?;
+                let secrets = returned.recv_timeout(Duration::from_secs(5))?;
+                assert!(
+                    matches!(result, ConnectOutcome::Succeeded(_)),
+                    "remember={remember}: {result:?}; callback={secrets:?}"
+                );
+                let secrets = secrets?;
+                reply.join().unwrap();
+                assert_eq!(
+                    crate::variant::setting::<&str>(&secrets[SECURITY], "psk"),
+                    Some("synthetic-fresh")
+                );
+                let state = harness.fake.state.lock().unwrap();
+                assert_eq!(
+                    state.activations.len(),
+                    1,
+                    "native reply must not reactivate"
+                );
+                assert_eq!((state.added, state.deleted), (1, 0));
+                assert_eq!(
+                    state.persist.as_deref(),
+                    if remember { None } else { Some("volatile") }
+                );
+                assert!(
+                    !state.settings[SECURITY].contains_key("psk"),
+                    "no speculative credential in activation settings"
+                );
+                assert_eq!(
+                    crate::variant::setting::<u32>(&state.settings[SECURITY], "psk-flags")
+                        .unwrap_or(0),
+                    if remember { 0 } else { 2 }
+                );
+                assert!(with_pending_registry(|registry| registry
+                    .requests
+                    .is_empty()));
+            }
+            Ok(())
+        },
+    )
+}
+
+#[test]
 fn manual_saved_activation_uses_real_agent_callbacks_without_speculative_forms_or_retries()
 -> Result<()> {
     isolated(

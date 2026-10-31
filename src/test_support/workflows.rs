@@ -38,6 +38,7 @@ pub(crate) struct State {
     pub(crate) current: Option<Outcome>,
     pub(crate) on_activate: Option<Arc<dyn Fn(ConnectionSettings) + Send + Sync>>,
     ap: String,
+    pub(crate) rsn_flags: u32,
     hotspot: bool,
     vpn: bool,
     pub(crate) settings: ConnectionSettings,
@@ -125,6 +126,7 @@ impl FakeNm {
             current: None,
             on_activate: None,
             ap: AP1.into(),
+            rsn_flags: 0,
             hotspot: false,
             vpn,
             settings,
@@ -144,8 +146,8 @@ impl FakeNm {
         server.at(PROFILE, Profile(state.clone()))?;
         server.at(DEVICE, Device(state.clone()))?;
         server.at(DEVICE, Wireless(state.clone()))?;
-        server.at(AP1, AccessPoint(5180, "00:11:22:33:44:55"))?;
-        server.at(AP2, AccessPoint(2412, "00:11:22:33:44:66"))?;
+        server.at(AP1, AccessPoint(5180, "00:11:22:33:44:55", state.clone()))?;
+        server.at(AP2, AccessPoint(2412, "00:11:22:33:44:66", state.clone()))?;
         server.at(ACTIVE, Active(state.clone()))?;
         server.at(ACTIVE, Vpn(state.clone()))?;
         let nm = Nm::with_connection_runner_destination_and_telemetry(
@@ -437,9 +439,21 @@ impl Wireless {
         }
     }
 }
-struct AccessPoint(u32, &'static str);
+struct AccessPoint(u32, &'static str, Arc<Mutex<State>>);
 #[zbus::interface(name = "org.freedesktop.NetworkManager.AccessPoint")]
 impl AccessPoint {
+    #[zbus(property)]
+    fn flags(&self) -> u32 {
+        u32::from(self.2.lock().unwrap().rsn_flags != 0)
+    }
+    #[zbus(property)]
+    fn wpa_flags(&self) -> u32 {
+        0
+    }
+    #[zbus(property)]
+    fn rsn_flags(&self) -> u32 {
+        self.2.lock().unwrap().rsn_flags
+    }
     #[zbus(property)]
     fn ssid(&self) -> Vec<u8> {
         b"Example".to_vec()

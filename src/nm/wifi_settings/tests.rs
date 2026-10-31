@@ -13,6 +13,44 @@ use crate::model::{
 use crate::variant::{owned_value, value_map};
 
 #[test]
+fn visible_password_networks_can_activate_before_native_credential_prompt() -> anyhow::Result<()> {
+    use crate::model::{NM_AP_FLAGS_PRIVACY, NM_AP_SEC_KEY_MGMT_SAE};
+    for (rsn_flags, key_mgmt, secret) in [
+        (NM_AP_SEC_KEY_MGMT_PSK, "wpa-psk", "psk"),
+        (NM_AP_SEC_KEY_MGMT_SAE, "sae", "psk"),
+        (0, "none", "wep-key0"),
+    ] {
+        let ap = AccessPoint {
+            flags: NM_AP_FLAGS_PRIVACY,
+            wpa_flags: 0,
+            rsn_flags,
+            ..crate::model::example_access_point()
+        };
+        let target = example_connect_target(false);
+        let settings = super::visible_connection_settings(&target, &ap, None, None)?
+            .expect("visible password networks must reach NetworkManager without a pre-prompt");
+        let security = &settings["802-11-wireless-security"];
+        assert_eq!(
+            setting::<String>(security, "key-mgmt").as_deref(),
+            Some(key_mgmt)
+        );
+        assert!(!security.contains_key(secret));
+        let supplied = if secret == "psk" {
+            "synthetic-password"
+        } else {
+            "abcde"
+        };
+        let settings = super::visible_connection_settings(&target, &ap, Some(supplied), None)?
+            .expect("explicit CLI/QR passwords still go directly to NM");
+        assert_eq!(
+            setting::<String>(&settings["802-11-wireless-security"], secret).as_deref(),
+            Some(supplied)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn profile_activation_replaces_credentials_without_losing_security_or_network_options()
 -> anyhow::Result<()> {
     let mut target = example_connect_target(true);

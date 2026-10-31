@@ -41,14 +41,32 @@ pub(super) fn visible_connection_settings(
     match crate::auth::classify(ap.flags, ap.wpa_flags, ap.rsn_flags) {
         WifiAuthentication::Open => Ok(Some(ConnectionSettings::new())),
         WifiAuthentication::Owe => owe_wifi_connection_settings().map(Some),
-        WifiAuthentication::Personal => password
-            .map(|password| psk_wifi_connection_settings(ap, password))
-            .transpose(),
-        WifiAuthentication::Wep => password
-            .map(|password| {
+        // Build the security policy even without a password. NetworkManager
+        // owns credential discovery through its live SecretAgent request; the
+        // frontend must not collect a speculative password before activation.
+        WifiAuthentication::Personal => match password {
+            Some(password) => psk_wifi_connection_settings(ap, password).map(Some),
+            None => key_management_section(crate::auth::personal_key_management(
+                ap.wpa_flags,
+                ap.rsn_flags,
+            ))
+            .map(security_connection_settings)
+            .map(Some),
+        },
+        WifiAuthentication::Wep => match password {
+            Some(password) => {
                 wep_wifi_connection_settings(password, wep_key_type.unwrap_or(WepKeyType::Key))
-            })
-            .transpose(),
+                    .map(Some)
+            }
+            None => {
+                let mut security = key_management_section("none")?;
+                security.insert(
+                    "wep-key-type".into(),
+                    owned_value(wep_key_type.unwrap_or(WepKeyType::Key).nm_value())?,
+                );
+                Ok(Some(security_connection_settings(security)))
+            }
+        },
         WifiAuthentication::Enterprise => target
             .enterprise
             .as_ref()
