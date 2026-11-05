@@ -12,14 +12,9 @@ use super::{
 use crate::error::{DomainError, ErrorOperation};
 use crate::model::{WepKeyType, WifiProfileUpdate};
 
-/// NetworkManager's built-in secret names; plugin-defined hints are handled by the agent.
-pub(crate) fn known_secret_keys(setting_name: &str) -> &'static [&'static str] {
-    crate::network_credentials::known_keys(setting_name)
-}
-
-pub(crate) fn secret_flags_key(key: &str) -> String {
-    crate::network_credentials::flags_key(key)
-}
+pub(crate) use crate::network_credentials::{
+    flags_key as secret_flags_key, known_keys as known_secret_keys,
+};
 
 pub(super) struct ProfileSecretSpec {
     pub(super) kind: &'static str,

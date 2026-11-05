@@ -1,0 +1,126 @@
+nm-daemon RQLens refactor evidence -- 2026-11-05
+Repository: /home/laufan/Projects/nm-daemon
+Baseline HEAD: eeb7fe26157847bcbe0ee2820cbbae60efdec27b; initial worktree clean.
+Read README, rqlens.toml, Cargo.toml, justfile, .cargo/config.toml, flake.nix,
+architecture and test-reduction docs. No applicable ancestor/repository AGENTS.md.
+No framework, QML, protocol fixtures, Cargo manifests or lockfiles changed; no
+commits, pushes, deployment, service restarts or host-network mutation.
+
+Scope/evidence: whole-repository source scan, 130 Rust files under configured
+source_roots=["src"]. Generated/build/vendor material excluded consistently.
+Actual LOC additionally includes authored build.rs and test_support/*.rs, assigning
+cfg(test) spans, test-only modules and fixtures to test code. Physical/nonblank
+counts include comments/braces; tests count functions, not assertions/table rows.
+Raw paired reports, logs, inventories and coverage.json are under
+  target/rqlens-refactor/{before,after}/
+The untouched source/config/fixture snapshot is before/source.tar; phase manifests,
+inventory.py, comparison.json and the copied analyzer are in the parent directory.
+Same RQLens 0.1.0 binary SHA256:
+  8f9a8852860c8e63c1f23e479e90f1ced9e711224e3c57299fca6a523f0afb9f
+Same Rust/Cargo 1.95.0, cargo-llvm-cov 0.8.5, LLVM 21.1.8 and CARGO_BUILD_JOBS=2.
+Both configs have digest 72493063bb4eb3b1; all seven fingerprints agree within each
+phase. Source metrics remain partial for macros/conservative identity resolution;
+they are advisory observations, not compiler-complete enforcement or coverage.
+
+Ranked findings and implemented changes:
+1. Highest production cognitive hotspot, merge_secrets: nested schema handling
+   copied consumed credentials. It now consumes internal source settings, moves
+   fixed/peer secrets and separates WireGuard peer merging at the schema boundary.
+   Incoming public fields still cannot replace destination policy/configuration.
+2. Four read-only WireGuard paths (values, flags inventory, text, presence) cloned
+   entire credential-bearing peer arrays. They now borrow validated dictionaries
+   via shared value_dicts. Public snapshots consume their already-copied peer
+   array. Shared set_peer_value retains decode/unique-identity/write guards.
+3. Largest test hotspot, preserving-writer matrix: shared defaults and one Result
+   flow replace repeated error scaffolding, retaining all 13 scenarios. Two schema/
+   merge tests now share one focused matrix. Added unmatched-peer rejection and
+   public-snapshot checks for secret removal, endpoint preservation and unchanged
+   flags. Retained raw UTF-8/NUL bytes, WEP shared flags, temporary/unspecified VPN
+   policy, precedence, missing/duplicate-peer and no-mutation-on-error assertions.
+4. Two redundant schema forwarders become re-exports with the same crate-local
+   names. after/schema-callsites.txt and strict Clippy cover their consumers.
+   These were forwarders, not proven unreachable code; no dead-code removal claim.
+No acknowledgement, owner/version fence, validation, retry, lease, bounds, policy,
+security or persistence guard was removed. Transport/CLI/protocol APIs are intact.
+
+Comparable raw measurements                       before          after
+merge_secrets cognitive / cyclomatic               15 / 18         7 / 11
+merge_secrets Halstead effort                      40,283.57       14,022.04
+new peer-merge helper cognitive/cyclomatic/effort   absent          1/7/10,707.17
+COMBINED merge cognitive/cyclomatic/effort          15/18/40,283.57  8/18/24,729.21
+credential production functions cognitive/cyc      70 / 148        65 / 154
+credential production function Halstead sum        278,381.83      268,010.18
+preserving-writer test cognitive/cyc               44 / 21         23 / 25
+preserving-writer test Halstead effort             119,056.77      94,689.97
+all src function cognitive sum                    2,023           1,998
+all src function cyclomatic sum                   6,099           6,110
+all src function Halstead sum                      19,093,802.87   19,084,938.59
+duplicate groups AST / token                       6 / 114         6 / 114
+duplicated nonblank lines / percent                1,692 / 4.49%   1,688 / 4.48%
+credential production .clone / .try_clone calls     2 / 3           2 / 1
+reliability findings / test unwrap findings         446 / 389       439 / 382
+production expect findings                         11              11
+escape findings / unsafe / suppressions             9 glob / 0 / 0  9 glob / 0 / 0
+credential locality / leverage                     100 / 80        100 / 90
+profile_secrets locality / leverage                100 / 20        100 / 10
+production Rust physical / nonblank LOC             31,659/29,420   31,682/29,441
+test Rust physical / nonblank LOC                   10,137/9,841    10,109/9,812
+total Rust physical LOC                            41,796          41,791
+Rust tests incl. ignored                           118 (4 ignored) 117 (4 ignored)
+static test-quality findings / assertionless        11 / 7          11 / 7
+LLVM covered / total lines                         19173/26009     19188/26018
+LLVM line coverage                                 73.7168%        73.7489%
+
+Tradeoffs: cognitive/effort totals improve, but cyclomatic totals increase 11;
+helper entry points and explicit fallible decoding add counted paths. Combined
+merge cyclomatic stays 18. public_settings cognitive increases 9 -> 11, cyclomatic
+stays 12. Production grows 23 lines; tests shrink 28; net reduction is five lines.
+Copy-call counts/ownership inspection are not allocator measurements or duplicate
+code counts. Leverage is advisory and includes fixture consumers: credential reach
+8 -> 9, profile_secrets reach 2 -> 1. Locality stays unchanged; no broad architecture
+win is claimed. Static test-quality is not executed coverage. LLVM includes test
+code, uses --lib/default ignored handling and rises +0.0322 percentage points;
+there is no production-only, branch, hardware, VM, Quickshell or performance claim.
+
+Exact commands (cwd repository; prefix each Rust/Python command with
+nix develop /home/laufan/Projects/rust-quality-lens --command;
+export CARGO_BUILD_JOBS=2 inside that environment):
+Copy rqlens.toml to target/rqlens-refactor/PHASE/rqlens.toml, changing only
+project_root="../../.." and output_dir="target/rqlens-refactor/PHASE/analysis".
+For PHASE=before before edits, then PHASE=after after final source edits:
+  for producer in hotspots locality leverage clones reliability test-quality escape-hatches; do
+    target/rqlens-refactor/rqlens measure "$producer" --config target/rqlens-refactor/PHASE/rqlens.toml
+  done
+Before used ../rust-quality-lens/target/debug/rqlens at the identical SHA256.
+  cargo test --locked --lib -- --list
+  python3 target/rqlens-refactor/inventory.py target/rqlens-refactor/PHASE
+  cargo llvm-cov --locked --lib --json --output-path target/rqlens-refactor/PHASE/coverage.json
+Final checks:
+  cargo test --locked --lib network_credentials::tests
+  cargo clippy --locked --all-targets -- -D warnings
+  cargo test --locked --all-targets
+  cargo fmt --package nm-daemon -- --check
+  python3 -B -m unittest discover -s tools/tests -v
+  git diff --check
+
+Results: focused credential tests 2 passed; final strict Clippy/fmt/whitespace
+checks pass; Python 8 passed before/after. Baseline coverage rerun 114 passed,
+4 ignored; final all-target tests and coverage each 113 passed, 4 ignored, with
+all three binary targets also passing (zero tests). The first baseline run failed
+waiting for an expiry/finished-activation prompt (113 passed, 1 failed); first final
+full run failed the manual saved native-prompt scenario (112 passed, 1 failed).
+Unchanged-source reruns passed. Both failure logs remain; prompt-test instability
+is unresolved, not hidden or counted as a deterministic pass guarantee.
+
+Framework tracked-file SHA256 inventories identify these concurrent-owner changes:
+  contracts/hyprland-ipc.md
+  crates/shelllist-hyprland/src/address.rs
+  crates/shelllist-hyprland/src/events.rs
+  tests/rqlens-refactor-review.txt
+Core/tokio dependency manifests/sources and Cargo.lock are unchanged; the changed
+hyprland crate is outside this daemon's dependency graph. No framework files were
+edited by this worker. No implementation blocker remains. Remaining ranked work:
+confirmation guard test cognitive 26, temporary-retention test 21, daemon cancel
+13 and application connect orchestration 11; 120 duplicate groups, 11 production
+expects and four environment-dependent ignored cases remain. Similar event-template
+AST findings were not blindly merged across distinct protocol/lifecycle payloads.

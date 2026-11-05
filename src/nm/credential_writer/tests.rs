@@ -5,6 +5,7 @@ use anyhow::Result;
 use zvariant::{OwnedObjectPath, OwnedValue};
 
 use super::*;
+use crate::network_credentials::{flags_key, set_system_owned, set_text};
 use crate::test_support::{TestPeer, workflows::isolated};
 use crate::variant::value_map;
 
@@ -12,6 +13,7 @@ use crate::variant::value_map;
 mod retention_tests;
 
 const PATH: &str = "/test/profile";
+#[derive(Default)]
 struct State {
     public: ConnectionSettings,
     secrets: ConnectionSettings,
@@ -165,18 +167,9 @@ impl Harness {
             )]),
             version: 7,
             nm_version: "1.56.0".into(),
-            dirty: false,
             filename: "/etc/NetworkManager/system-connections/fixture.nmconnection".into(),
-            fail_read: false,
-            fail_write: false,
-            race_read: false,
-            reads: 0,
-            writes: 0,
-            written: None,
-            retention_flags: 0,
             active: true,
-            deleted: false,
-            update_flags: 0,
+            ..State::default()
         }));
         let peer = TestPeer::new(":1.0", ":1.1");
         peer.server
@@ -204,10 +197,7 @@ impl Harness {
         let mut edit = self
             .nm
             .begin_credential_edit(&OwnedObjectPath::try_from(PATH)?)?;
-        edit.settings
-            .get_mut("802-1x")
-            .unwrap()
-            .insert("password".into(), owned_value("replacement")?);
+        set_text(&mut edit.settings, "802-1x", "password", "replacement")?;
         Ok(edit)
     }
 }
@@ -237,67 +227,62 @@ fn preserving_writer_rejects_races_staged_edits_unknown_schemas_and_unreadable_s
                 "unvalidated-version",
             ] {
                 let h = Harness::new()?;
-                if matches!(failure, "dirty" | "temporary" | "zero-version") {
-                    let mut s = h.state.lock().unwrap();
-                    s.dirty = failure == "dirty";
-                    if failure == "temporary" {
-                        s.filename = "/run/NetworkManager/system-connections/temporary".into();
-                    }
-                    if failure == "zero-version" {
-                        s.version = 0;
-                    }
-                    drop(s);
-                    assert!(h.edit().is_err(), "{failure}");
-                    assert_eq!(h.state.lock().unwrap().writes, 0);
-                    continue;
-                }
-                if matches!(failure, "ownership-only" | "not-saved") {
-                    h.state
-                        .lock()
-                        .unwrap()
-                        .public
-                        .get_mut("802-1x")
-                        .unwrap()
-                        .insert(
-                            "password-flags".into(),
-                            owned_value(if failure == "not-saved" { 2u32 } else { 1u32 })?,
-                        );
-                }
-                let mut edit = h.edit()?;
                 {
                     let mut s = h.state.lock().unwrap();
-                    s.fail_read = failure == "read";
-                    s.fail_write = failure == "write";
-                    s.race_read = failure == "race";
-                    if failure == "unvalidated-version" {
-                        s.nm_version = "1.60.0".into();
-                    }
-                    if failure == "stale" {
-                        s.version += 1;
-                    }
-                    if failure == "uuid" {
-                        edit.settings
-                            .get_mut("connection")
-                            .unwrap()
-                            .insert("uuid".into(), owned_value("wrong-uuid")?);
-                    }
-                    if failure == "unknown-secret" {
-                        s.secrets.insert(
-                            "future-setting".into(),
-                            value_map([("new-secret", "keep-this-too".into())])?,
-                        );
-                    }
-                    if matches!(failure, "ownership-only" | "not-saved") {
-                        edit.settings
-                            .get_mut("802-1x")
-                            .unwrap()
-                            .insert("password-flags".into(), owned_value(0u32)?);
-                        if failure == "ownership-only" {
-                            edit.settings.get_mut("802-1x").unwrap().remove("password");
+                    match failure {
+                        "dirty" => s.dirty = true,
+                        "temporary" => {
+                            s.filename = "/run/NetworkManager/system-connections/temporary".into()
                         }
+                        "zero-version" => s.version = 0,
+                        "ownership-only" | "not-saved" => {
+                            s.public
+                                .get_mut("802-1x")
+                                .context("fixture enterprise")?
+                                .insert(
+                                    "password-flags".into(),
+                                    owned_value(if failure == "not-saved" { 2u32 } else { 1u32 })?,
+                                );
+                        }
+                        _ => {}
                     }
                 }
-                let result = h.nm.commit_credential_edit(edit, true);
+                let result = h.edit().and_then(|mut edit| {
+                    {
+                        let mut s = h.state.lock().unwrap();
+                        s.fail_read = failure == "read";
+                        s.fail_write = failure == "write";
+                        s.race_read = failure == "race";
+                        match failure {
+                            "unvalidated-version" => s.nm_version = "1.60.0".into(),
+                            "stale" => s.version += 1,
+                            "uuid" => {
+                                edit.settings
+                                    .get_mut("connection")
+                                    .context("fixture connection")?
+                                    .insert("uuid".into(), owned_value("wrong-uuid")?);
+                            }
+                            "unknown-secret" => {
+                                s.secrets.insert(
+                                    "future-setting".into(),
+                                    value_map([("new-secret", "keep-this-too".into())])?,
+                                );
+                            }
+                            "ownership-only" | "not-saved" => {
+                                let section = edit
+                                    .settings
+                                    .get_mut("802-1x")
+                                    .context("fixture enterprise")?;
+                                section.insert("password-flags".into(), owned_value(0u32)?);
+                                if failure == "ownership-only" {
+                                    section.remove("password");
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    h.nm.commit_credential_edit(edit, true)
+                });
                 let s = h.state.lock().unwrap();
                 if failure == "none" {
                     result?;
@@ -332,24 +317,21 @@ fn policy_preserves_not_required_and_blocks_ambiguous_shared_wep_conversion() ->
     ] {
         let original = ConnectionSettings::from([(
             section.into(),
-            HashMap::from([(
-                crate::network_credentials::flags_key(key),
-                owned_value(policy)?,
-            )]),
+            value_map([(flags_key(key).as_str(), policy.into())])?,
         )]);
         let mut edited = original.clone();
-        crate::network_credentials::set_text(&mut edited, section, key, "synthetic")?;
-        edited.get_mut(section).unwrap().insert(
-            crate::network_credentials::flags_key(key),
-            owned_value(0u32)?,
-        );
+        set_text(&mut edited, section, key, "synthetic")?;
+        edited
+            .get_mut(section)
+            .unwrap()
+            .insert(flags_key(key), owned_value(0u32)?);
         assert!(validate_policy_changes(&original, &edited).is_err());
     }
     let mut settings = ConnectionSettings::from([(
         "802-1x".into(),
         value_map([("password-flags", 5u32.into())])?,
     )]);
-    crate::network_credentials::set_system_owned(&mut settings, "802-1x", "password")?;
+    set_system_owned(&mut settings, "802-1x", "password")?;
     assert_eq!(flags(&settings, "802-1x", "password")?, 4);
     Ok(())
 }

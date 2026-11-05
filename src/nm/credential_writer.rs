@@ -176,10 +176,10 @@ fn preserve_secrets(
         );
         *version = expected;
         validate_secret_reply(&secrets)?;
-        merge_secrets(settings, &secrets)?;
+        merge_secrets(settings, secrets)?;
     }
     // Overlay only the intended secrets, never public/nested peer settings.
-    merge_secrets(settings, &patch)
+    merge_secrets(settings, patch)
 }
 
 fn validate_secret_reply(reply: &ConnectionSettings) -> Result<()> {

@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Context, Result, ensure};
 use zvariant::OwnedValue;
 
-use crate::variant::{ConnectionSettings, owned_value, setting, setting_text, value_string_map};
+use crate::variant::{
+    ConnectionSettings, owned_value, setting, setting_text, value_dicts, value_string_map,
+};
 
 pub(crate) const AGENT_OWNED: u32 = 1;
 pub(crate) const NOT_SAVED: u32 = 2;
@@ -31,11 +33,11 @@ pub(crate) fn values(settings: &ConnectionSettings) -> Result<Vec<(String, Strin
                     .into_iter()
                     .map(|(key, value)| (key.into(), value.into())),
             ),
-            "wireguard" => secrets.extend(peers(data)?.iter().filter_map(|peer| {
-                let public = setting::<&str>(peer, "public-key")?;
+            "wireguard" => secrets.extend(peer_dicts(data)?.into_iter().filter_map(|peer| {
+                let public = peer.get::<_, &str>(&"public-key").ok()??;
                 Some((
                     format!("peers.{public}.preshared-key"),
-                    setting::<&str>(peer, "preshared-key")?.into(),
+                    peer.get::<_, &str>(&"preshared-key").ok()??.into(),
                 ))
             })),
             _ => {}
@@ -55,27 +57,23 @@ pub(crate) fn values(settings: &ConnectionSettings) -> Result<Vec<(String, Strin
 pub(crate) fn public_settings(settings: &ConnectionSettings) -> Result<ConnectionSettings> {
     let mut public = settings.clone();
     for (section, data) in &mut public {
-        for key in known_keys(section) {
-            data.remove(*key);
+        let metadata = match section.as_str() {
+            "vpn" => Some("secrets"),
+            "connection" => Some("timestamp"),
+            "802-11-wireless" => Some("seen-bssids"),
+            _ => None,
+        };
+        for key in known_keys(section).iter().copied().chain(metadata) {
+            data.remove(key);
         }
-        match section.as_str() {
-            "wireguard" if data.contains_key("peers") => {
-                let mut peers = peers(data)?;
-                for peer in &mut peers {
-                    peer.remove("preshared-key");
-                }
-                data.insert("peers".into(), owned_value(peers)?);
+        if section == "wireguard"
+            && let Some(value) = data.remove("peers")
+        {
+            let mut peers: Vec<HashMap<String, OwnedValue>> = value.try_into()?;
+            for peer in &mut peers {
+                peer.remove("preshared-key");
             }
-            "vpn" => {
-                data.remove("secrets");
-            }
-            "connection" => {
-                data.remove("timestamp");
-            }
-            "802-11-wireless" => {
-                data.remove("seen-bssids");
-            }
-            _ => {}
+            data.insert("peers".into(), owned_value(peers)?);
         }
     }
     Ok(public)
@@ -224,13 +222,13 @@ pub(crate) fn flag_inventory(settings: &ConnectionSettings) -> Result<BTreeMap<S
     }
     if let Some(section) = settings.get("wireguard") {
         flags.extend(
-            peers(section)?
-                .iter()
+            peer_dicts(section)?
+                .into_iter()
                 .enumerate()
                 .filter_map(|(index, peer)| {
                     Some((
                         format!("wireguard.peers[{index}].preshared-key-flags"),
-                        setting::<u32>(peer, "preshared-key-flags")?,
+                        peer.get::<_, u32>(&"preshared-key-flags").ok()??,
                     ))
                 }),
         );
@@ -248,6 +246,15 @@ pub(crate) fn flags_key(key: &str) -> String {
 
 fn peer_key(key: &str) -> Option<&str> {
     key.strip_prefix("peers.")?.strip_suffix(".preshared-key")
+}
+
+/// Read-only inspection borrows peer dictionaries, including credential values.
+/// As with owned decoding, malformed keys or containers reject the entire array.
+fn peer_dicts(section: &HashMap<String, OwnedValue>) -> Result<Vec<&zvariant::Dict<'_, '_>>> {
+    section.get("peers").map_or_else(
+        || Ok(Vec::new()),
+        |value| value_dicts(value).context("invalid WireGuard peers"),
+    )
 }
 
 fn peers(section: &HashMap<String, OwnedValue>) -> Result<Vec<HashMap<String, OwnedValue>>> {
@@ -273,6 +280,20 @@ fn unique_peer<'a>(
         "WireGuard peer missing or ambiguous"
     );
     Ok(peer)
+}
+
+/// Decode and validate before replacing the array, so invalid identities never
+/// change the destination. All peer writes preserve unrelated public fields.
+fn set_peer_value(
+    values: &mut HashMap<String, OwnedValue>,
+    public: &str,
+    key: &str,
+    value: OwnedValue,
+) -> Result<()> {
+    let mut peers = peers(values)?;
+    unique_peer(&mut peers, public)?.insert(key.into(), value);
+    values.insert("peers".into(), owned_value(peers)?);
+    Ok(())
 }
 
 fn extend_vpn_map<'a>(
@@ -351,10 +372,12 @@ pub(crate) fn set_system_owned(
     } else if section == "wireguard"
         && let Some(public_key) = peer_key(key)
     {
-        let mut peers = peers(values)?;
-        unique_peer(&mut peers, public_key)?
-            .insert("preshared-key-flags".into(), owned_value(flags)?);
-        values.insert("peers".into(), owned_value(peers)?);
+        set_peer_value(
+            values,
+            public_key,
+            "preshared-key-flags",
+            owned_value(flags)?,
+        )?;
     } else {
         values.insert(flags_key(key), owned_value(flags)?);
     }
@@ -379,9 +402,7 @@ pub(crate) fn set_text(
         let values = settings
             .get_mut(section)
             .ok_or_else(|| anyhow::anyhow!("WireGuard setting missing"))?;
-        let mut peers = peers(values)?;
-        unique_peer(&mut peers, public_key)?.insert("preshared-key".into(), owned_value(value)?);
-        values.insert("peers".into(), owned_value(peers)?);
+        set_peer_value(values, public_key, "preshared-key", owned_value(value)?)?;
     } else {
         ensure!(
             known_keys(section).contains(&key),
@@ -412,11 +433,12 @@ pub(crate) fn text(settings: &ConnectionSettings, section: &str, key: &str) -> O
     if section == "wireguard"
         && let Some(public_key) = peer_key(key)
     {
-        let peers = peers(values).ok()?;
-        return peers
-            .iter()
-            .find(|p| setting::<&str>(p, "public-key") == Some(public_key))
-            .and_then(|p| setting::<&str>(p, "preshared-key"))
+        return peer_dicts(values)
+            .ok()?
+            .into_iter()
+            .find(|peer| peer.get::<_, &str>(&"public-key").ok().flatten() == Some(public_key))?
+            .get::<_, &str>(&"preshared-key")
+            .ok()?
             .map(str::to_string);
     }
     crate::variant::setting_text(values, key)
@@ -426,38 +448,39 @@ pub(crate) fn text(settings: &ConnectionSettings, section: &str, key: &str) -> O
 /// or replace the peers array. Unknown peer identities abort rather than drop data.
 pub(crate) fn merge_secrets(
     target: &mut ConnectionSettings,
-    source: &ConnectionSettings,
+    source: ConnectionSettings,
 ) -> Result<()> {
     for (section, values) in source {
-        let Some(dest) = target.get_mut(section) else {
+        let Some(dest) = target.get_mut(&section) else {
             continue;
         };
-        for key in known_keys(section) {
-            if let Some(value) = values.get(*key) {
-                dest.insert((*key).into(), value.try_clone()?);
+        for (key, value) in values {
+            match (section.as_str(), key.as_str()) {
+                ("vpn", "secrets") => {
+                    let incoming = value_string_map(&value).context("invalid VPN secrets")?;
+                    extend_vpn_map(dest, "secrets", incoming)?;
+                }
+                ("wireguard", "peers") => merge_peer_secrets(dest, value)?,
+                (_, name) if known_keys(&section).contains(&name) => {
+                    dest.insert(key, value);
+                }
+                _ => {}
             }
-        }
-        if section == "vpn"
-            && let Some(value) = values.get("secrets")
-        {
-            let incoming =
-                value_string_map(value).ok_or_else(|| anyhow::anyhow!("invalid VPN secrets"))?;
-            extend_vpn_map(dest, "secrets", incoming)?;
-        }
-        if section == "wireguard" && values.contains_key("peers") {
-            let mut target_peers = peers(dest)?;
-            for peer in peers(values)? {
-                let Some(secret) = peer.get("preshared-key") else {
-                    continue;
-                };
-                let public = setting::<&str>(&peer, "public-key")
-                    .ok_or_else(|| anyhow::anyhow!("peer identity missing"))?;
-                let dest = unique_peer(&mut target_peers, public)?;
-                dest.insert("preshared-key".into(), secret.try_clone()?);
-            }
-            dest.insert("peers".into(), owned_value(target_peers)?);
         }
     }
+    Ok(())
+}
+
+fn merge_peer_secrets(dest: &mut HashMap<String, OwnedValue>, incoming: OwnedValue) -> Result<()> {
+    let mut target_peers = peers(dest)?;
+    for mut peer in Vec::<HashMap<String, OwnedValue>>::try_from(incoming)? {
+        let Some(secret) = peer.remove("preshared-key") else {
+            continue;
+        };
+        let public = setting::<&str>(&peer, "public-key").context("peer identity missing")?;
+        unique_peer(&mut target_peers, public)?.insert("preshared-key".into(), secret);
+    }
+    dest.insert("peers".into(), owned_value(target_peers)?);
     Ok(())
 }
 
@@ -470,7 +493,12 @@ pub(crate) fn has_secrets(settings: &ConnectionSettings) -> bool {
                     .and_then(value_string_map)
                     .is_some_and(|s| !s.is_empty()))
             || (section == "wireguard"
-                && peers(values).is_ok_and(|p| p.iter().any(|p| p.contains_key("preshared-key"))))
+                && peer_dicts(values).is_ok_and(|peers| {
+                    peers.iter().any(|peer| {
+                        peer.get::<_, &zvariant::Value>(&"preshared-key")
+                            .is_ok_and(|value| value.is_some())
+                    })
+                }))
     })
 }
 
@@ -478,9 +506,10 @@ pub(crate) fn has_secrets(settings: &ConnectionSettings) -> bool {
 mod tests {
     use super::{
         flag_inventory, flags, merge_secrets, peers, set_system_owned, set_text, text, values,
+        wireless_secret_key,
     };
     use crate::variant::value_map;
-    use crate::variant::{ConnectionSettings, owned_value, setting};
+    use crate::variant::{ConnectionSettings, setting};
     use anyhow::Result;
     use std::collections::HashMap;
 
@@ -488,7 +517,7 @@ mod tests {
     fn wireless_defaults_preserve_explicit_hints_and_wep_precedence() -> Result<()> {
         const WIFI: &str = "802-11-wireless-security";
         assert_eq!(
-            super::wireless_secret_key(&ConnectionSettings::new(), WIFI, &[]),
+            wireless_secret_key(&ConnectionSettings::new(), WIFI, &[]),
             None
         );
         for (management, auth, index, expected) in [
@@ -503,20 +532,32 @@ mod tests {
             crate::variant::insert_optional_value(&mut section, "wep-tx-keyidx", index)?;
             let settings = ConnectionSettings::from([(WIFI.into(), section)]);
             assert_eq!(
-                super::wireless_secret_key(&settings, WIFI, &[]).as_deref(),
+                wireless_secret_key(&settings, WIFI, &[]).as_deref(),
                 expected
             );
-            assert_eq!(
-                super::wireless_secret_key(&settings, WIFI, &["psk".into()]),
-                None
-            );
-            assert_eq!(super::wireless_secret_key(&settings, "vpn", &[]), None);
+            assert_eq!(wireless_secret_key(&settings, WIFI, &["psk".into()]), None);
+            assert_eq!(wireless_secret_key(&settings, "vpn", &[]), None);
         }
         Ok(())
     }
 
+    fn peer(public: &str) -> Result<HashMap<String, zvariant::OwnedValue>> {
+        value_map([
+            ("public-key", public.into()),
+            ("endpoint", "keep-endpoint".into()),
+            ("preshared-key-flags", 1u32.into()),
+        ])
+    }
+
+    fn with_peers(peers: Vec<HashMap<String, zvariant::OwnedValue>>) -> Result<ConnectionSettings> {
+        Ok(ConnectionSettings::from([(
+            "wireguard".into(),
+            value_map([("peers", peers.into())])?,
+        )]))
+    }
+
     #[test]
-    fn schema_handles_shared_nested_and_temporary_flags() -> Result<()> {
+    fn credential_updates_preserve_policy_public_fields_and_reject_invalid_peers() -> Result<()> {
         let mut s = ConnectionSettings::from([
             (
                 "802-11-wireless-security".into(),
@@ -524,22 +565,14 @@ mod tests {
             ),
             (
                 "vpn".into(),
-                HashMap::from([(
-                    "data".into(),
-                    owned_value(HashMap::from([("password-flags", "1"), ("otp-flags", "2")]))?,
-                )]),
-            ),
-            (
-                "wireguard".into(),
-                HashMap::from([(
-                    "peers".into(),
-                    owned_value(vec![value_map([
-                        ("public-key", "peer".into()),
-                        ("preshared-key-flags", 1u32.into()),
-                    ])?])?,
-                )]),
+                value_map([(
+                    "data",
+                    HashMap::from([("password-flags", "1"), ("otp-flags", "2")]).into(),
+                )])?,
             ),
         ]);
+        s.extend(with_peers(vec![peer("peer")?])?);
+        set_text(&mut s, "wireguard", "private-key", "keep-private")?;
         for (section, key) in [
             ("802-11-wireless-security", "wep-key2"),
             ("vpn", "password"),
@@ -554,7 +587,7 @@ mod tests {
         assert!(set_system_owned(&mut s, "vpn", "otp").is_err());
         assert!(flags(&s, "vpn", "unspecified").is_err());
         assert!(!s["802-11-wireless-security"].contains_key("wep-key2-flags"));
-        assert_eq!(values(&s)?.len(), 3);
+        assert_eq!(values(&s)?.len(), 4);
         let raw = "nul\0é";
         set_text(&mut s, "802-1x", "password-raw", raw)?;
         assert_eq!(
@@ -565,63 +598,48 @@ mod tests {
         assert_eq!(inventory["wireguard.peers[0].preshared-key-flags"], 0);
         assert_eq!(inventory["vpn.data.otp-flags"], 2);
         set_text(&mut s, "vpn", "other", "keep")?;
-        let mut incoming = ConnectionSettings::new();
+        let mut incoming = with_peers(vec![value_map([
+            ("public-key", "peer".into()),
+            ("preshared-key", "incoming".into()),
+            ("endpoint", "wrong".into()),
+        ])?])?;
         set_text(&mut incoming, "vpn", "password", "replacement")?;
-        merge_secrets(&mut s, &incoming)?;
-        assert_eq!(text(&s, "vpn", "password").as_deref(), Some("replacement"));
-        assert_eq!(text(&s, "vpn", "other").as_deref(), Some("keep"));
+        merge_secrets(&mut s, incoming)?;
+        for (section, key, expected) in [
+            ("vpn", "password", "replacement"),
+            ("vpn", "other", "keep"),
+            ("wireguard", "private-key", "keep-private"),
+            ("wireguard", "peers.peer.preshared-key", "incoming"),
+        ] {
+            assert_eq!(text(&s, section, key).as_deref(), Some(expected));
+        }
         assert_eq!(flags(&s, "vpn", "otp")?, 2);
-        Ok(())
-    }
-
-    #[test]
-    fn merging_peer_secrets_preserves_configuration_and_other_credentials() -> Result<()> {
-        let mut target = ConnectionSettings::from([(
-            "wireguard".into(),
-            HashMap::from([
-                ("private-key".into(), owned_value("keep-private")?),
-                (
-                    "peers".into(),
-                    owned_value(vec![value_map([
-                        ("public-key", "peer".into()),
-                        ("endpoint", "keep-endpoint".into()),
-                    ])?])?,
-                ),
-            ]),
-        )]);
-        let source = ConnectionSettings::from([(
-            "wireguard".into(),
-            HashMap::from([(
-                "peers".into(),
-                owned_value(vec![value_map([
-                    ("public-key", "peer".into()),
-                    ("preshared-key", "incoming".into()),
-                    ("endpoint", "wrong".into()),
-                ])?])?,
-            )]),
-        )]);
-        merge_secrets(&mut target, &source)?;
-        assert_eq!(
-            text(&target, "wireguard", "private-key").as_deref(),
-            Some("keep-private")
-        );
-        let p = peers(&target["wireguard"])?;
+        let p = peers(&s["wireguard"])?;
         assert_eq!(setting::<&str>(&p[0], "endpoint"), Some("keep-endpoint"));
+        let public = super::public_settings(&s)?;
+        assert!(!super::has_secrets(&public));
+        assert!(values(&public)?.is_empty());
+        assert_eq!(flag_inventory(&public)?, flag_inventory(&s)?);
         assert_eq!(
-            text(&target, "wireguard", "peers.peer.preshared-key").as_deref(),
-            Some("incoming")
+            setting::<&str>(&peers(&public["wireguard"])?[0], "endpoint"),
+            Some("keep-endpoint")
         );
-        let key = "peers.peer.preshared-key";
-        for invalid in [Vec::new(), vec![p[0].clone(), p[0].clone()]] {
-            target
-                .get_mut("wireguard")
-                .unwrap()
-                .insert("peers".into(), owned_value(invalid)?);
+        for invalid in [
+            Vec::new(),
+            vec![peer("peer")?, peer("peer")?],
+            vec![peer("other")?],
+        ] {
+            let mut target = with_peers(invalid)?;
             let before = target.clone();
+            let source = with_peers(vec![value_map([
+                ("public-key", "peer".into()),
+                ("preshared-key", "no".into()),
+            ])?])?;
+            let key = "peers.peer.preshared-key";
             assert!(flags(&target, "wireguard", key).is_err());
             assert!(set_system_owned(&mut target, "wireguard", key).is_err());
             assert!(set_text(&mut target, "wireguard", key, "no").is_err());
-            assert!(merge_secrets(&mut target, &source).is_err());
+            assert!(merge_secrets(&mut target, source).is_err());
             assert_eq!(
                 target, before,
                 "invalid peer identity must not mutate settings"
